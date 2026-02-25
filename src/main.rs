@@ -7,32 +7,23 @@
 //! A userspace daemon that exposes a PTY serial device for KISS protocol
 //! communication and drives an SX1262 LoRa radio via Linux spidev + GPIO.
 
-mod config;
-mod csma;
-mod error;
-mod gpio;
-mod kiss;
-mod packet;
-mod pty;
-mod radio;
-mod spi;
-
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use log::{debug, error, info, warn};
 
-use config::Config;
-use csma::CsmaState;
-use gpio::RadioGpio;
-use kiss::{KissCommand, KissParser};
-use packet::{PacketQueue, RxReassembler};
-use pty::PtyPair;
-use radio::sx126x::Sx126x;
-use radio::types::TcxoVoltage;
-use radio::Radio;
-use spi::SpiDevice;
+use rnode_linux::config::Config;
+use rnode_linux::csma::{self, CsmaState};
+use rnode_linux::error;
+use rnode_linux::gpio::RadioGpio;
+use rnode_linux::kiss::{self, KissCommand, KissParser};
+use rnode_linux::packet::{self, PacketQueue, RxReassembler};
+use rnode_linux::pty::PtyPair;
+use rnode_linux::radio::sx126x::Sx126x;
+use rnode_linux::radio::types::TcxoVoltage;
+use rnode_linux::radio::Radio;
+use rnode_linux::spi::SpiDevice;
 
 #[derive(Parser)]
 #[command(name = "rnode-linux", about = "RNode Linux LoRa daemon")]
