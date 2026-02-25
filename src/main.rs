@@ -79,18 +79,18 @@ fn run(config_path: &str) -> error::Result<()> {
 
     let mut radio = Sx126x::new(spi, gpio, config.radio.enable_tcxo, tcxo_voltage, true);
 
-    // --- Load cached radio config (simulates EEPROM) ---
+    // --- Load saved radio settings (simulates EEPROM) ---
     let mut radio_params = RadioParams::new();
     let mut radio_online = false;
 
-    if let Some(ref cache_path) = config.radio.cache_file {
-        if let Some(cached) = rnode_linux::config::CachedRadioConfig::load(cache_path) {
+    if let Some(ref settings_path) = config.radio.radio_settings {
+        if let Some(settings) = rnode_linux::config::RadioSettings::load(settings_path) {
             info!(
-                "Loaded cached radio config: freq={} Hz, bw={} Hz, sf={}, cr={}, txp={} dBm",
-                cached.frequency, cached.bandwidth, cached.spreading_factor,
-                cached.coding_rate, cached.tx_power
+                "Loaded radio settings: freq={} Hz, bw={} Hz, sf={}, cr={}, txp={} dBm",
+                settings.frequency, settings.bandwidth, settings.spreading_factor,
+                settings.coding_rate, settings.tx_power
             );
-            radio_params = RadioParams::from_cached(&cached);
+            radio_params = RadioParams::from_settings(&settings);
 
             if !radio_params.is_locked() {
                 radio.begin(radio_params.frequency)?;
@@ -104,15 +104,15 @@ fn run(config_path: &str) -> error::Result<()> {
                 }
                 radio.receive()?;
                 radio_online = true;
-                info!("Radio online (loaded from cache)");
+                info!("Radio online (loaded from settings)");
             } else {
-                warn!("Cached config has incomplete parameters — radio stays offline");
+                warn!("Saved settings have incomplete parameters — radio stays offline");
             }
         } else {
-            info!("No cached radio config found — radio offline, awaiting KISS configuration");
+            info!("No saved radio settings found — radio offline, awaiting KISS configuration");
         }
     } else {
-        info!("No cache_file configured — radio offline, awaiting KISS configuration");
+        info!("No radio_settings path configured — radio offline, awaiting KISS configuration");
     }
 
     // --- Create PTY ---
@@ -413,24 +413,24 @@ fn handle_command(
             debug!("Host disconnected (CMD_LEAVE)");
         }
         KissCommand::ConfSave => {
-            if let Some(ref cache_path) = config.radio.cache_file {
-                let cached = radio_params.to_cached();
-                match cached.save(cache_path) {
-                    Ok(()) => info!("Radio config saved to {}", cache_path),
-                    Err(e) => warn!("Failed to save radio config: {}", e),
+            if let Some(ref settings_path) = config.radio.radio_settings {
+                let settings = radio_params.to_settings();
+                match settings.save(settings_path) {
+                    Ok(()) => info!("Radio settings saved to {}", settings_path),
+                    Err(e) => warn!("Failed to save radio settings: {}", e),
                 }
             } else {
-                warn!("CMD_CONF_SAVE received but no cache_file configured");
+                warn!("CMD_CONF_SAVE received but no radio_settings path configured");
             }
         }
         KissCommand::ConfDelete => {
-            if let Some(ref cache_path) = config.radio.cache_file {
-                match rnode_linux::config::CachedRadioConfig::delete(cache_path) {
-                    Ok(()) => info!("Radio config cache deleted"),
-                    Err(e) => warn!("Failed to delete radio config cache: {}", e),
+            if let Some(ref settings_path) = config.radio.radio_settings {
+                match rnode_linux::config::RadioSettings::delete(settings_path) {
+                    Ok(()) => info!("Radio settings deleted"),
+                    Err(e) => warn!("Failed to delete radio settings: {}", e),
                 }
             } else {
-                warn!("CMD_CONF_DELETE received but no cache_file configured");
+                warn!("CMD_CONF_DELETE received but no radio_settings path configured");
             }
         }
         KissCommand::StAirlock(at) => {

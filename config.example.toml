@@ -18,12 +18,12 @@ enable_tcxo = false
 # tcxo_voltage options: "1.6V", "1.7V", "1.8V", "2.2V", "2.4V", "2.7V", "3.0V", "3.3V"
 # tcxo_voltage = "3.3V"
 
-# Path to cached radio link config (simulates EEPROM).
+# Path to saved radio settings (simulates EEPROM).
 # Radio link params (frequency, bandwidth, SF, CR, TX power) are configured
 # via KISS commands and persisted here with CMD_CONF_SAVE (0x53).
 # If this file exists at startup, the radio auto-configures and goes online.
 # If absent, the radio starts offline and waits for KISS configuration.
-cache_file = "/var/lib/rnode/radio_cache.toml"
+radio_settings = "/var/lib/rnode/radio_settings.toml"
 
 [pty]
 # Symlink created pointing to the PTY slave device

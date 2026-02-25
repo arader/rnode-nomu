@@ -132,9 +132,9 @@ pub enum KissCommand {
     Platform,
     /// Query board.
     Board,
-    /// Save radio config to cache (like EEPROM).
+    /// Save radio config to persistent settings (like EEPROM).
     ConfSave,
-    /// Delete cached radio config.
+    /// Delete saved radio settings.
     ConfDelete,
     /// Reset device.
     Reset,

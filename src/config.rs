@@ -48,8 +48,8 @@ pub struct RadioConfig {
     #[serde(default)]
     pub enable_tcxo: bool,
     pub tcxo_voltage: Option<String>,
-    /// Path to the cached radio config file (simulates EEPROM).
-    pub cache_file: Option<String>,
+    /// Path to the saved radio settings file (simulates EEPROM).
+    pub radio_settings: Option<String>,
 }
 
 fn default_preamble() -> u16 {
@@ -108,12 +108,12 @@ impl Config {
     }
 }
 
-// --- Cached radio config (simulates EEPROM) ---
+// --- Saved radio settings (simulates EEPROM) ---
 
-/// Radio link parameters persisted to a cache file, analogous to
+/// Radio link parameters persisted to a settings file, analogous to
 /// RNode_Firmware's EEPROM-saved configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CachedRadioConfig {
+pub struct RadioSettings {
     pub frequency: u32,
     pub bandwidth: u32,
     pub spreading_factor: u8,
@@ -121,22 +121,22 @@ pub struct CachedRadioConfig {
     pub tx_power: i8,
 }
 
-impl CachedRadioConfig {
-    /// Load cached config from a TOML file. Returns None if file doesn't exist
+impl RadioSettings {
+    /// Load saved settings from a TOML file. Returns None if file doesn't exist
     /// or contains invalid data.
     pub fn load(path: &str) -> Option<Self> {
         let content = std::fs::read_to_string(path).ok()?;
         toml::from_str(&content).ok()
     }
 
-    /// Save cached config to a TOML file.
+    /// Save radio settings to a TOML file.
     pub fn save(&self, path: &str) -> std::io::Result<()> {
         let content = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         std::fs::write(path, content)
     }
 
-    /// Delete the cached config file.
+    /// Delete the saved radio settings file.
     pub fn delete(path: &str) -> std::io::Result<()> {
         match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -173,14 +173,14 @@ impl RadioParams {
         }
     }
 
-    /// Load from a cached config.
-    pub fn from_cached(cached: &CachedRadioConfig) -> Self {
+    /// Load from saved radio settings.
+    pub fn from_settings(settings: &RadioSettings) -> Self {
         Self {
-            frequency: cached.frequency,
-            bandwidth: cached.bandwidth,
-            spreading_factor: cached.spreading_factor,
-            coding_rate: cached.coding_rate,
-            tx_power: cached.tx_power,
+            frequency: settings.frequency,
+            bandwidth: settings.bandwidth,
+            spreading_factor: settings.spreading_factor,
+            coding_rate: settings.coding_rate,
+            tx_power: settings.tx_power,
         }
     }
 
@@ -194,9 +194,9 @@ impl RadioParams {
             || self.tx_power == 0x7F
     }
 
-    /// Convert to a CachedRadioConfig for persistence.
-    pub fn to_cached(&self) -> CachedRadioConfig {
-        CachedRadioConfig {
+    /// Convert to RadioSettings for persistence.
+    pub fn to_settings(&self) -> RadioSettings {
+        RadioSettings {
             frequency: self.frequency,
             bandwidth: self.bandwidth,
             spreading_factor: self.spreading_factor,

@@ -1,4 +1,4 @@
-use rnode_linux::config::{CachedRadioConfig, Config, RadioParams};
+use rnode_linux::config::{Config, RadioParams, RadioSettings};
 
 const FULL_CONFIG: &str = r#"
 [spi]
@@ -17,7 +17,7 @@ preamble_symbols = 20
 enable_crc = false
 enable_tcxo = true
 tcxo_voltage = "1.8V"
-cache_file = "/tmp/test_rnode_cache.toml"
+radio_settings = "/tmp/test_rnode_settings.toml"
 
 [pty]
 symlink = "/tmp/test_rnode"
@@ -42,7 +42,7 @@ fn parse_full_config() {
     assert!(!config.radio.enable_crc);
     assert!(config.radio.enable_tcxo);
     assert_eq!(config.radio.tcxo_voltage.as_deref(), Some("1.8V"));
-    assert_eq!(config.radio.cache_file.as_deref(), Some("/tmp/test_rnode_cache.toml"));
+    assert_eq!(config.radio.radio_settings.as_deref(), Some("/tmp/test_rnode_settings.toml"));
     assert_eq!(config.pty.symlink.as_deref(), Some("/tmp/test_rnode"));
     assert!(!config.csma.enabled);
     assert_eq!(config.csma.slot_min_ms, 10);
@@ -72,7 +72,7 @@ dio0_line = 6
     assert_eq!(config.radio.preamble_symbols, 18); // default
     assert!(config.radio.enable_crc); // default true
     assert!(!config.radio.enable_tcxo); // default false
-    assert!(config.radio.cache_file.is_none());
+    assert!(config.radio.radio_settings.is_none());
     assert!(config.pty.symlink.is_none());
     // CSMA defaults
     assert!(config.csma.enabled);
@@ -123,48 +123,48 @@ fn load_nonexistent_file_returns_error() {
     assert!(result.is_err());
 }
 
-// --- CachedRadioConfig tests ---
+// --- RadioSettings tests ---
 
 #[test]
-fn cached_config_save_load_roundtrip() {
-    let path = "/tmp/rnode_test_cache_roundtrip.toml";
-    let cached = CachedRadioConfig {
+fn radio_settings_save_load_roundtrip() {
+    let path = "/tmp/rnode_test_settings_roundtrip.toml";
+    let settings = RadioSettings {
         frequency: 868_000_000,
         bandwidth: 250_000,
         spreading_factor: 10,
         coding_rate: 7,
         tx_power: 14,
     };
-    cached.save(path).unwrap();
-    let loaded = CachedRadioConfig::load(path).unwrap();
-    assert_eq!(loaded, cached);
-    CachedRadioConfig::delete(path).unwrap();
+    settings.save(path).unwrap();
+    let loaded = RadioSettings::load(path).unwrap();
+    assert_eq!(loaded, settings);
+    RadioSettings::delete(path).unwrap();
 }
 
 #[test]
-fn cached_config_load_nonexistent_returns_none() {
-    assert!(CachedRadioConfig::load("/tmp/rnode_test_nonexistent_cache.toml").is_none());
+fn radio_settings_load_nonexistent_returns_none() {
+    assert!(RadioSettings::load("/tmp/rnode_test_nonexistent_settings.toml").is_none());
 }
 
 #[test]
-fn cached_config_delete_nonexistent_is_ok() {
-    assert!(CachedRadioConfig::delete("/tmp/rnode_test_nonexistent_delete.toml").is_ok());
+fn radio_settings_delete_nonexistent_is_ok() {
+    assert!(RadioSettings::delete("/tmp/rnode_test_nonexistent_delete.toml").is_ok());
 }
 
 #[test]
-fn cached_config_delete_removes_file() {
-    let path = "/tmp/rnode_test_cache_delete.toml";
-    let cached = CachedRadioConfig {
+fn radio_settings_delete_removes_file() {
+    let path = "/tmp/rnode_test_settings_delete.toml";
+    let settings = RadioSettings {
         frequency: 915_000_000,
         bandwidth: 125_000,
         spreading_factor: 7,
         coding_rate: 5,
         tx_power: 2,
     };
-    cached.save(path).unwrap();
-    assert!(CachedRadioConfig::load(path).is_some());
-    CachedRadioConfig::delete(path).unwrap();
-    assert!(CachedRadioConfig::load(path).is_none());
+    settings.save(path).unwrap();
+    assert!(RadioSettings::load(path).is_some());
+    RadioSettings::delete(path).unwrap();
+    assert!(RadioSettings::load(path).is_none());
 }
 
 // --- RadioParams tests ---
@@ -177,52 +177,52 @@ fn radio_params_new_is_locked() {
 
 #[test]
 fn radio_params_fully_configured_is_not_locked() {
-    let cached = CachedRadioConfig {
+    let settings = RadioSettings {
         frequency: 915_000_000,
         bandwidth: 125_000,
         spreading_factor: 7,
         coding_rate: 5,
         tx_power: 2,
     };
-    let params = RadioParams::from_cached(&cached);
+    let params = RadioParams::from_settings(&settings);
     assert!(!params.is_locked());
 }
 
 #[test]
 fn radio_params_missing_freq_is_locked() {
-    let cached = CachedRadioConfig {
+    let settings = RadioSettings {
         frequency: 0,
         bandwidth: 125_000,
         spreading_factor: 7,
         coding_rate: 5,
         tx_power: 2,
     };
-    let params = RadioParams::from_cached(&cached);
+    let params = RadioParams::from_settings(&settings);
     assert!(params.is_locked());
 }
 
 #[test]
 fn radio_params_missing_bw_is_locked() {
-    let cached = CachedRadioConfig {
+    let settings = RadioSettings {
         frequency: 915_000_000,
         bandwidth: 0,
         spreading_factor: 7,
         coding_rate: 5,
         tx_power: 2,
     };
-    let params = RadioParams::from_cached(&cached);
+    let params = RadioParams::from_settings(&settings);
     assert!(params.is_locked());
 }
 
 #[test]
-fn radio_params_to_cached_roundtrip() {
-    let cached = CachedRadioConfig {
+fn radio_params_to_settings_roundtrip() {
+    let settings = RadioSettings {
         frequency: 868_000_000,
         bandwidth: 250_000,
         spreading_factor: 10,
         coding_rate: 7,
         tx_power: 14,
     };
-    let params = RadioParams::from_cached(&cached);
-    assert_eq!(params.to_cached(), cached);
+    let params = RadioParams::from_settings(&settings);
+    assert_eq!(params.to_settings(), settings);
 }
