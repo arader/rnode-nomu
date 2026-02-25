@@ -149,6 +149,12 @@ enabled = true
 # Slot time range for random backoff (milliseconds).
 slot_min_ms = 24
 slot_max_ms = 100
+
+[logging]
+# Log level: "error", "warn", "info", "debug", "trace"
+# debug: per-packet RX/TX summaries; trace: hex dump of payloads
+# RUST_LOG env var overrides this if set.
+log_level = "info"
 ```
 
 ### Mapping Your Hardware to the Config
@@ -246,8 +252,53 @@ rnode-linux
 # With a specific config file
 rnode-linux --config /etc/rnode/config.toml
 
-# With debug logging
+# Override log level via environment variable
 RUST_LOG=debug rnode-linux --config config.toml
+```
+
+### Logging
+
+The log level is set in `config.toml` under `[logging]`:
+
+```toml
+[logging]
+log_level = "info"
+```
+
+The `RUST_LOG` environment variable overrides the config file if set.
+
+| Level | What's logged |
+|-------|--------------|
+| `error` | Fatal errors only |
+| `warn` | Recoverable issues (TX failures, config problems) |
+| `info` | Startup, radio state changes, config save/delete |
+| `debug` | Per-packet summaries — RX: size, RSSI, SNR; TX: size, frame count |
+| `trace` | Full hex dump of every packet payload |
+
+Module-specific filtering is also supported:
+
+```toml
+# Only show debug for the main event loop, info for everything else
+log_level = "info,rnode_linux=debug"
+
+# Trace radio SPI transactions, debug for packets
+log_level = "info,rnode_linux=debug,rnode_linux::radio=trace"
+```
+
+Example `debug` output:
+
+```
+[INFO ] Radio online (loaded from settings)
+[DEBUG] RX packet #1: 42 bytes, RSSI=-67 dBm, SNR=9.5 dB
+[DEBUG] TX packet: 38 bytes, 1 frame(s), seq=0
+[DEBUG] RX packet #2: 128 bytes, RSSI=-82 dBm, SNR=6.0 dB
+```
+
+Example `trace` output (adds hex payloads):
+
+```
+[DEBUG] RX packet #1: 42 bytes, RSSI=-67 dBm, SNR=9.5 dB
+[TRACE] RX payload: [00, 31, A4, FF, 2B, 8C, ...]
 ```
 
 On startup, the daemon will:

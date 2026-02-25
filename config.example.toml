@@ -33,3 +33,13 @@ symlink = "/tmp/rnode0"
 enabled = true
 slot_min_ms = 24
 slot_max_ms = 100
+
+[logging]
+# Log level filter. Standard levels: "error", "warn", "info", "debug", "trace".
+# - info:  startup messages, radio state changes, config save/delete
+# - debug: per-packet RX/TX summaries (size, RSSI, SNR)
+# - trace: hex dump of every packet payload
+# Module-specific filtering is also supported, e.g.:
+#   "info,rnode_linux=debug" or "warn,rnode_linux::radio=trace"
+# The RUST_LOG environment variable overrides this setting if set.
+log_level = "info"

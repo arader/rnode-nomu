@@ -11,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 
 use rnode_linux::config::{Config, RadioParams};
 use rnode_linux::csma::{self, CsmaState};
@@ -34,19 +34,35 @@ struct Cli {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     let cli = Cli::parse();
 
-    if let Err(e) = run(&cli.config) {
+    // Load config first to get log_level, then initialize logger.
+    // If config loading fails, fall back to default "info" level.
+    let config = match Config::load(&cli.config) {
+        Ok(c) => c,
+        Err(e) => {
+            // Initialize logger with default level to report the error
+            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+                .init();
+            error!("Fatal: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(&config.logging.log_level),
+    )
+    .init();
+
+    info!("Loaded config from {}", cli.config);
+
+    if let Err(e) = run(config) {
         error!("Fatal: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run(config_path: &str) -> error::Result<()> {
-    let config = Config::load(config_path)?;
-    info!("Loaded config from {}", config_path);
+fn run(config: Config) -> error::Result<()> {
 
     // --- Signal handling ---
     setup_signal_handlers();
@@ -191,6 +207,11 @@ fn run(config_path: &str) -> error::Result<()> {
                             frame.truncate(n);
                             stat_rx += 1;
 
+                            let rssi = radio.packet_rssi().unwrap_or(-999);
+                            let snr = radio.packet_snr().unwrap_or(0.0);
+                            debug!("RX packet #{}: {} bytes, RSSI={} dBm, SNR={:.1} dB", stat_rx, n, rssi, snr);
+                            trace!("RX payload: {:02X?}", &frame);
+
                             let payload = if promisc {
                                 Some(rx_reassembler.process_frame_promisc(&frame))
                             } else {
@@ -227,6 +248,9 @@ fn run(config_path: &str) -> error::Result<()> {
                 let seq = tx_queue.next_seq();
                 let frames = packet::prepare_tx_frames(&data, seq);
                 let mut tx_ok = true;
+
+                debug!("TX packet: {} bytes, {} frame(s), seq={}", data.len(), frames.len(), seq);
+                trace!("TX payload: {:02X?}", &data);
 
                 for frame in &frames {
                     let implicit = false;

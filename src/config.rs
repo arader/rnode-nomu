@@ -12,6 +12,8 @@ pub struct Config {
     pub pty: PtyConfig,
     #[serde(default)]
     pub csma: CsmaConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -87,6 +89,28 @@ impl Default for CsmaConfig {
             enabled: true,
             slot_min_ms: default_slot_min(),
             slot_max_ms: default_slot_max(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct LoggingConfig {
+    /// Log level filter. Supports standard env_logger syntax:
+    /// "error", "warn", "info", "debug", "trace", or module-specific
+    /// like "rnode_linux=debug,rnode_linux::radio=trace".
+    /// Overridden by the RUST_LOG environment variable if set.
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            log_level: default_log_level(),
         }
     }
 }
