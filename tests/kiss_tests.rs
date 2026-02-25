@@ -398,3 +398,23 @@ fn frequency_with_escaped_bytes() {
         other => panic!("Escaped frequency round-trip failed: {:?}", other),
     }
 }
+
+// --- ConfSave / ConfDelete tests ---
+
+#[test]
+fn parse_conf_save() {
+    let frame = [FEND, CMD_CONF_SAVE, 0x00, FEND];
+    match parse_frame(&frame) {
+        Some(KissCommand::ConfSave) => {}
+        other => panic!("Expected ConfSave, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_conf_delete() {
+    let frame = [FEND, CMD_CONF_DELETE, 0x00, FEND];
+    match parse_frame(&frame) {
+        Some(KissCommand::ConfDelete) => {}
+        other => panic!("Expected ConfDelete, got {:?}", other),
+    }
+}

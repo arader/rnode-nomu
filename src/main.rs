@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::Parser;
 use log::{debug, error, info, warn};
 
-use rnode_linux::config::Config;
+use rnode_linux::config::{Config, RadioParams};
 use rnode_linux::csma::{self, CsmaState};
 use rnode_linux::error;
 use rnode_linux::gpio::RadioGpio;
@@ -69,6 +69,7 @@ fn run(config_path: &str) -> error::Result<()> {
     )?;
     info!("GPIO initialized");
 
+    // --- Initialize radio hardware (TCXO, etc. — no link params yet) ---
     let tcxo_voltage = config
         .radio
         .tcxo_voltage
@@ -78,26 +79,41 @@ fn run(config_path: &str) -> error::Result<()> {
 
     let mut radio = Sx126x::new(spi, gpio, config.radio.enable_tcxo, tcxo_voltage, true);
 
-    radio.begin(config.radio.frequency)?;
-    radio.set_bandwidth(config.radio.bandwidth)?;
-    radio.set_spreading_factor(config.radio.spreading_factor)?;
-    radio.set_coding_rate(config.radio.coding_rate)?;
-    radio.set_tx_power(config.radio.tx_power)?;
-    radio.set_preamble_length(config.radio.preamble_symbols)?;
-    if config.radio.enable_crc {
-        radio.enable_crc()?;
-    }
-    info!(
-        "Radio initialized: freq={} Hz, bw={} Hz, sf={}, cr={}, txp={} dBm",
-        config.radio.frequency,
-        config.radio.bandwidth,
-        config.radio.spreading_factor,
-        config.radio.coding_rate,
-        config.radio.tx_power
-    );
+    // --- Load cached radio config (simulates EEPROM) ---
+    let mut radio_params = RadioParams::new();
+    let mut radio_online = false;
 
-    radio.receive()?;
-    info!("Radio in receive mode");
+    if let Some(ref cache_path) = config.radio.cache_file {
+        if let Some(cached) = rnode_linux::config::CachedRadioConfig::load(cache_path) {
+            info!(
+                "Loaded cached radio config: freq={} Hz, bw={} Hz, sf={}, cr={}, txp={} dBm",
+                cached.frequency, cached.bandwidth, cached.spreading_factor,
+                cached.coding_rate, cached.tx_power
+            );
+            radio_params = RadioParams::from_cached(&cached);
+
+            if !radio_params.is_locked() {
+                radio.begin(radio_params.frequency)?;
+                radio.set_bandwidth(radio_params.bandwidth)?;
+                radio.set_spreading_factor(radio_params.spreading_factor)?;
+                radio.set_coding_rate(radio_params.coding_rate)?;
+                radio.set_tx_power(radio_params.tx_power)?;
+                radio.set_preamble_length(config.radio.preamble_symbols)?;
+                if config.radio.enable_crc {
+                    radio.enable_crc()?;
+                }
+                radio.receive()?;
+                radio_online = true;
+                info!("Radio online (loaded from cache)");
+            } else {
+                warn!("Cached config has incomplete parameters — radio stays offline");
+            }
+        } else {
+            info!("No cached radio config found — radio offline, awaiting KISS configuration");
+        }
+    } else {
+        info!("No cache_file configured — radio offline, awaiting KISS configuration");
+    }
 
     // --- Create PTY ---
     let pty = PtyPair::open(config.pty.symlink.as_deref())?;
@@ -112,7 +128,6 @@ fn run(config_path: &str) -> error::Result<()> {
         config.csma.slot_min_ms,
         config.csma.slot_max_ms,
     );
-    let mut radio_online = true;
     let mut promisc = false;
     let mut stat_rx: u32 = 0;
     let mut stat_tx: u32 = 0;
@@ -146,6 +161,8 @@ fn run(config_path: &str) -> error::Result<()> {
                                     &mut tx_queue,
                                     &mut csma,
                                     &mut radio_online,
+                                    &mut radio_params,
+                                    &config,
                                     &mut promisc,
                                     stat_rx,
                                     stat_tx,
@@ -258,6 +275,8 @@ fn handle_command(
     tx_queue: &mut PacketQueue,
     csma: &mut CsmaState,
     radio_online: &mut bool,
+    radio_params: &mut RadioParams,
+    config: &Config,
     promisc: &mut bool,
     stat_rx: u32,
     stat_tx: u32,
@@ -274,46 +293,62 @@ fn handle_command(
         }
         KissCommand::SetFrequency(freq) => {
             if freq == 0 {
-                let _ = pty.write_all(&kiss::indicate_frequency(radio.get_frequency()));
+                let _ = pty.write_all(&kiss::indicate_frequency(radio_params.frequency));
             } else {
-                radio.set_frequency(freq)?;
+                radio_params.frequency = freq;
+                if *radio_online {
+                    radio.set_frequency(freq)?;
+                }
                 let _ = pty.write_all(&kiss::indicate_frequency(freq));
             }
         }
         KissCommand::SetBandwidth(bw) => {
             if bw == 0 {
-                let _ = pty.write_all(&kiss::indicate_bandwidth(radio.get_signal_bandwidth()));
+                let _ = pty.write_all(&kiss::indicate_bandwidth(radio_params.bandwidth));
             } else {
-                radio.set_bandwidth(bw)?;
+                radio_params.bandwidth = bw;
+                if *radio_online {
+                    radio.set_bandwidth(bw)?;
+                }
                 let _ = pty.write_all(&kiss::indicate_bandwidth(bw));
             }
         }
         KissCommand::SetTxPower(txp) => {
             if txp == 0xFF {
-                let _ = pty.write_all(&kiss::indicate_txpower(radio.get_tx_power() as u8));
+                let p = if radio_params.tx_power == 0x7F { 0xFF } else { radio_params.tx_power as u8 };
+                let _ = pty.write_all(&kiss::indicate_txpower(p));
             } else {
                 let clamped = txp.min(22);
-                radio.set_tx_power(clamped as i8)?;
+                radio_params.tx_power = clamped as i8;
+                if *radio_online {
+                    radio.set_tx_power(clamped as i8)?;
+                }
                 let _ = pty.write_all(&kiss::indicate_txpower(clamped));
             }
         }
         KissCommand::SetSf(sf) => {
             if sf == 0xFF {
-                let _ = pty.write_all(&kiss::indicate_spreadingfactor(
-                    radio.get_spreading_factor(),
-                ));
+                let s = if radio_params.spreading_factor == 0 { 0xFF } else { radio_params.spreading_factor };
+                let _ = pty.write_all(&kiss::indicate_spreadingfactor(s));
             } else {
                 let sf = sf.clamp(5, 12);
-                radio.set_spreading_factor(sf)?;
+                radio_params.spreading_factor = sf;
+                if *radio_online {
+                    radio.set_spreading_factor(sf)?;
+                }
                 let _ = pty.write_all(&kiss::indicate_spreadingfactor(sf));
             }
         }
         KissCommand::SetCr(cr) => {
             if cr == 0xFF {
-                let _ = pty.write_all(&kiss::indicate_codingrate(radio.get_coding_rate()));
+                let c = if radio_params.coding_rate == 0 { 0xFF } else { radio_params.coding_rate };
+                let _ = pty.write_all(&kiss::indicate_codingrate(c));
             } else {
                 let cr = cr.clamp(5, 8);
-                radio.set_coding_rate(cr)?;
+                radio_params.coding_rate = cr;
+                if *radio_online {
+                    radio.set_coding_rate(cr)?;
+                }
                 let _ = pty.write_all(&kiss::indicate_codingrate(cr));
             }
         }
@@ -326,18 +361,42 @@ fn handle_command(
                 };
                 let _ = pty.write_all(&kiss::indicate_radiostate(s));
             } else if state == 0x00 {
-                radio.standby()?;
+                if *radio_online {
+                    radio.standby()?;
+                }
                 *radio_online = false;
                 let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_OFF));
             } else if state == 0x01 {
-                radio.receive()?;
-                *radio_online = true;
-                let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_ON));
+                if radio_params.is_locked() {
+                    warn!(
+                        "Cannot start radio: config incomplete (freq={}, bw={}, sf={}, cr={}, txp={})",
+                        radio_params.frequency, radio_params.bandwidth,
+                        radio_params.spreading_factor, radio_params.coding_rate,
+                        radio_params.tx_power
+                    );
+                    let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_OFF));
+                } else if !*radio_online {
+                    radio.begin(radio_params.frequency)?;
+                    radio.set_bandwidth(radio_params.bandwidth)?;
+                    radio.set_spreading_factor(radio_params.spreading_factor)?;
+                    radio.set_coding_rate(radio_params.coding_rate)?;
+                    radio.set_tx_power(radio_params.tx_power)?;
+                    radio.set_preamble_length(config.radio.preamble_symbols)?;
+                    if config.radio.enable_crc {
+                        radio.enable_crc()?;
+                    }
+                    radio.receive()?;
+                    *radio_online = true;
+                    info!("Radio online");
+                    let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_ON));
+                } else {
+                    // Already online
+                    let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_ON));
+                }
             }
         }
         KissCommand::RadioLock => {
-            // Always unlocked on Linux
-            let _ = pty.write_all(&kiss::indicate_radio_lock(false));
+            let _ = pty.write_all(&kiss::indicate_radio_lock(radio_params.is_locked()));
         }
         KissCommand::Detect => {
             let _ = pty.write_all(&kiss::indicate_detect());
@@ -352,6 +411,27 @@ fn handle_command(
         }
         KissCommand::Leave => {
             debug!("Host disconnected (CMD_LEAVE)");
+        }
+        KissCommand::ConfSave => {
+            if let Some(ref cache_path) = config.radio.cache_file {
+                let cached = radio_params.to_cached();
+                match cached.save(cache_path) {
+                    Ok(()) => info!("Radio config saved to {}", cache_path),
+                    Err(e) => warn!("Failed to save radio config: {}", e),
+                }
+            } else {
+                warn!("CMD_CONF_SAVE received but no cache_file configured");
+            }
+        }
+        KissCommand::ConfDelete => {
+            if let Some(ref cache_path) = config.radio.cache_file {
+                match rnode_linux::config::CachedRadioConfig::delete(cache_path) {
+                    Ok(()) => info!("Radio config cache deleted"),
+                    Err(e) => warn!("Failed to delete radio config cache: {}", e),
+                }
+            } else {
+                warn!("CMD_CONF_DELETE received but no cache_file configured");
+            }
         }
         KissCommand::StAirlock(at) => {
             if at == 0 {
@@ -414,11 +494,15 @@ fn handle_command(
         }
         KissCommand::Reset => {
             info!("Reset requested — reinitializing radio");
-            let freq = radio.get_frequency();
-            let _ = radio.end();
-            radio.begin(freq)?;
-            radio.receive()?;
-            *radio_online = true;
+            if *radio_online {
+                let _ = radio.end();
+                if !radio_params.is_locked() {
+                    radio.begin(radio_params.frequency)?;
+                    radio.receive()?;
+                } else {
+                    *radio_online = false;
+                }
+            }
         }
     }
     Ok(())

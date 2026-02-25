@@ -2,7 +2,7 @@
 // Ported to Rust for Linux by RNode contributors.
 // Licensed under the GNU General Public License v3.0 or later.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -41,16 +41,6 @@ fn default_gpio_chip() -> String {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RadioConfig {
-    #[serde(default = "default_frequency")]
-    pub frequency: u32,
-    #[serde(default = "default_bandwidth")]
-    pub bandwidth: u32,
-    #[serde(default = "default_sf")]
-    pub spreading_factor: u8,
-    #[serde(default = "default_cr")]
-    pub coding_rate: u8,
-    #[serde(default = "default_txp")]
-    pub tx_power: i8,
     #[serde(default = "default_preamble")]
     pub preamble_symbols: u16,
     #[serde(default = "default_true")]
@@ -58,23 +48,10 @@ pub struct RadioConfig {
     #[serde(default)]
     pub enable_tcxo: bool,
     pub tcxo_voltage: Option<String>,
+    /// Path to the cached radio config file (simulates EEPROM).
+    pub cache_file: Option<String>,
 }
 
-fn default_frequency() -> u32 {
-    915_000_000
-}
-fn default_bandwidth() -> u32 {
-    125_000
-}
-fn default_sf() -> u8 {
-    7
-}
-fn default_cr() -> u8 {
-    5
-}
-fn default_txp() -> i8 {
-    2
-}
 fn default_preamble() -> u16 {
     18
 }
@@ -128,6 +105,110 @@ impl Config {
     /// Parse config from a TOML string (for testing).
     pub fn from_str(content: &str) -> std::result::Result<Self, String> {
         toml::from_str(content).map_err(|e| e.to_string())
+    }
+}
+
+// --- Cached radio config (simulates EEPROM) ---
+
+/// Radio link parameters persisted to a cache file, analogous to
+/// RNode_Firmware's EEPROM-saved configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CachedRadioConfig {
+    pub frequency: u32,
+    pub bandwidth: u32,
+    pub spreading_factor: u8,
+    pub coding_rate: u8,
+    pub tx_power: i8,
+}
+
+impl CachedRadioConfig {
+    /// Load cached config from a TOML file. Returns None if file doesn't exist
+    /// or contains invalid data.
+    pub fn load(path: &str) -> Option<Self> {
+        let content = std::fs::read_to_string(path).ok()?;
+        toml::from_str(&content).ok()
+    }
+
+    /// Save cached config to a TOML file.
+    pub fn save(&self, path: &str) -> std::io::Result<()> {
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(path, content)
+    }
+
+    /// Delete the cached config file.
+    pub fn delete(path: &str) -> std::io::Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// --- In-memory radio parameters with lock logic ---
+
+/// Tracks the current radio link parameters in memory.
+/// Mirrors RNode_Firmware's `lora_freq`, `lora_bw`, `lora_sf`, `lora_cr`, `lora_txp` globals
+/// and the `update_radio_lock()` function.
+#[derive(Debug, Clone)]
+pub struct RadioParams {
+    pub frequency: u32,
+    pub bandwidth: u32,
+    pub spreading_factor: u8,
+    pub coding_rate: u8,
+    pub tx_power: i8,
+}
+
+impl RadioParams {
+    /// Create params in the "locked" state (all values unset), matching
+    /// RNode_Firmware's initial state: freq=0, bw=0, sf=0, cr=0, txp=0xFF.
+    pub fn new() -> Self {
+        Self {
+            frequency: 0,
+            bandwidth: 0,
+            spreading_factor: 0,
+            coding_rate: 0,
+            tx_power: 0x7F, // sentinel for "unset" (firmware uses 0xFF in u8)
+        }
+    }
+
+    /// Load from a cached config.
+    pub fn from_cached(cached: &CachedRadioConfig) -> Self {
+        Self {
+            frequency: cached.frequency,
+            bandwidth: cached.bandwidth,
+            spreading_factor: cached.spreading_factor,
+            coding_rate: cached.coding_rate,
+            tx_power: cached.tx_power,
+        }
+    }
+
+    /// Returns true if any required parameter is unset (radio cannot start).
+    /// Mirrors `update_radio_lock()` in firmware.
+    pub fn is_locked(&self) -> bool {
+        self.frequency == 0
+            || self.bandwidth == 0
+            || self.spreading_factor == 0
+            || self.coding_rate == 0
+            || self.tx_power == 0x7F
+    }
+
+    /// Convert to a CachedRadioConfig for persistence.
+    pub fn to_cached(&self) -> CachedRadioConfig {
+        CachedRadioConfig {
+            frequency: self.frequency,
+            bandwidth: self.bandwidth,
+            spreading_factor: self.spreading_factor,
+            coding_rate: self.coding_rate,
+            tx_power: self.tx_power,
+        }
+    }
+}
+
+impl Default for RadioParams {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

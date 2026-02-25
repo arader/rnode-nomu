@@ -47,6 +47,8 @@ pub const CMD_BOARD: u8 = 0x47;
 pub const CMD_PLATFORM: u8 = 0x48;
 pub const CMD_MCU: u8 = 0x49;
 pub const CMD_FW_VERSION: u8 = 0x50;
+pub const CMD_CONF_SAVE: u8 = 0x53;
+pub const CMD_CONF_DELETE: u8 = 0x54;
 pub const CMD_RESET: u8 = 0x55;
 pub const CMD_RESET_BYTE: u8 = 0xF8;
 
@@ -130,6 +132,10 @@ pub enum KissCommand {
     Platform,
     /// Query board.
     Board,
+    /// Save radio config to cache (like EEPROM).
+    ConfSave,
+    /// Delete cached radio config.
+    ConfDelete,
     /// Reset device.
     Reset,
 }
@@ -279,6 +285,8 @@ impl KissParser {
             CMD_FW_VERSION => Some(KissCommand::FwVersion),
             CMD_PLATFORM => Some(KissCommand::Platform),
             CMD_BOARD => Some(KissCommand::Board),
+            CMD_CONF_SAVE => Some(KissCommand::ConfSave),
+            CMD_CONF_DELETE => Some(KissCommand::ConfDelete),
             CMD_RESET => {
                 if byte == CMD_RESET_BYTE {
                     Some(KissCommand::Reset)
