@@ -1,0 +1,32 @@
+[spi]
+device = "/dev/spidev0.0"
+speed_hz = 16_000_000
+
+[gpio]
+chip = "gpiochip0"
+reset_line = 17
+busy_line = 27
+dio0_line = 22
+# Optional RX-enable pin, set to -1 or omit to disable
+# rxen_line = -1
+
+[radio]
+frequency = 915_000_000
+bandwidth = 125_000
+spreading_factor = 7
+coding_rate = 5
+tx_power = 2
+preamble_symbols = 18
+enable_crc = true
+enable_tcxo = false
+# tcxo_voltage options: "1.6V", "1.7V", "1.8V", "2.2V", "2.4V", "2.7V", "3.0V", "3.3V"
+# tcxo_voltage = "3.3V"
+
+[pty]
+# Symlink created pointing to the PTY slave device
+symlink = "/tmp/rnode0"
+
+[csma]
+enabled = true
+slot_min_ms = 24
+slot_max_ms = 100

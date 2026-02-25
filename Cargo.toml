@@ -1,0 +1,18 @@
+[package]
+name = "rnode-linux"
+version = "0.1.0"
+edition = "2021"
+description = "Linux userspace LoRa daemon with KISS protocol interface, targeting SX1262"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+libc = "0.2"
+log = "0.4"
+nix = { version = "0.31", features = ["ioctl", "poll", "signal", "fs", "term", "process"] }
+serde = { version = "1", features = ["derive"] }
+spidev = "0.6"
+thiserror = "2"
+toml = "0.8"
