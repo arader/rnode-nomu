@@ -333,9 +333,9 @@ All KISS frames are delimited by `FEND` (0xC0) with standard `FESC`/`TFEND`/`TFE
 
 ```
 ┌─────────────┐     KISS/PTY      ┌───────────────────────────────────┐
-│  Reticulum  │◄──────────────────►│          rnode-linux              │
+│  Reticulum  │◄─────────────────►│          rnode-linux              │
 │  Sideband   │   /tmp/rnode0     │                                   │
-│  etc.       │                   │  ┌─────────┐  ┌───────────────┐  │
+│  etc.       │                   │  ┌──────────┐  ┌───────────────┐  │
 └─────────────┘                   │  │  KISS    │  │  Packet Queue │  │
                                   │  │  Parser  │  │  & Splitter   │  │
                                   │  └────┬─────┘  └───────┬───────┘  │
@@ -352,7 +352,7 @@ All KISS frames are delimited by `FEND` (0xC0) with standard `FESC`/`TFEND`/`TFE
                                         SPI │         GPIO │
                                   ┌─────────▼──────────────▼──────────┐
                                   │        SX1262 LoRa Module         │
-                                  │            ~~~antenna~~~           │
+                                  │            ~~~antenna~~~          │
                                   └───────────────────────────────────┘
 ```
 
