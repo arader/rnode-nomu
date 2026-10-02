@@ -1,0 +1,118 @@
+name: PR
+
+# Merge gates for pull requests, from infra/agent-actions (examples/pr-gates.yml). Once main is
+# protected, require these statuses on the pull request head (exact names, in Settings → Branches):
+#
+#   PR / test (pull_request)      cargo build --all-targets and cargo test
+#   agent-actions/pr-agent        code review by pr-agent
+#   agent-actions/security-agent  dependency, secret and code security review by security-agent
+#   agent-actions/qa-agent        QA review by qa-agent (optional; require it to make QA block)
+#
+# Require the agent-actions/* statuses, not the agent jobs: a job skipped because the test job
+# failed counts as passing, while the statuses only exist once an agent reviewed that exact head
+# commit. The agents start only after the test job passes, so a broken pull request costs no AI
+# credits. The test job is a first, deliberately small gate.
+#
+# Settings (Settings → Actions, at the owner or repository level):
+#   secret   COPILOT_GITHUB_TOKEN  fine-grained GitHub PAT with "Copilot Requests" (required)
+#   variable AGENT_FAIL_ON         lowest blocking severity (default high; none = advisory)
+#   variable AGENT_MODEL           Copilot model (default: the CLI default)
+#   variable AGENT_MODELS          comma/newline-separated models for consensus reviews (optional)
+# Optional, to post as bot accounts instead of forgejo-actions: secrets PR_AGENT_FORGEJO_TOKEN,
+# SECURITY_AGENT_FORGEJO_TOKEN and QA_AGENT_FORGEJO_TOKEN; variables PR_AGENT_LOGIN,
+# SECURITY_AGENT_LOGIN and QA_AGENT_LOGIN.
+# The agent jobs use the `copilot-agent` runner label (infra/forgejo-runners), whose image provides
+# Copilot CLI, osv-scanner and gitleaks.
+#
+# Not triggered on `edited`: with cancel-in-progress an edit would cancel a running review and
+# leave its status pending. After removing WIP from the title, or adding the skip-agent-review
+# label, re-run this workflow; the agents read the pull request's current state.
+#
+# Pull requests from forks, or opened with AGit, get no secrets, so the agents skip them: a
+# maintainer reviews them with the manual Review workflow (review.yml).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: pr-${{ forgejo.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: builder-node24
+    timeout-minutes: 30
+    env:
+      # The runner has little memory and runs one job at a time (see infra/forgejo-runners), so keep
+      # rustc's peak memory down. These change how the code is compiled, not what is checked.
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: cargo --version
+      - name: Build
+        run: cargo build --locked --all-targets
+      - name: Tests
+        run: cargo test --locked
+
+  pr-agent:
+    needs: [test]
+    runs-on: copilot-agent
+    timeout-minutes: 30
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: https://forgejo.example/infra/agent-actions/pr-agent@v0
+        with:
+          copilot-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Optional: post as the pr-agent account instead of forgejo-actions
+          # (docs/permissions-and-blocking.md in agent-actions).
+          comment-token: ${{ secrets.PR_AGENT_FORGEJO_TOKEN }}
+          bot-login: ${{ vars.PR_AGENT_LOGIN }}
+          fail-on: ${{ vars.AGENT_FAIL_ON || 'high' }}
+          model: ${{ vars.AGENT_MODEL }}
+          models: ${{ vars.AGENT_MODELS }}
+
+  security-agent:
+    needs: [test]
+    runs-on: copilot-agent
+    timeout-minutes: 30
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: https://forgejo.example/infra/agent-actions/security-agent@v0
+        with:
+          copilot-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Optional: post as the security-agent account instead of forgejo-actions
+          # (docs/permissions-and-blocking.md in agent-actions).
+          comment-token: ${{ secrets.SECURITY_AGENT_FORGEJO_TOKEN }}
+          bot-login: ${{ vars.SECURITY_AGENT_LOGIN }}
+          fail-on: ${{ vars.AGENT_FAIL_ON || 'high' }}
+          model: ${{ vars.AGENT_MODEL }}
+          models: ${{ vars.AGENT_MODELS }}
+
+  qa-agent:
+    needs: [test]
+    runs-on: copilot-agent
+    timeout-minutes: 30
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: https://forgejo.example/infra/agent-actions/qa-agent@v0
+        with:
+          copilot-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Optional: post as the qa-agent account instead of forgejo-actions
+          # (docs/permissions-and-blocking.md in agent-actions).
+          comment-token: ${{ secrets.QA_AGENT_FORGEJO_TOKEN }}
+          bot-login: ${{ vars.QA_AGENT_LOGIN }}
+          fail-on: ${{ vars.AGENT_FAIL_ON || 'high' }}
+          model: ${{ vars.AGENT_MODEL }}
+          models: ${{ vars.AGENT_MODELS }}
