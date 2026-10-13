@@ -380,6 +380,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rnode-sim"
+version = "0.2.0"
+dependencies = [
+ "log",
+ "rnode-core",
+]
+
+[[package]]
 name = "rnode-sx126x"
 version = "0.2.0"
 dependencies = [

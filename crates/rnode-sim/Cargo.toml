@@ -1,0 +1,15 @@
+[package]
+name = "rnode-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Multi-process simulated LoRa radio for rnode-linux tests"
+
+[lints]
+workspace = true
+
+[dependencies]
+log = "0.4"
+rnode-core = { path = "../rnode-core" }
