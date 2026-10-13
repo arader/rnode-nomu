@@ -13,7 +13,18 @@ fn channel_stats_payload_initial_state_matches_firmware_encoding() {
     // Airtime and utilisation fields are all zero before anything was sent or heard.
     assert_eq!(&payload[0..8], &[0; 8]);
     // current_rssi + 157 = 57; the firmware's initial noise floor of -292 + 157 wraps to 121
-    // through the uint8_t cast; 0xFF means "no interference".
+    // through the uint8_t cast; before the first noise-floor samples, the sentinel floor makes
+    // the idle channel look interfered and ntf reports current_rssi + 157.
+    assert_eq!(payload[8], 57);
+    assert_eq!(payload[9], 121);
+    assert_eq!(payload[10], 57);
+}
+
+#[test]
+fn channel_stats_payload_carrier_present_is_not_interference() {
+    let mut csma = Csma::new();
+    csma.observe(0, true, -100);
+    let payload = csma.channel_stats_payload();
     assert_eq!(payload[8], 57);
     assert_eq!(payload[9], 121);
     assert_eq!(payload[10], 0xFF);
