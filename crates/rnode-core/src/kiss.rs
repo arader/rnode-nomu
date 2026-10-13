@@ -104,8 +104,9 @@ pub struct Decoder {
     command: u8,
     frame_len: usize,
     data: Vec<u8>,
+    /// Unescaped bytes in the current data frame, including those past the MTU that were not kept.
+    data_len: usize,
     cmdbuf: Vec<u8>,
-    data_over_mtu: bool,
 }
 
 impl Default for Decoder {
@@ -122,8 +123,8 @@ impl Decoder {
             command: CMD_UNKNOWN,
             frame_len: 0,
             data: Vec::new(),
+            data_len: 0,
             cmdbuf: Vec::new(),
-            data_over_mtu: false,
         }
     }
 
@@ -135,7 +136,13 @@ impl Decoder {
         if self.in_frame && byte == FEND && self.command == CMD_DATA {
             self.in_frame = false;
             self.escape = false;
-            if !self.data_over_mtu {
+            if self.data_len > MTU {
+                // The firmware's flush_queue() skips such packets without telling the host.
+                log::debug!(
+                    "dropping {}-byte host data frame: exceeds the {MTU}-byte MTU",
+                    self.data_len
+                );
+            } else {
                 events.push(HostEvent::Data(core::mem::take(&mut self.data)));
             }
             self.data.clear();
@@ -147,8 +154,8 @@ impl Decoder {
             self.command = CMD_UNKNOWN;
             self.frame_len = 0;
             self.data.clear();
+            self.data_len = 0;
             self.cmdbuf.clear();
-            self.data_over_mtu = false;
             return;
         }
         if !self.in_frame || self.frame_len >= MTU {
@@ -163,9 +170,8 @@ impl Decoder {
             if let Some(b) = self.unescape(byte) {
                 if self.data.len() < MTU {
                     self.data.push(b);
-                } else {
-                    self.data_over_mtu = true;
                 }
+                self.data_len = self.data_len.saturating_add(1);
             }
             return;
         }
@@ -214,10 +220,11 @@ fn multi_len(cmd: u8) -> Option<usize> {
     match cmd {
         CMD_FREQUENCY | CMD_BANDWIDTH => Some(4),
         CMD_ST_ALOCK | CMD_LT_ALOCK | CMD_ROM_WRITE => Some(2),
+        // `serial_callback()` unescapes each CMD_DIS_IA byte and passes it to `dia_conf_save()`,
+        // which reboots: only the first payload byte takes effect, and an empty frame does nothing.
+        CMD_DIS_IA => Some(1),
         CMD_FB_WRITE | CMD_DEV_SIG | CMD_FW_HASH | CMD_WIFI_SSID | CMD_WIFI_PSK | CMD_WIFI_IP | CMD_WIFI_NM
-        | CMD_DISP_INT | CMD_DISP_ADDR | CMD_DISP_BLNK | CMD_DISP_ROT | CMD_DIS_IA | CMD_DISP_RCND | CMD_NP_INT => {
-            Some(64)
-        }
+        | CMD_DISP_INT | CMD_DISP_ADDR | CMD_DISP_BLNK | CMD_DISP_ROT | CMD_DISP_RCND | CMD_NP_INT => Some(64),
         _ => None,
     }
 }

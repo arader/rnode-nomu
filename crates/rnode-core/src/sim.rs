@@ -36,6 +36,7 @@ struct MediumState {
     next_id: usize,
     busy_until_ms: u64,
     tx_duration_ms: u64,
+    noise_dbm: i16,
     radios: HashMap<usize, Endpoint>,
 }
 
@@ -80,6 +81,7 @@ impl SimMedium {
     pub fn new() -> Self {
         Self(Rc::new(RefCell::new(MediumState {
             tx_duration_ms: 100,
+            noise_dbm: -120,
             ..MediumState::default()
         })))
     }
@@ -95,6 +97,12 @@ impl SimMedium {
     }
     pub fn set_tx_duration_ms(&self, duration_ms: u64) {
         self.0.borrow_mut().tx_duration_ms = duration_ms;
+    }
+    /// Set the RSSI in dBm that radios read while no transmission is on the air (default -120).
+    /// Raising it more than `CSMA_INFR_THRESHOLD_DB` above a node's noise floor simulates
+    /// non-LoRa interference: a strong signal without a LoRa carrier.
+    pub fn set_noise_dbm(&self, dbm: i16) {
+        self.0.borrow_mut().noise_dbm = dbm;
     }
 
     pub fn radio(&self) -> SimRadio {
@@ -321,7 +329,8 @@ impl Radio for SimRadio {
         Ok(self.medium.0.borrow().busy_until_ms > now_ms)
     }
     fn current_rssi(&mut self) -> Result<i16, Self::Error> {
-        Ok(if self.dcd(self.medium.now_ms())? { -42 } else { -120 })
+        let carrier = self.dcd(self.medium.now_ms())?;
+        Ok(if carrier { -42 } else { self.medium.0.borrow().noise_dbm })
     }
     fn set_dcd_timing(&mut self, preamble_ms: u32, header_ms: u32) {
         self.dcd_timing = (preamble_ms, header_ms);

@@ -18,6 +18,7 @@ pub mod framing;
 pub mod identity;
 pub mod kiss;
 pub mod node;
+mod packet_log;
 pub mod phy;
 pub mod queue;
 pub mod radio;
@@ -26,6 +27,10 @@ pub mod rng;
 pub mod sim;
 pub mod storage;
 
+#[cfg(test)]
+mod log_capture;
+#[cfg(test)]
+mod logging_tests;
 #[cfg(test)]
 mod protocol_tests;
 

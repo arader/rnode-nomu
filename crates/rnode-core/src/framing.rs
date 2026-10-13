@@ -3,6 +3,8 @@
 //! Firmware references: `transmit()` in `RNode_Firmware.ino` and `receive_callback()` plus
 //! `packetSequence()`/`isSplitPacket()` in `Utilities.h`.
 
+use core::fmt;
+
 use crate::kiss::{FLAG_SPLIT, HEADER_LEN, MTU, SINGLE_MTU};
 use crate::rng::Rng;
 
@@ -34,15 +36,16 @@ impl RxReassembler {
     }
 
     pub fn reset(&mut self) {
-        self.seq = None;
-        self.buf.clear();
+        self.discard_pending(format_args!("reset"));
     }
 
     /// Apply the four firmware split cases. An extra header-only split frame after a 508-byte
     /// packet from real firmware is tolerated: it becomes a new empty pending first half and is
     /// cleared by the next non-split frame without corrupting the already delivered packet.
+    /// Discarded frames and incomplete packets are logged at debug level.
     pub fn process(&mut self, frame: &[u8]) -> Reassembly {
         if frame.is_empty() {
+            log::debug!("dropping empty LoRa frame: no RNode header");
             return Reassembly::Ignored;
         }
         let header = frame[0];
@@ -61,18 +64,26 @@ impl RxReassembler {
             self.seq = None;
             Reassembly::Complete(core::mem::take(&mut self.buf))
         } else if split {
-            self.buf.clear();
+            self.discard_pending(format_args!("next split frame has seq {sequence}"));
             self.seq = Some(sequence);
             self.buf.extend_from_slice(payload);
             self.buf.truncate(MTU);
             Reassembly::Pending
         } else {
-            if self.seq.is_some() {
-                self.buf.clear();
-                self.seq = None;
-            }
+            self.discard_pending(format_args!("next frame is not split"));
             Reassembly::Complete(payload[..payload.len().min(MTU)].to_vec())
         }
+    }
+
+    /// Drop a pending first half, logging why.
+    fn discard_pending(&mut self, reason: fmt::Arguments<'_>) {
+        if let Some(seq) = self.seq.take() {
+            log::debug!(
+                "dropping {}-byte incomplete split packet (seq {seq}): {reason}",
+                self.buf.len()
+            );
+        }
+        self.buf.clear();
     }
 }
 

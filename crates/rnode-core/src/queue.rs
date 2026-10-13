@@ -26,11 +26,26 @@ impl TxQueue {
     }
 
     pub fn push(&mut self, frame: Vec<u8>, mtu: usize) -> bool {
-        if frame.is_empty() || frame.len() > mtu {
+        if frame.is_empty() {
+            log::debug!("dropping empty host data frame");
+            return false;
+        }
+        if frame.len() > mtu {
+            log::debug!(
+                "dropping {}-byte host data frame: exceeds the {mtu}-byte MTU",
+                frame.len()
+            );
             return false;
         }
         if self.packets.len() >= self.max_packets || self.bytes + frame.len() > self.max_bytes {
-            log::debug!("dropping TX frame because the firmware-sized queue is full");
+            log::debug!(
+                "dropping {}-byte host data frame: TX queue full ({}/{} packets, {}/{} bytes)",
+                frame.len(),
+                self.packets.len(),
+                self.max_packets,
+                self.bytes,
+                self.max_bytes
+            );
             return false;
         }
         self.bytes += frame.len();

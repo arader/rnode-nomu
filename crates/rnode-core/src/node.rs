@@ -18,19 +18,41 @@
 //!
 //! Observable behaviour follows RNode_Firmware v1.86's TNC path: `serial_callback()`,
 //! `receive_callback()`, `transmit()`, `startRadio()`/`stopRadio()`, `update_radio_lock()` and
-//! the `kiss_indicate_*()` encoders. Deliberate differences: host config commands retune the
-//! radio immediately while online, TX/RX stats are incremented, exactly-508-byte TX packets do
-//! not send the firmware's redundant header-only third LoRa frame, oversized promiscuous-mode
-//! raw frames are rejected/dropped instead of being truncated to one LoRa frame, and host-stream
-//! safety replies with arbitrary bytes (`CMD_RANDOM`, `CMD_IMPLICIT`) KISS-escape their payloads,
-//! and implicit-header receive is only enabled in promiscuous mode so normal split RNode frames
-//! keep explicit LoRa headers.
+//! the `kiss_indicate_*()` encoders. Deliberate differences:
+//!
+//! - host config commands retune the radio immediately while online;
+//! - TX/RX stats are incremented;
+//! - exactly-508-byte TX packets do not send the firmware's redundant header-only third LoRa
+//!   frame;
+//! - oversized promiscuous-mode raw frames are rejected/dropped instead of being truncated to one
+//!   LoRa frame;
+//! - host-stream safety replies with arbitrary bytes (`CMD_RANDOM`, `CMD_IMPLICIT`) KISS-escape
+//!   their payloads;
+//! - implicit-header receive is only enabled in promiscuous mode, so normal split RNode frames
+//!   keep explicit LoRa headers;
+//! - `CMD_DIS_IA` changes interference avoidance for the running process only. The firmware's
+//!   `dia_conf_save()` writes the setting to EEPROM and reboots; we neither write anything nor
+//!   reset. [`NodeConfig::avoid_interference`] (the daemon's config file) is the persistent source
+//!   of truth, and the value set by the host survives `CMD_RESET` the way the EEPROM byte
+//!   survives the firmware's reboot. Like the firmware, the command sends no reply.
+//!
+//! Logging (`log` facade): at debug level, one line per packet delivered to the host (after
+//! split reassembly), one per host packet sent to the radio (before splitting, with its outcome)
+//! and one per dropped packet with the reason; at trace level, a hex dump of each delivered or
+//! sent payload. Packet lines come from this module; drops are logged where they are detected (the
+//! KISS decoder, the TX queue, the split reassembler and this module). Radio driver errors and
+//! modem TX timeouts, which hard-reset the node, are also logged at warn level. Formatting is
+//! lazy, so disabled levels cost nothing, and logging never changes what the node sends to the
+//! host or the radio.
+
+use core::fmt;
 
 use crate::RSSI_OFFSET;
 use crate::csma::{Access, Csma, StatusUpdate};
 use crate::framing::{self, Reassembly, RxReassembler};
 use crate::identity::DeviceIdentity;
 use crate::kiss;
+use crate::packet_log::{HexDump, PacketSummary, plural};
 use crate::phy::{self, Modulation, PhyParams};
 use crate::queue::TxQueue;
 use crate::radio::{Radio, RxFrame, TxOutcome};
@@ -54,6 +76,18 @@ pub struct NodeConfig {
     pub queue_max_packets: usize,
     /// Maximum number of bytes in the TX queue (firmware `CONFIG_QUEUE_SIZE`).
     pub queue_max_bytes: usize,
+    /// Whether interference avoidance is on at start-up (firmware `avoid_interference`). When it
+    /// is on, the channel counts as busy while the RSSI is more than
+    /// [`crate::csma::CSMA_INFR_THRESHOLD_DB`] above the noise floor without a LoRa carrier
+    /// (firmware `medium_free()`). That includes the first
+    /// [`crate::csma::NOISE_FLOOR_SAMPLES`] status samples with the radio on (about 384 ms) after
+    /// start-up or a reset, because the noise floor starts at a -292 dBm sentinel.
+    ///
+    /// The default, `false`, is the firmware's effective default: `setup()` turns avoidance on
+    /// only when the EEPROM byte `ADDR_CONF_DIA` is `0x00`, so erased EEPROM (`0xFF`) leaves it off
+    /// and only `rnodeconf --ia-enable` turns it on. The host can change the running value with
+    /// `CMD_DIS_IA` (see [`Node::avoid_interference`]); this field stays the start-up default.
+    pub avoid_interference: bool,
 }
 
 impl Default for NodeConfig {
@@ -63,7 +97,23 @@ impl Default for NodeConfig {
             max_tx_power: 22,
             queue_max_packets: 200,
             queue_max_bytes: 6144,
+            avoid_interference: false,
         }
+    }
+}
+
+/// A fresh channel-access state with interference avoidance set as given.
+fn new_csma(avoid_interference: bool) -> Csma {
+    let mut csma = Csma::new();
+    csma.set_avoid_interference(avoid_interference);
+    csma
+}
+
+/// Log a host packet handed to the radio: a debug line with its outcome, then a trace hex dump.
+fn log_tx(summary: PacketSummary, payload: &[u8], outcome: fmt::Arguments<'_>) {
+    log::debug!("TX packet: {summary}: {outcome}");
+    if log::log_enabled!(log::Level::Trace) {
+        log::trace!("TX payload, {} bytes:{}", payload.len(), HexDump(payload));
     }
 }
 
@@ -86,6 +136,7 @@ pub struct Node<R: Radio, S: Storage> {
     queue: TxQueue,
     reassembler: RxReassembler,
     csma: Csma,
+    avoid_interference: bool,
     freq: u32,
     bw: u32,
     txp: u8,
@@ -106,6 +157,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
     /// window, packet sequence numbers); pass real entropy outside of tests.
     pub fn new(radio: R, storage: S, config: NodeConfig, seed: u64) -> Self {
         let queue = TxQueue::new(config.queue_max_packets, config.queue_max_bytes);
+        let avoid_interference = config.avoid_interference;
         Self {
             radio,
             storage,
@@ -117,7 +169,8 @@ impl<R: Radio, S: Storage> Node<R, S> {
             decoder: kiss::Decoder::new(),
             queue,
             reassembler: RxReassembler::new(),
-            csma: Csma::new(),
+            csma: new_csma(avoid_interference),
+            avoid_interference,
             freq: 0,
             bw: 0,
             txp: 0xFF,
@@ -225,6 +278,12 @@ impl<R: Radio, S: Storage> Node<R, S> {
     /// The node's static configuration.
     pub fn config(&self) -> &NodeConfig {
         &self.config
+    }
+    /// Whether interference avoidance is on now: [`NodeConfig::avoid_interference`] until the
+    /// host changes it with `CMD_DIS_IA`. The host's value lasts until the process exits,
+    /// including across `CMD_RESET`.
+    pub fn avoid_interference(&self) -> bool {
+        self.avoid_interference
     }
     /// The radio driven by this node.
     pub fn radio(&self) -> &R {
@@ -413,6 +472,17 @@ impl<R: Radio, S: Storage> Node<R, S> {
                     log::warn!("failed to delete radio settings: {e}");
                 }
             }
+            // Firmware `dia_conf_save()`: 0x00 enables interference avoidance and any other byte
+            // disables it. The firmware stores the byte in EEPROM and reboots without replying;
+            // we only change the running node (see the module docs).
+            kiss::CMD_DIS_IA if payload.len() == 1 => {
+                self.avoid_interference = payload[0] == 0x00;
+                self.csma.set_avoid_interference(self.avoid_interference);
+                log::info!(
+                    "host {} interference avoidance (CMD_DIS_IA) until the process exits",
+                    if self.avoid_interference { "enabled" } else { "disabled" }
+                );
+            }
             // Display, Bluetooth, Wi-Fi, ROM and firmware-update commands are irrelevant for a
             // Linux modem process. Firmware either performs board-specific side effects or dumps
             // ROM data; we ignore them harmlessly unless covered above.
@@ -475,9 +545,16 @@ impl<R: Radio, S: Storage> Node<R, S> {
         if self.radio_online {
             self.stop_radio();
         }
+        if log::log_enabled!(log::Level::Debug) {
+            while let Some(packet) = self.queue.pop() {
+                log::debug!("dropping {}-byte TX packet: queue cleared by reset", packet.len());
+            }
+        }
         self.queue.clear();
         self.reassembler.reset();
-        self.csma = Csma::new();
+        // A fresh CSMA, as after the firmware's reboot, with the avoidance setting the host may
+        // have changed: the firmware rereads it from EEPROM at boot.
+        self.csma = new_csma(self.avoid_interference);
         self.decoder.reset();
         self.radio_online = false;
         self.freq = 0;
@@ -588,12 +665,21 @@ impl<R: Radio, S: Storage> Node<R, S> {
 
     fn transmit_packet(&mut self, payload: &[u8], now_ms: u64) -> (bool, bool, bool, bool) {
         if !self.radio_online {
+            log::debug!(
+                "dropping {}-byte TX packet: radio offline; sent ERROR_TXFAILED",
+                payload.len()
+            );
             self.reply_error(kiss::ERROR_TXFAILED);
             return (false, false, false, false);
         }
         let frames = if self.promisc {
             if payload.len() > kiss::SINGLE_MTU {
-                log::debug!("dropping promiscuous TX frame over the single-frame MTU");
+                log::debug!(
+                    "dropping {}-byte TX packet: exceeds the {}-byte single-frame MTU in promiscuous mode; \
+                     sent ERROR_TXFAILED",
+                    payload.len(),
+                    kiss::SINGLE_MTU
+                );
                 self.reply_error(kiss::ERROR_TXFAILED);
                 return (false, false, false, false);
             }
@@ -601,10 +687,15 @@ impl<R: Radio, S: Storage> Node<R, S> {
         } else {
             framing::tx_frames(payload, &mut self.rng)
         };
+        let summary = PacketSummary {
+            len: payload.len(),
+            frames: frames.len(),
+            header: if self.promisc { None } else { Some(frames[0][0]) },
+        };
         let mut ok_any = false;
-        for frame in frames {
+        for (index, frame) in frames.iter().enumerate() {
             let frame_len = frame.len();
-            match self.radio.transmit(&frame, self.promisc && self.implicit_len != 0) {
+            match self.radio.transmit(frame, self.promisc && self.implicit_len != 0) {
                 Ok(TxOutcome::Done) => {
                     ok_any = true;
                     if let Some(phy) = self.phy {
@@ -623,6 +714,20 @@ impl<R: Radio, S: Storage> Node<R, S> {
                     }
                 }
                 Ok(TxOutcome::Timeout) => {
+                    log::warn!(
+                        "modem timed out during TX; hard-resetting the node and dropping {} queued TX packet{}",
+                        self.queue.len(),
+                        plural(self.queue.len())
+                    );
+                    log_tx(
+                        summary,
+                        payload,
+                        format_args!(
+                            "modem timeout on frame {}/{}; sent ERROR_MODEM_TIMEOUT, ERROR_TXFAILED; hard reset",
+                            index + 1,
+                            summary.frames
+                        ),
+                    );
                     self.reply_error(kiss::ERROR_MODEM_TIMEOUT);
                     self.reply_error(kiss::ERROR_TXFAILED);
                     self.hard_reset(now_ms);
@@ -630,12 +735,22 @@ impl<R: Radio, S: Storage> Node<R, S> {
                 }
                 Err(e) => {
                     log::warn!("radio transmit failed: {e}");
+                    log_tx(
+                        summary,
+                        payload,
+                        format_args!(
+                            "radio error on frame {}/{}: {e}; sent ERROR_TXFAILED",
+                            index + 1,
+                            summary.frames
+                        ),
+                    );
                     self.reply_error(kiss::ERROR_TXFAILED);
                     return (ok_any, false, true, false);
                 }
             }
         }
         self.stat_tx = self.stat_tx.wrapping_add(1);
+        log_tx(summary, payload, format_args!("ok"));
         (ok_any, true, true, false)
     }
 
@@ -666,19 +781,39 @@ impl<R: Radio, S: Storage> Node<R, S> {
         } = frame;
         if self.promisc {
             if data.len() > kiss::SINGLE_MTU {
-                log::debug!("dropping promiscuous RX frame over the single-frame MTU");
+                log::debug!(
+                    "dropping {}-byte promiscuous RX frame: exceeds the {}-byte single-frame MTU",
+                    data.len(),
+                    kiss::SINGLE_MTU
+                );
                 return;
             }
-            self.deliver_packet(&data, rssi_dbm, snr_raw);
+            self.deliver_packet(&data, None, rssi_dbm, snr_raw);
             return;
         }
         match self.reassembler.process(&data) {
-            Reassembly::Complete(packet) => self.deliver_packet(&packet, rssi_dbm, snr_raw),
+            Reassembly::Complete(packet) => self.deliver_packet(&packet, data.first().copied(), rssi_dbm, snr_raw),
             Reassembly::Pending | Reassembly::Ignored => {}
         }
     }
 
-    fn deliver_packet(&mut self, packet: &[u8], rssi_dbm: i16, snr_raw: u8) {
+    /// Send a received packet to the host, preceded by its RSSI and SNR. `header` is the RNode
+    /// header byte of the frame that completed the packet; `None` for a promiscuous raw frame.
+    fn deliver_packet(&mut self, packet: &[u8], header: Option<u8>, rssi_dbm: i16, snr_raw: u8) {
+        let split = header.is_some_and(|h| h & kiss::FLAG_SPLIT != 0);
+        let summary = PacketSummary {
+            len: packet.len(),
+            frames: if split { 2 } else { 1 },
+            header,
+        };
+        // The values sent with CMD_STAT_RSSI / CMD_STAT_SNR below; the SNR byte is in 0.25 dB.
+        log::debug!(
+            "RX packet: {summary}, RSSI {rssi_dbm} dBm, SNR {:.2} dB",
+            f32::from(snr_raw as i8) * 0.25
+        );
+        if log::log_enabled!(log::Level::Trace) {
+            log::trace!("RX payload, {} bytes:{}", packet.len(), HexDump(packet));
+        }
         self.last_rssi = rssi_dbm;
         self.last_snr_raw = snr_raw;
         self.reply_stat_rssi();

@@ -231,8 +231,11 @@ impl Csma {
         self.lt_airtime_limit
     }
 
-    /// Configure whether detected non-LoRa interference makes the medium busy. Firmware reads
-    /// this from EEPROM (`avoid_interference`); the boot default is `true`.
+    /// Configure whether detected non-LoRa interference makes the medium busy (firmware
+    /// `avoid_interference`). [`Csma::new`] starts with `true`, the firmware's `Config.h`
+    /// initialiser, but the firmware's `setup()` then replaces it from EEPROM: only `0x00` at
+    /// `ADDR_CONF_DIA` turns it on, so erased EEPROM turns it off. [`crate::Node`] applies
+    /// [`crate::NodeConfig::avoid_interference`] instead.
     pub fn set_avoid_interference(&mut self, avoid: bool) {
         self.avoid_interference = avoid;
     }
