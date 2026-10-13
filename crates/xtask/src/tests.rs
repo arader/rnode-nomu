@@ -8,7 +8,611 @@ use std::time::{Duration, Instant};
 
 use rnode_linux::config::{Config, RadioDriver};
 
-use super::{CLIENT_PY, Children, KISS_BOUNDARY_PY, SERVER_PY, Scenario, create_private_dir, daemon_config};
+use super::{
+    CLIENT_PY, Children, KISS_BOUNDARY_PY, Options, RETICULUM_COMMIT, RETICULUM_REPO, SCENARIOS, SERVER_PY, Scenario,
+    Task, create_private_dir, daemon_config, dispatch, exit_status, fetch_reticulum, fnv1a64, parse_args,
+    requirements_fingerprint, reticulum_pin_warning, scenario_outcome, usage, write_log_tails,
+};
+
+fn args(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| arg.to_string()).collect()
+}
+
+/// The names of the scenarios `cargo xtask rns-e2e <args>` runs.
+fn scenarios(args_: &[&str]) -> Vec<&'static str> {
+    parse_args(&args(args_))
+        .unwrap()
+        .scenarios
+        .iter()
+        .map(|s| s.name)
+        .collect()
+}
+
+#[test]
+fn rns_e2e_runs_every_scenario_against_a_local_reticulum_by_default() {
+    assert_eq!(
+        parse_args(&[]).unwrap(),
+        Options {
+            reticulum: None,
+            fetch_reticulum: false,
+            keep_logs: false,
+            scenarios: SCENARIOS.to_vec(),
+            help: false,
+        }
+    );
+    assert_eq!(scenarios(&[]), ["sf7", "sf11"]);
+}
+
+/// `--scenario` picks scenarios by name. They run once each, in the harness's order, however often
+/// and in whatever order they were named.
+#[test]
+fn scenario_selects_the_named_scenarios() {
+    assert_eq!(scenarios(&["--scenario", "sf7"]), ["sf7"]);
+    assert_eq!(scenarios(&["--scenario", "sf11"]), ["sf11"]);
+    assert_eq!(scenarios(&["--scenario", "sf11", "--scenario", "sf7"]), ["sf7", "sf11"]);
+    assert_eq!(scenarios(&["--scenario", "sf7", "--scenario", "sf7"]), ["sf7"]);
+    assert_eq!(
+        scenarios(&["--keep-logs", "--scenario", "sf11", "--keep-logs"]),
+        ["sf11"]
+    );
+}
+
+#[test]
+fn an_unknown_scenario_is_an_error_that_lists_the_valid_ones() {
+    assert_eq!(
+        parse_args(&args(&["--scenario", "sf9"])).unwrap_err(),
+        "unknown scenario \"sf9\"; valid scenarios: sf7, sf11"
+    );
+    assert_eq!(
+        parse_args(&args(&["--scenario", "SF7"])).unwrap_err(),
+        "unknown scenario \"SF7\"; valid scenarios: sf7, sf11"
+    );
+    assert_eq!(
+        parse_args(&args(&["--scenario", "sf7", "--scenario", ""])).unwrap_err(),
+        "unknown scenario \"\"; valid scenarios: sf7, sf11"
+    );
+    assert_eq!(
+        parse_args(&args(&["--scenario"])).unwrap_err(),
+        "--scenario requires a name"
+    );
+    assert!(usage().contains("(sf7, sf11)"), "{}", usage());
+}
+
+#[test]
+fn fetch_reticulum_replaces_the_local_checkout() {
+    let options = parse_args(&args(&["--fetch-reticulum", "--scenario", "sf7"])).unwrap();
+    assert!(options.fetch_reticulum);
+    assert_eq!(options.reticulum, None);
+    assert_eq!(scenarios(&["--fetch-reticulum", "--scenario", "sf7"]), ["sf7"]);
+
+    let options = parse_args(&args(&["--reticulum", "../rns", "--keep-logs"])).unwrap();
+    assert!(!options.fetch_reticulum && options.keep_logs);
+    assert_eq!(options.reticulum.as_deref(), Some(Path::new("../rns")));
+
+    for both in [
+        ["--fetch-reticulum", "--reticulum", "../rns"],
+        ["--reticulum", "../rns", "--fetch-reticulum"],
+    ] {
+        assert_eq!(
+            parse_args(&args(&both)).unwrap_err(),
+            "--fetch-reticulum and --reticulum exclude each other"
+        );
+    }
+    assert_eq!(
+        parse_args(&args(&["--reticulum"])).unwrap_err(),
+        "--reticulum requires a path"
+    );
+}
+
+/// Switches may be repeated; a second path is ambiguous, so it is refused.
+#[test]
+fn repeated_flags() {
+    let options = parse_args(&args(&[
+        "--fetch-reticulum",
+        "--keep-logs",
+        "--fetch-reticulum",
+        "--keep-logs",
+    ]))
+    .unwrap();
+    assert!(options.fetch_reticulum && options.keep_logs);
+    assert_eq!(
+        parse_args(&args(&["--reticulum", "a", "--reticulum", "a"])).unwrap_err(),
+        "--reticulum given more than once"
+    );
+}
+
+/// `cargo xtask` runs `rns-e2e`, and prints its usage for `-h` or `--help`; both exit 0. No task,
+/// or one xtask does not know, is an error that shows the usage and exits 1: a mistyped task in a
+/// workflow must fail the job, not pass without running anything as it used to.
+#[test]
+fn tasks_dispatch_and_a_missing_or_unknown_task_exits_1() {
+    assert_eq!(dispatch(Some("rns-e2e")), Ok(Task::RnsE2e));
+    assert_eq!(dispatch(Some("-h")), Ok(Task::Help));
+    assert_eq!(dispatch(Some("--help")), Ok(Task::Help));
+    assert_eq!(dispatch(None), Err(usage()));
+    assert_eq!(
+        dispatch(Some("rns_e2e")),
+        Err(format!("unknown task \"rns_e2e\"\n{}", usage()))
+    );
+    assert!(dispatch(Some("")).is_err());
+    assert!(dispatch(Some("RNS-E2E")).is_err());
+
+    for (task, status) in [
+        (Some("rns-e2e"), 0),
+        (Some("-h"), 0),
+        (Some("--help"), 0),
+        (None, 1),
+        (Some("rns_e2e"), 1),
+        (Some("bogus"), 1),
+    ] {
+        assert_eq!(exit_status(&dispatch(task)), status, "{task:?}");
+    }
+}
+
+/// A scenario fails when its checks fail, when its processes do not shut down cleanly, or both,
+/// and then the error names both failures.
+#[test]
+fn a_scenario_fails_when_its_checks_or_its_shutdown_fail() {
+    let failed = |message: &str| -> Result<(), Box<dyn std::error::Error>> { Err(message.into()) };
+    let outcome = |checks, shutdown| scenario_outcome(checks, shutdown).map_err(|e| e.to_string());
+    assert_eq!(outcome(Ok(()), Ok(())), Ok(()));
+    assert_eq!(
+        outcome(failed("RNS client failed with exit status: 1"), Ok(())),
+        Err("RNS client failed with exit status: 1".to_owned())
+    );
+    assert_eq!(
+        outcome(Ok(()), failed("daemon-a exited with exit status: 1")),
+        Err("daemon-a exited with exit status: 1".to_owned())
+    );
+    assert_eq!(
+        outcome(
+            failed("KISS boundary probe timed out after 60s"),
+            failed("daemon-b did not exit after SIGTERM; killed with signal: 9 (SIGKILL)")
+        ),
+        Err("KISS boundary probe timed out after 60s; then, on shutdown: \
+             daemon-b did not exit after SIGTERM; killed with signal: 9 (SIGKILL)"
+            .to_owned())
+    );
+}
+
+#[test]
+fn unknown_arguments_are_errors_and_help_is_not() {
+    for unknown in [&["--scenarios", "sf7"][..], &["sf7"], &["--fetch-reticulum=yes"]] {
+        let error = parse_args(&args(unknown)).unwrap_err();
+        assert!(
+            error.starts_with(&format!("unknown rns-e2e argument {:?}\nusage: ", unknown[0])),
+            "{error}"
+        );
+    }
+    assert!(parse_args(&args(&["--help"])).unwrap().help);
+    assert!(parse_args(&args(&["-h"])).unwrap().help);
+}
+
+/// The pin `--fetch-reticulum` checks HEAD against must be a full commit hash: `git rev-parse HEAD`
+/// prints 40 lowercase hex digits, and a shorter pin would never match it.
+#[test]
+fn the_reticulum_pin_is_a_full_commit_hash() {
+    assert_eq!(RETICULUM_COMMIT.len(), 40, "{RETICULUM_COMMIT}");
+    assert!(
+        RETICULUM_COMMIT
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "{RETICULUM_COMMIT}"
+    );
+    assert!(RETICULUM_REPO.starts_with("https://"), "{RETICULUM_REPO}");
+}
+
+/// One requirement of a pip requirements file: `name==version`, any environment marker, and the
+/// `--hash` options of its continuation lines.
+#[derive(Debug)]
+struct Requirement {
+    line: String,
+    pin: Option<(String, String)>,
+    hashes: Vec<String>,
+}
+
+fn parse_requirements(text: &str) -> Vec<Requirement> {
+    let mut logical = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        // pip's comments start at a `#` at the start of a line or after whitespace.
+        let line = if line.trim_start().starts_with('#') {
+            ""
+        } else {
+            line.split(" #").next().unwrap_or_default()
+        };
+        if let Some(start) = line.trim_end().strip_suffix('\\') {
+            current.push_str(start);
+            current.push(' ');
+            continue;
+        }
+        current.push_str(line);
+        let words: Vec<&str> = current.split_whitespace().collect();
+        if !words.is_empty() {
+            logical.push(words.join(" "));
+        }
+        current.clear();
+    }
+    logical
+        .into_iter()
+        .map(|line| {
+            let requirement = line.split([';', ' ']).next().unwrap_or_default();
+            let pin = requirement
+                .split_once("==")
+                .map(|(name, version)| (name.to_owned(), version.to_owned()));
+            let hashes = line
+                .split_whitespace()
+                .filter_map(|word| word.strip_prefix("--hash="))
+                .map(str::to_owned)
+                .collect();
+            Requirement { line, pin, hashes }
+        })
+        .collect()
+}
+
+/// PEP 503's normalised project name.
+fn normalized(name: &str) -> String {
+    name.to_ascii_lowercase().replace(['_', '.'], "-")
+}
+
+/// `uv pip sync --require-hashes` installs exactly what requirements.txt pins, so every package in
+/// it must be pinned to one version and carry the sha256 hashes of its files. Every package
+/// requirements.in asks for must be in it: requirements.txt is regenerated from it.
+#[test]
+fn requirements_pin_every_package_with_hashes() {
+    let pinned = parse_requirements(include_str!("../../../tests/e2e/requirements.txt"));
+    assert!(pinned.len() >= 2, "{pinned:?}");
+    for requirement in &pinned {
+        let Some((name, version)) = &requirement.pin else {
+            panic!("not pinned with ==: {}", requirement.line);
+        };
+        assert!(
+            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
+            "{}",
+            requirement.line
+        );
+        assert!(
+            !version.is_empty() && !version.contains(['*', ',', '<', '>', '=', '!', '~']),
+            "not one exact version: {}",
+            requirement.line
+        );
+        assert!(!requirement.hashes.is_empty(), "no --hash: {}", requirement.line);
+        for hash in &requirement.hashes {
+            let digest = hash.strip_prefix("sha256:").unwrap_or_default();
+            assert!(
+                digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "not a sha256 hash: {hash}"
+            );
+        }
+    }
+
+    let names: Vec<String> = pinned
+        .iter()
+        .filter_map(|r| r.pin.as_ref())
+        .map(|(name, _)| normalized(name))
+        .collect();
+    let wanted = include_str!("../../../tests/e2e/requirements.in")
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default().trim())
+        .filter(|line| !line.is_empty());
+    for package in wanted {
+        let name = package
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "-_.".contains(c)))
+            .next()
+            .unwrap_or_default();
+        assert!(
+            names.contains(&normalized(name)),
+            "requirements.in asks for {package}, but requirements.txt does not pin it; regenerate it"
+        );
+    }
+    for package in ["cryptography", "pyserial"] {
+        assert!(names.iter().any(|name| name == package), "{names:?}");
+    }
+}
+
+#[test]
+fn requirements_parser_joins_continuations_and_skips_comments() {
+    let parsed = parse_requirements(
+        "# header\n\
+         cffi==2.1.1 ; platform_python_implementation != 'PyPy' \\\n    \
+             --hash=sha256:aa \\\n    \
+             --hash=sha256:bb\n    \
+             # via cryptography\n\
+         pyserial \\\n    \
+             --hash=sha256:cc\n",
+    );
+    assert_eq!(parsed.len(), 2, "{parsed:?}");
+    assert_eq!(parsed[0].pin, Some(("cffi".into(), "2.1.1".into())));
+    assert_eq!(parsed[0].hashes, ["sha256:aa", "sha256:bb"]);
+    assert_eq!(parsed[1].pin, None);
+    assert_eq!(parsed[1].hashes, ["sha256:cc"]);
+}
+
+/// The venv marker holds a fingerprint of requirements.txt, so the venv is synced again exactly when
+/// the file changes. FNV-1a's published test vectors pin the function down.
+#[test]
+fn the_venv_marker_changes_with_the_requirements() {
+    assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+    assert_eq!(fnv1a64(b"foobar"), 0x8594_4171_f739_67e8);
+
+    assert_eq!(
+        requirements_fingerprint(b"foobar"),
+        "tests/e2e/requirements.txt fnv1a64:85944171f73967e8\n"
+    );
+    let pinned = b"pyserial==3.5 --hash=sha256:aa\n";
+    assert_eq!(requirements_fingerprint(pinned), requirements_fingerprint(pinned));
+    assert_ne!(
+        requirements_fingerprint(pinned),
+        requirements_fingerprint(b"pyserial==3.5 --hash=sha256:ab\n")
+    );
+}
+
+const PR_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/pr.yml");
+const CI_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/ci.yml");
+
+/// The lines of the step called `name` in `workflow`, from its `- name:` line to the next step,
+/// the comment above that, or the next job.
+fn workflow_step<'a>(workflow: &'a str, name: &str) -> Vec<&'a str> {
+    let header = format!("- name: {name}");
+    let mut lines = workflow.lines().skip_while(|line| line.trim() != header);
+    let first = lines.next().unwrap_or_else(|| panic!("no step {name:?}"));
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    std::iter::once(first)
+        .chain(lines.take_while(|line| line.trim().is_empty() || indent(line) > indent(first)))
+        .collect()
+}
+
+/// The names of the steps of the `test` job in `workflow`.
+fn test_job_step_names(workflow: &str) -> Vec<&str> {
+    // A job's lines are blank or indented further than the job keys, `  test:` and the next one.
+    let is_job_key = |line: &str| line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':');
+    workflow
+        .lines()
+        .skip_while(|line| *line != "  test:")
+        .skip(1)
+        .take_while(|line| !is_job_key(line))
+        .filter_map(|line| line.trim().strip_prefix("- name: "))
+        .collect()
+}
+
+/// main runs every check a pull request runs: each step of pr.yml's test job is in ci.yml's test
+/// job, word for word, except the SF7 end-to-end step, whose scenarios ci.yml runs all of.
+#[test]
+fn main_runs_every_check_pull_requests_run() {
+    let pr_steps = test_job_step_names(PR_WORKFLOW);
+    let ci_steps = test_job_step_names(CI_WORKFLOW);
+    assert!(
+        pr_steps.contains(&"Tests") && pr_steps.contains(&"Install uv"),
+        "{pr_steps:?}"
+    );
+    for &name in pr_steps.iter().filter(|&&name| name != "RNS end-to-end (SF7)") {
+        assert!(ci_steps.contains(&name), "ci.yml has no step {name:?}: {ci_steps:?}");
+        assert_eq!(
+            workflow_step(PR_WORKFLOW, name),
+            workflow_step(CI_WORKFLOW, name),
+            "{name}"
+        );
+    }
+    assert!(ci_steps.contains(&"RNS end-to-end (all scenarios)"), "{ci_steps:?}");
+}
+
+/// pr.yml and ci.yml install uv with the same step, so that the pinned release and its hashes
+/// cannot drift apart.
+#[test]
+fn pr_and_ci_workflows_install_the_same_uv() {
+    let step = workflow_step(PR_WORKFLOW, "Install uv");
+    assert_eq!(step, workflow_step(CI_WORKFLOW, "Install uv"));
+    let script = step.join("\n");
+    for expected in [
+        "set -euo pipefail",
+        "x86_64)",
+        "aarch64)",
+        "curl --fail",
+        "--retry 3",
+        "sha256sum --check --strict",
+        "\"$FORGEJO_PATH\"",
+    ] {
+        assert!(script.contains(expected), "{expected:?} missing from\n{script}");
+    }
+}
+
+/// Pull requests run the SF7 scenario and main runs every scenario, both against the pinned
+/// Reticulum.
+#[test]
+fn workflows_run_the_e2e_test_against_the_pinned_reticulum() {
+    for (workflow, step, expected) in [
+        (PR_WORKFLOW, "RNS end-to-end (SF7)", &["sf7"][..]),
+        (CI_WORKFLOW, "RNS end-to-end (all scenarios)", &["sf7", "sf11"]),
+    ] {
+        let step = workflow_step(workflow, step);
+        let command = step
+            .iter()
+            .find_map(|line| line.trim().strip_prefix("run: cargo xtask rns-e2e"))
+            .unwrap_or_else(|| panic!("no `cargo xtask rns-e2e` in {step:?}"));
+        let options = parse_args(&command.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).unwrap();
+        assert!(options.fetch_reticulum, "{command}");
+        assert_eq!(options.scenarios.iter().map(|s| s.name).collect::<Vec<_>>(), expected);
+    }
+}
+
+/// Runs `git` in `dir` with a fixed identity and no signing, whatever the user's configuration, or
+/// returns `None` when there is no `git` to run.
+fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = match Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=xtask tests",
+            "-c",
+            "user.email=xtask@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == ErrorKind::NotFound => return None,
+        Err(e) => panic!("start git: {e}"),
+    };
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// A stand-in for the Reticulum repository at `dir` with two commits; returns their hashes, oldest
+/// first, or `None` when there is no `git`.
+fn upstream_reticulum(dir: &Path) -> Option<[String; 2]> {
+    fs::create_dir_all(dir.join("RNS")).unwrap();
+    fs::write(dir.join("RNS/__init__.py"), "__version__ = '1'\n").unwrap();
+    git_in(dir, &["init", "--quiet"])?;
+    git_in(dir, &["add", "."])?;
+    git_in(dir, &["commit", "--quiet", "-m", "one"])?;
+    let first = git_in(dir, &["rev-parse", "HEAD"])?;
+    fs::write(dir.join("RNS/__init__.py"), "__version__ = '2'\n").unwrap();
+    git_in(dir, &["commit", "--quiet", "-am", "two"])?;
+    let second = git_in(dir, &["rev-parse", "HEAD"])?;
+    Some([first, second])
+}
+
+/// `--fetch-reticulum` fetches the pinned commit, also one behind the branch tip as a pin usually
+/// is, checks it out, and reuses that checkout on later runs without going to the network. A
+/// checkout with local changes is refused. Skipped without `git`; the CI builder image has it.
+#[test]
+fn fetch_reticulum_fetches_the_pinned_commit_and_reuses_it() {
+    let dir = test_dir("fetch-reticulum");
+    let upstream = dir.join("upstream");
+    let Some([pinned, _tip]) = upstream_reticulum(&upstream) else {
+        eprintln!("skipping the Reticulum fetch check: git is not on PATH");
+        return;
+    };
+    let repo = format!("file://{}", upstream.display());
+    let cache = dir.join("rns-e2e");
+    fs::create_dir_all(&cache).unwrap();
+
+    let checkout = fetch_reticulum(&cache, &repo, &pinned, &[]).unwrap();
+    assert_eq!(checkout, cache.join(format!("reticulum-{}", &pinned[..12])));
+    assert_eq!(git_in(&checkout, &["rev-parse", "HEAD"]).unwrap(), pinned);
+    assert_eq!(
+        fs::read_to_string(checkout.join("RNS/__init__.py")).unwrap(),
+        "__version__ = '1'\n"
+    );
+    assert!(!cache.join(format!("reticulum-{}.partial", &pinned[..12])).exists());
+
+    // Reused: the upstream is gone, and Python's bytecode caches are not local changes.
+    fs::remove_dir_all(&upstream).unwrap();
+    fs::create_dir_all(checkout.join("RNS/__pycache__")).unwrap();
+    fs::write(checkout.join("RNS/__pycache__/__init__.cpython-313.pyc"), "").unwrap();
+    assert_eq!(fetch_reticulum(&cache, &repo, &pinned, &[]).unwrap(), checkout);
+
+    fs::write(checkout.join("RNS/__init__.py"), "__version__ = 'patched'\n").unwrap();
+    let error = fetch_reticulum(&cache, &repo, &pinned, &[]).unwrap_err().to_string();
+    assert!(error.contains("has local changes"), "{error}");
+    assert!(error.contains("delete"), "{error}");
+}
+
+/// A checkout that is not at the pin is refused rather than used, and a fetch that keeps failing is
+/// retried once per delay and then reported, leaving no checkout behind.
+#[test]
+fn fetch_reticulum_refuses_another_commit_and_reports_failed_fetches() {
+    let dir = test_dir("fetch-reticulum-errors");
+    let upstream = dir.join("upstream");
+    let Some([first, second]) = upstream_reticulum(&upstream) else {
+        eprintln!("skipping the Reticulum fetch check: git is not on PATH");
+        return;
+    };
+    let repo = format!("file://{}", upstream.display());
+    let cache = dir.join("rns-e2e");
+    fs::create_dir_all(&cache).unwrap();
+
+    let checkout = fetch_reticulum(&cache, &repo, &first, &[]).unwrap();
+    git_in(&checkout, &["fetch", "--quiet", "--depth", "1", &repo, &second]).unwrap();
+    git_in(&checkout, &["checkout", "--quiet", "--detach", &second]).unwrap();
+    let error = fetch_reticulum(&cache, &repo, &first, &[]).unwrap_err().to_string();
+    assert!(
+        error.contains(&format!("is at {second}, not the pinned {first}")),
+        "{error}"
+    );
+
+    let missing = "0123456789abcdef0123456789abcdef01234567";
+    let start = Instant::now();
+    let error = fetch_reticulum(&cache, &repo, missing, &[Duration::ZERO, Duration::from_millis(1)])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("in 3 attempts"), "{error}");
+    assert!(!cache.join("reticulum-0123456789ab").exists());
+    assert!(start.elapsed() < Duration::from_secs(60));
+
+    let error = fetch_reticulum(&cache, &repo, "e40191b", &[]).unwrap_err().to_string();
+    assert!(error.contains("not a full commit hash"), "{error}");
+}
+
+/// A local Reticulum checkout that is not at the pin, or whose commit cannot be told, gets a
+/// warning, not an error. Skipped without `git`.
+#[test]
+fn a_local_reticulum_off_the_pin_gets_a_warning() {
+    let dir = test_dir("reticulum-pin-warning");
+    let upstream = dir.join("upstream");
+    let Some([first, second]) = upstream_reticulum(&upstream) else {
+        eprintln!("skipping the Reticulum pin check: git is not on PATH");
+        return;
+    };
+    assert_eq!(reticulum_pin_warning(&upstream, &second), None);
+    let warning = reticulum_pin_warning(&upstream, &first).unwrap();
+    assert!(
+        warning.contains(&format!("is at {second}, not the pinned {first} that CI tests")),
+        "{warning}"
+    );
+    assert!(warning.contains("--fetch-reticulum"), "{warning}");
+
+    let unpacked = dir.join("unpacked");
+    fs::create_dir_all(unpacked.join("RNS")).unwrap();
+    let warning = reticulum_pin_warning(&unpacked, &first).unwrap();
+    assert!(warning.contains("is not a git checkout"), "{warning}");
+}
+
+/// When a scenario fails, the harness prints the end of each of its logs, in path order, so that a
+/// CI log shows why.
+#[test]
+fn a_failed_scenario_prints_the_tail_of_each_log() {
+    let dir = test_dir("log-tails");
+    fs::create_dir_all(dir.join("a").join("rns")).unwrap();
+    let daemon_log: String = (1..=150).map(|i| format!("daemon line {i}\n")).collect();
+    fs::write(dir.join("a").join("daemon.log"), daemon_log).unwrap();
+    fs::write(dir.join("rns-client.log"), "path found\nlink timed out\n").unwrap();
+    fs::write(dir.join("client.error"), "timeout waiting for link active").unwrap();
+    fs::write(dir.join("timings.json"), "{\"sf\": 7}").unwrap();
+    fs::write(dir.join("a").join("rns").join("config"), "[reticulum]").unwrap();
+
+    let mut out = Vec::new();
+    write_log_tails(&dir, 100, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+    let headers: Vec<&str> = out.lines().filter(|line| line.starts_with("=====")).collect();
+    assert_eq!(
+        headers,
+        [
+            format!(
+                "===== {} (last 100 of 150 lines) =====",
+                dir.join("a").join("daemon.log").display()
+            ),
+            format!("===== {} (1 line) =====", dir.join("client.error").display()),
+            format!("===== {} (2 lines) =====", dir.join("rns-client.log").display()),
+        ]
+    );
+    assert!(out.contains("\ndaemon line 51\n"), "{out}");
+    assert!(out.contains("\ndaemon line 150\n"), "{out}");
+    assert!(!out.contains("\ndaemon line 50\n"), "{out}");
+    assert!(out.contains("\ntimeout waiting for link active\n"), "{out}");
+    assert!(out.ends_with("\npath found\nlink timed out\n"), "{out}");
+    assert!(!out.contains("\"sf\"") && !out.contains("[reticulum]"), "{out}");
+}
 
 /// The daemon rejects unknown keys (`deny_unknown_fields`), so the config the harness writes
 /// must stay loadable by the rnode-linux it drives.

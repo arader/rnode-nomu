@@ -54,7 +54,7 @@ that modem act as an RNode:
 - **Linux tooling.** Configuration lives in a TOML file, the daemon runs under systemd, logs go to
   the journal with optional per-packet detail, and an SPI recorder captures every modem transaction.
 - **Testability.** The RNode logic is a pure Rust library tested against values derived from the
-  firmware. A simulated radio runs the whole daemon in CI, and under real Reticulum on demand.
+  firmware. A simulated radio runs the whole daemon in CI, under real Reticulum too.
 
 rnode-linux is not a Reticulum interface and not a new protocol: it is the modem side of the
 existing RNode protocol, running on Linux instead of a microcontroller.
@@ -1053,14 +1053,20 @@ daemon pointed at the same `air_dir` hears the others.
 
 ### Tests
 
-CI runs these four steps on every pull request, in this order:
+CI runs these six steps on every pull request, in this order:
 
 ```sh
 cargo fmt --all --check
 cargo build --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 ```
+
+The last one is the SF7 scenario of the [Reticulum end-to-end test](#reticulum-end-to-end-test).
+After every merge, CI on `main` ([`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml)) runs the
+same steps with every scenario of that test, so every commit on `main` is checked with all of them.
 
 - `rnode-core` checks the KISS protocol, framing, CSMA/CA, PHY timing and logging against values
   derived from the firmware.
@@ -1075,27 +1081,41 @@ cargo test --locked
   starts two daemon processes on the simulated radio. It checks that KISS data frames of 1, 254,
   255 and 508 bytes travel between their PTYs in both directions, and that a 509-byte frame is
   dropped. It is part of `cargo test`, so it runs in CI.
+- The Python unit tests in [`tools/hwtest`](tools/hwtest) check the hardware test tools without
+  hardware or Reticulum. For the over-the-air LXMF echo test they cover the frequency and power
+  limits, the arguments, how it describes packets and matches them to the daemon's debug log, and,
+  with stand-ins for Reticulum and LXMF, path discovery, the identity file and the echo verdicts.
+  They need only the Python standard library.
 
 ### Reticulum end-to-end test
 
-`cargo xtask rns-e2e` runs real Reticulum against two simulated daemons. It needs a Reticulum
-checkout and [uv](https://docs.astral.sh/uv/), so it is run by hand, not in CI; a run takes about
-five minutes:
+`cargo xtask rns-e2e` runs real Reticulum against two simulated daemons. CI runs it: every pull
+request runs its SF7 scenario, about a minute, and `main` runs every scenario, about five minutes,
+after each merge. It needs [uv](https://docs.astral.sh/uv/) and git. To run what a pull request
+runs:
 
 ```sh
-cargo xtask rns-e2e --reticulum ../Reticulum --keep-logs
+cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 ```
 
-- Without `--reticulum` it uses `$RNODE_RETICULUM`, or `../Reticulum` next to the repository.
+- `--fetch-reticulum` tests the Reticulum commit CI tests, pinned in `crates/xtask` (1.5.5,
+  `e40191b`): it fetches that commit into `target/rns-e2e` and checks it. Without it, the harness
+  uses the checkout given with `--reticulum PATH`, else `$RNODE_RETICULUM`, else `../Reticulum`
+  next to the repository, and warns if that checkout is not at the pinned commit.
+- Without `--scenario` it runs every scenario, as `main` does. `--scenario sf11` runs the slow one
+  alone; `--keep-logs` keeps the logs of a passing run.
 - It builds the daemon, starts two instances on a private air directory under `target/rns-e2e`, and
-  creates a virtual environment with `pyserial` and `cryptography`.
+  installs `pyserial` and `cryptography` into a virtual environment, at the exact versions and
+  hashes in [`tests/e2e/requirements.txt`](tests/e2e/requirements.txt).
 - At 125 kHz with SF7, and with SF11, where the firmware's low-data-rate rule and the textbook
   one disagree, it first probes the KISS boundary sizes (1, 254, 255, 508 and 509 bytes) in both
   directions. Then two Reticulum processes discover each other, establish a link, exchange packets
   and transfer a 4 KiB resource.
-- Logs stay in `target/rns-e2e` when a run fails, and with `--keep-logs` also when it passes.
+- When a scenario fails, it prints the last 100 lines of each daemon and Reticulum log, so a CI log
+  shows the cause. The logs stay in `target/rns-e2e`, and with `--keep-logs` also after a pass.
 
-[`crates/xtask/README.md`](crates/xtask/README.md) has the details and typical timings.
+[`crates/xtask/README.md`](crates/xtask/README.md) has the details, typical timings, and how to
+move the pinned Reticulum, Python packages and uv.
 [`tests/e2e/kiss_probe.py`](tests/e2e/kiss_probe.py) also works on its own against any daemon PTY,
 real hardware included:
 
@@ -1253,8 +1273,9 @@ compare the SPI log with the sequence `begin()` sends in
 
 ## Contributing
 
-Changes go through pull requests on Forgejo (`infra/rnode-linux`), and CI runs the four
-[test steps](#tests) on each. [AGENTS.md](AGENTS.md) has the rules: test layout, firmware
+Changes go through pull requests on Forgejo (`infra/rnode-linux`), and CI runs the six
+[test steps](#tests) on each, the last of them the SF7 Reticulum end-to-end test; `main` gets every
+scenario after the merge. [AGENTS.md](AGENTS.md) has the rules: test layout, firmware
 references, and tests for every behaviour change. New radio drivers start with
 [DRIVERS.md](DRIVERS.md).
 

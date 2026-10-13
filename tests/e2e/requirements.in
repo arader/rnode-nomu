@@ -1,0 +1,8 @@
+# Python packages for `cargo xtask rns-e2e`: Reticulum's dependencies (its setup.py) and pyserial,
+# which the harness's KISS boundary probe also uses. requirements.txt pins them with hashes; after
+# changing this file, regenerate it from the repository root (see crates/xtask/README.md):
+#
+#   uv pip compile --universal --generate-hashes --python-version 3.13 \
+#     tests/e2e/requirements.in -o tests/e2e/requirements.txt
+cryptography
+pyserial

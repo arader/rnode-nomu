@@ -1,0 +1,87 @@
+name: CI
+
+# Verifies main after every merge, and any branch on demand (Actions → CI → Run workflow): the
+# checks of pr.yml's test job, then the Reticulum end-to-end test with every scenario. Pull requests
+# run only its SF7 scenario; SF11 adds Reticulum's timing against slow modulation. No agent
+# reviews: changes reach main through reviewed pull requests.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Runs for the same ref queue up instead of cancelling each other: by default Forgejo cancels a
+# push run when the next push arrives, and every commit on main should get a complete run.
+concurrency:
+  group: ci-${{ forgejo.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: builder-node24
+    # About six minutes, most of it SF11 airtime. The end-to-end test's own timeouts and retries
+    # end it within about half an hour even when downloads stall and every scenario hangs.
+    timeout-minutes: 60
+    env:
+      # The runner has little memory and runs one job at a time (see infra/forgejo-runners), so keep
+      # rustc's peak memory down. These change how the code is compiled, not what is checked.
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Build
+        run: cargo build --locked --all-targets
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+      # The hardware test tools' unit tests: standard library only, so the image's Python runs
+      # them as it is.
+      - name: Python unit tests (tools/hwtest)
+        run: python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+      # uv runs the Reticulum end-to-end test's Python; the image has no uv or pip. The release is
+      # pinned and verified against the sha256 in its sha256.sum. pr.yml has the same step: bump
+      # both together (crates/xtask/README.md).
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          version=0.12.17
+          case "$(uname -m)" in
+            x86_64)
+              target=x86_64-unknown-linux-gnu
+              sha256=fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63 ;;
+            aarch64)
+              target=aarch64-unknown-linux-gnu
+              sha256=d636d1b678e9e7f367ecb22b46bd1cabbed234d6bc3b4d96365d2b507f72f86c ;;
+            *)
+              echo "no pinned uv for $(uname -m)" >&2
+              exit 1 ;;
+          esac
+          dir=$(mktemp -d "$RUNNER_TEMP/uv.XXXXXX")
+          curl --fail --silent --show-error --location --retry 3 --output "$dir/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/$version/uv-$target.tar.gz"
+          echo "$sha256  $dir/uv.tar.gz" | sha256sum --check --strict
+          tar -xzf "$dir/uv.tar.gz" -C "$dir" --strip-components=1 --no-same-owner
+          rm "$dir/uv.tar.gz"
+          "$dir/uv" --version
+          echo "$dir" >> "$FORGEJO_PATH"
+      # Every scenario (SF7, SF11) of Reticulum's RNodeInterface against two simulated daemons,
+      # with the pinned Reticulum and Python packages.
+      - name: RNS end-to-end (all scenarios)
+        env:
+          # The image's Python, never a downloaded one.
+          UV_PYTHON_DOWNLOADS: never
+          # uv's cache and the workspace are on different filesystems, so it copies instead of
+          # hardlinking; say so, rather than have it warn.
+          UV_LINK_MODE: copy
+        run: cargo xtask rns-e2e --fetch-reticulum

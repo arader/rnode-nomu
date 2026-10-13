@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,51 +14,182 @@ const FREQUENCY_HZ: u32 = 914_875_000;
 const BANDWIDTH_HZ: u32 = 125_000;
 const TX_POWER_DBM: u8 = 2;
 const CODING_RATE: u8 = 5;
-const PY_REQUIREMENTS: &[&str] = &["pyserial", "cryptography"];
 
-fn main() {
-    if let Err(err) = real_main() {
+/// Every scenario, in the order they run: SF7 is quick; SF11 is the slow, long-range case.
+const SCENARIOS: [Scenario; 2] = [Scenario { name: "sf7", sf: 7 }, Scenario { name: "sf11", sf: 11 }];
+
+/// The Reticulum that `--fetch-reticulum` tests and CI runs: 1.5.5-1-ge40191b3 (`RNS.__version__`
+/// 1.5.5). Every validation of rnode-linux against Reticulum so far used this commit.
+/// crates/xtask/README.md explains how to move the pin.
+const RETICULUM_REPO: &str = "https://github.com/markqvist/Reticulum.git";
+const RETICULUM_COMMIT: &str = "e40191b3d193b46b7f2d8a44424a594cd758839b";
+
+/// Waits before each retry of a failed `git fetch` of the pinned Reticulum.
+const FETCH_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(30)];
+
+/// The harness's Python packages, every one pinned with hashes, relative to the workspace root.
+/// tests/e2e/requirements.in says what they are for and how to regenerate this file.
+const REQUIREMENTS: &str = "tests/e2e/requirements.txt";
+
+/// How much of each log a failed scenario prints: enough to see why it failed, and short enough
+/// for a CI log.
+const FAILURE_LOG_LINES: usize = 100;
+
+fn main() -> ExitCode {
+    let result = real_main();
+    if let Err(err) = &result {
         eprintln!("xtask: {err}");
-        std::process::exit(1);
     }
+    ExitCode::from(exit_status(&result))
+}
+
+/// The exit status for what `real_main` returned: 0 for success, 1 for any error, including no
+/// task or a task xtask does not know.
+fn exit_status<T, E>(result: &Result<T, E>) -> u8 {
+    if result.is_ok() { 0 } else { 1 }
 }
 
 fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    match args.next().as_deref() {
-        Some("rns-e2e") => rns_e2e(args.collect()),
-        _ => {
-            eprintln!("usage: cargo xtask rns-e2e [--reticulum PATH] [--keep-logs]");
+    match dispatch(args.next().as_deref())? {
+        Task::RnsE2e => rns_e2e(args.collect()),
+        Task::Help => {
+            println!("{}", usage());
             Ok(())
         }
     }
 }
 
-fn rns_e2e(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let root = workspace_root()?;
-    let mut reticulum = env::var_os("RNODE_RETICULUM")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("..").join("Reticulum"));
+/// What `cargo xtask <task>` runs.
+#[derive(Debug, PartialEq, Eq)]
+enum Task {
+    /// `rns-e2e`, with the arguments after it.
+    RnsE2e,
+    /// `-h` or `--help`: print the usage.
+    Help,
+}
+
+/// The task the first argument names. No task, or one xtask does not know, is an error rather than
+/// a silent success: CI runs tasks by name, and a mistyped one must fail the job.
+fn dispatch(task: Option<&str>) -> Result<Task, String> {
+    match task {
+        Some("rns-e2e") => Ok(Task::RnsE2e),
+        Some("-h" | "--help") => Ok(Task::Help),
+        Some(other) => Err(format!("unknown task {other:?}\n{}", usage())),
+        None => Err(usage()),
+    }
+}
+
+fn usage() -> String {
+    format!(
+        "usage: cargo xtask rns-e2e [--scenario NAME]... [--reticulum PATH | --fetch-reticulum] [--keep-logs]
+
+Runs Reticulum's RNodeInterface against two simulated rnode-linux daemons (crates/xtask/README.md).
+
+  --scenario NAME    run only this scenario ({names}); repeat it to run several. Default: all
+  --reticulum PATH   the Reticulum checkout to test. Default: $RNODE_RETICULUM, else ../Reticulum
+  --fetch-reticulum  test the pinned Reticulum commit, fetched into target/rns-e2e, as CI does
+  --keep-logs        keep the logs in target/rns-e2e/runs after a pass too",
+        names = scenario_names()
+    )
+}
+
+fn scenario_names() -> String {
+    SCENARIOS.map(|s| s.name).join(", ")
+}
+
+/// The arguments of `cargo xtask rns-e2e`.
+#[derive(Debug, PartialEq)]
+struct Options {
+    /// `--reticulum PATH`, as given.
+    reticulum: Option<PathBuf>,
+    /// `--fetch-reticulum`: test the pinned commit instead of a local checkout.
+    fetch_reticulum: bool,
+    keep_logs: bool,
+    /// The scenarios to run, in `SCENARIOS` order: the ones `--scenario` named, or all of them.
+    scenarios: Vec<Scenario>,
+    help: bool,
+}
+
+fn parse_args(args: &[String]) -> Result<Options, String> {
+    let mut reticulum = None;
+    let mut fetch_reticulum = false;
     let mut keep_logs = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--reticulum" => {
-                i += 1;
-                reticulum = args.get(i).ok_or("--reticulum requires a path")?.into();
+    let mut help = false;
+    let mut named = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--scenario" => {
+                let name = args.next().ok_or("--scenario requires a name")?;
+                if !SCENARIOS.iter().any(|s| s.name == name) {
+                    return Err(format!(
+                        "unknown scenario {name:?}; valid scenarios: {}",
+                        scenario_names()
+                    ));
+                }
+                named.push(name.as_str());
             }
+            "--reticulum" => {
+                let path = args.next().ok_or("--reticulum requires a path")?;
+                if reticulum.replace(PathBuf::from(path)).is_some() {
+                    return Err("--reticulum given more than once".into());
+                }
+            }
+            "--fetch-reticulum" => fetch_reticulum = true,
             "--keep-logs" => keep_logs = true,
-            other => return Err(format!("unknown rns-e2e argument {other:?}").into()),
+            "-h" | "--help" => help = true,
+            other => return Err(format!("unknown rns-e2e argument {other:?}\n{}", usage())),
         }
-        i += 1;
     }
-    // A relative --reticulum or $RNODE_RETICULUM is relative to where xtask was started, and
-    // the Python processes need an absolute PYTHONPATH.
-    let reticulum = env::current_dir()?.join(reticulum);
+    if fetch_reticulum && reticulum.is_some() {
+        return Err("--fetch-reticulum and --reticulum exclude each other".into());
+    }
+    let scenarios = SCENARIOS
+        .into_iter()
+        .filter(|s| named.is_empty() || named.contains(&s.name))
+        .collect();
+    Ok(Options {
+        reticulum,
+        fetch_reticulum,
+        keep_logs,
+        scenarios,
+        help,
+    })
+}
+
+fn rns_e2e(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_args(&args)?;
+    if options.help {
+        println!("{}", usage());
+        return Ok(());
+    }
+    let root = workspace_root()?;
+    let e2e_dir = root.join("target").join("rns-e2e");
+    let reticulum = if options.fetch_reticulum {
+        fs::create_dir_all(&e2e_dir)?;
+        fetch_reticulum(&e2e_dir, RETICULUM_REPO, RETICULUM_COMMIT, &FETCH_RETRY_DELAYS)?
+    } else {
+        // A relative --reticulum or $RNODE_RETICULUM is relative to where xtask was started, and
+        // the Python processes need an absolute PYTHONPATH.
+        let reticulum = options
+            .reticulum
+            .or_else(|| env::var_os("RNODE_RETICULUM").map(PathBuf::from))
+            .unwrap_or_else(|| root.join("..").join("Reticulum"));
+        let reticulum = env::current_dir()?.join(reticulum);
+        if !reticulum.join("RNS").is_dir() {
+            return Err(format!(
+                "Reticulum checkout not found at {}; pass --reticulum PATH, or --fetch-reticulum to fetch the pinned one",
+                reticulum.display()
+            )
+            .into());
+        }
+        if let Some(warning) = reticulum_pin_warning(&reticulum, RETICULUM_COMMIT) {
+            eprintln!("xtask: warning: {warning}");
+        }
+        reticulum
+    };
     env::set_current_dir(&root)?;
-    if !reticulum.join("RNS").is_dir() {
-        return Err(format!("Reticulum checkout not found at {}", reticulum.display()).into());
-    }
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     run(
@@ -73,51 +204,192 @@ fn rns_e2e(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         .join(unique_run_name());
     fs::create_dir_all(&base_run_dir)?;
     let uv = find_uv()?;
-    let venv = root.join("target").join("rns-e2e").join("venv");
+    let venv = e2e_dir.join("venv");
+    let requirements = root.join(REQUIREMENTS);
     let requirements_marker = venv.join(".rnode-linux-e2e-requirements");
-    let requirements_text = PY_REQUIREMENTS.join("\n");
+    let requirements_fingerprint = requirements_fingerprint(&fs::read(&requirements)?);
     if !venv.join("pyvenv.cfg").exists() {
         run(
             &root,
             Command::new(&uv).args(["venv", venv.to_str().ok_or("bad venv path")?]),
         )?;
     }
-    if fs::read_to_string(&requirements_marker).ok().as_deref() != Some(requirements_text.as_str()) {
+    if fs::read_to_string(&requirements_marker).ok().as_deref() != Some(requirements_fingerprint.as_str()) {
+        // `sync` rather than `install`: it also removes packages the file does not pin, such as
+        // those an older harness installed unpinned into the same venv.
         let python = venv.join("bin/python");
         let mut cmd = Command::new(&uv);
-        cmd.args(["pip", "install", "--python", python.to_str().ok_or("bad python path")?])
-            .args(PY_REQUIREMENTS);
+        cmd.args(["pip", "sync", "--require-hashes", "--python"])
+            .arg(&python)
+            .arg(&requirements);
         run(&root, &mut cmd)?;
-        fs::write(requirements_marker, requirements_text)?;
+        fs::write(requirements_marker, requirements_fingerprint)?;
     }
 
-    let scenarios = [Scenario { name: "sf7", sf: 7 }, Scenario { name: "sf11", sf: 11 }];
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        for scenario in scenarios {
+        for &scenario in &options.scenarios {
             run_scenario(&base_run_dir, &daemon, &venv, &reticulum, scenario)?;
         }
         Ok(())
     })();
 
+    let names = options.scenarios.iter().map(|s| s.name).collect::<Vec<_>>().join(", ");
     match result {
         Ok(()) => {
-            if keep_logs {
-                println!("rns-e2e passed; logs kept in {}", base_run_dir.display());
+            if options.keep_logs {
+                println!("rns-e2e passed ({names}); logs kept in {}", base_run_dir.display());
             } else {
                 fs::remove_dir_all(&base_run_dir)?;
-                println!("rns-e2e passed");
+                println!("rns-e2e passed ({names})");
             }
             Ok(())
         }
         Err(err) => {
             eprintln!("rns-e2e failed; logs in {}", base_run_dir.display());
-            dump_logs(&base_run_dir);
             Err(err)
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// What the venv marker records about the requirements file, so that the venv is synced again
+/// whenever the file changes. FNV-1a is enough to notice a change; the hashes inside the file are
+/// what make the installed packages trustworthy.
+fn requirements_fingerprint(requirements: &[u8]) -> String {
+    format!("{REQUIREMENTS} fnv1a64:{:016x}\n", fnv1a64(requirements))
+}
+
+/// 64-bit FNV-1a, which unlike `DefaultHasher` is the same in every Rust release.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Fetches `commit` of `repo` into `<dir>/reticulum-<12 digits of commit>`, or reuses that
+/// checkout from an earlier run, and returns it once its HEAD is `commit` and its tracked files are
+/// unchanged. A failed `git fetch` is retried after each delay in `retry_delays`. The fetch goes to
+/// a `.partial` directory that is renamed into place only when complete, so an interrupted fetch
+/// leaves nothing to reuse.
+fn fetch_reticulum(
+    dir: &Path,
+    repo: &str,
+    commit: &str,
+    retry_delays: &[Duration],
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let short = commit
+        .get(..12)
+        .ok_or_else(|| format!("{commit:?} is not a full commit hash"))?;
+    let checkout = dir.join(format!("reticulum-{short}"));
+    if fs::symlink_metadata(&checkout).is_ok() {
+        verify_reticulum_checkout(&checkout, commit)
+            .map_err(|err| format!("{err}; delete {} to fetch it again", checkout.display()))?;
+        println!("using Reticulum {commit} in {}", checkout.display());
+        return Ok(checkout);
+    }
+
+    println!("fetching Reticulum {commit} from {repo}");
+    let partial = dir.join(format!("reticulum-{short}.partial"));
+    if fs::symlink_metadata(&partial).is_ok() {
+        fs::remove_dir_all(&partial)?;
+    }
+    fs::create_dir_all(&partial)?;
+    run_git(git(&partial).args(["init", "--quiet"]))?;
+    let attempts = retry_delays.len() + 1;
+    for attempt in 1.. {
+        let fetched = run_git(git(&partial).args(["fetch", "--quiet", "--depth", "1", "--no-tags", repo, commit]));
+        match fetched {
+            Ok(_) => break,
+            Err(err) if attempt < attempts => {
+                let delay = retry_delays[attempt - 1];
+                eprintln!("xtask: git fetch failed ({err}), attempt {attempt} of {attempts}; retrying in {delay:?}");
+                thread::sleep(delay);
+            }
+            Err(err) => {
+                return Err(
+                    format!("could not fetch Reticulum {commit} from {repo} in {attempts} attempts: {err}").into(),
+                );
+            }
+        }
+    }
+    run_git(git(&partial).args([
+        "-c",
+        "advice.detachedHead=false",
+        "checkout",
+        "--quiet",
+        "--detach",
+        commit,
+    ]))?;
+    verify_reticulum_checkout(&partial, commit)?;
+    fs::rename(&partial, &checkout)?;
+    Ok(checkout)
+}
+
+/// Checks that the git checkout `path` is at `commit` with its tracked files unchanged.
+fn verify_reticulum_checkout(path: &Path, commit: &str) -> Result<(), String> {
+    let head = git_head(path)?;
+    if head != commit {
+        return Err(format!("{} is at {head}, not the pinned {commit}", path.display()));
+    }
+    let changes = run_git(git(path).args(["status", "--porcelain", "--untracked-files=no"]))?;
+    if !changes.is_empty() {
+        return Err(format!("{} has local changes:\n{changes}", path.display()));
+    }
+    Ok(())
+}
+
+/// Why a local Reticulum checkout may not be the Reticulum CI tests, or `None` when it is at the
+/// pinned `commit`.
+fn reticulum_pin_warning(path: &Path, commit: &str) -> Option<String> {
+    if fs::symlink_metadata(path.join(".git")).is_err() {
+        return Some(format!(
+            "{} is not a git checkout, so it cannot be checked against the pinned Reticulum {commit}",
+            path.display()
+        ));
+    }
+    match git_head(path) {
+        Ok(head) if head == commit => None,
+        Ok(head) => Some(format!(
+            "Reticulum in {} is at {head}, not the pinned {commit} that CI tests; --fetch-reticulum tests the pinned one",
+            path.display()
+        )),
+        Err(err) => Some(format!(
+            "could not check Reticulum in {} against the pinned {commit}: {err}",
+            path.display()
+        )),
+    }
+}
+
+/// A `git` command in `dir` that never prompts for credentials (some servers ask for them for a
+/// repository that does not exist) and gives up on a transfer that has stalled for a minute.
+fn git(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=60"])
+        .env("GIT_TERMINAL_PROMPT", "0");
+    cmd
+}
+
+fn git_head(path: &Path) -> Result<String, String> {
+    run_git(git(path).args(["rev-parse", "HEAD"]))
+}
+
+/// Runs a git command and returns its trimmed standard output. Its standard error goes into the
+/// error, so that a failure says why, and does not interleave with the harness's own output.
+fn run_git(cmd: &mut Command) -> Result<String, String> {
+    let output = cmd.output().map_err(|err| format!("could not run git: {err}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(format!(
+            "git exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Scenario {
     name: &'static str,
     sf: u8,
@@ -247,11 +519,29 @@ fn run_scenario(
         }
         Ok(())
     })();
-    if result.is_err() {
-        dump_log_tails(&run_dir, 40);
+    // Stop the processes before reading their logs, so that the logs are complete.
+    let result = scenario_outcome(result, children.terminate_all(scenario.sigterm_wait()));
+    if let Err(err) = &result {
+        eprintln!(
+            "\nrns-e2e scenario {} failed: {err}\nThe last {FAILURE_LOG_LINES} lines of each of its logs follow.",
+            scenario.name
+        );
+        let _ = write_log_tails(&run_dir, FAILURE_LOG_LINES, &mut io::stderr().lock());
     }
-    let shutdown_result = children.terminate_all(scenario.sigterm_wait());
-    result.and(shutdown_result)
+    result
+}
+
+/// A scenario's outcome from how its checks went and how its processes shut down: it fails if
+/// either failed, and the error names both when both did.
+fn scenario_outcome(
+    checks: Result<(), Box<dyn std::error::Error>>,
+    shutdown: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match (checks, shutdown) {
+        (Ok(()), shutdown) => shutdown,
+        (Err(err), Ok(())) => Err(err),
+        (Err(err), Err(shutdown)) => Err(format!("{err}; then, on shutdown: {shutdown}").into()),
+    }
 }
 
 #[derive(Debug)]
@@ -915,47 +1205,56 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn dump_logs(run_dir: &Path) {
-    let mut stack = vec![run_dir.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|s| s.to_str()) == Some("log") {
-                let _ = writeln!(io::stderr(), "\n===== {} =====", path.display());
-                if let Ok(text) = fs::read_to_string(&path) {
-                    eprintln!("{text}");
-                }
+/// Writes the last `lines` lines of each log under `run_dir`, in path order: the daemons' and the
+/// Reticulum processes' `*.log` files, and the `*.error` files the Python scripts leave. The harness
+/// prints this when a scenario fails, so that a CI log shows the cause without the files.
+fn write_log_tails(run_dir: &Path, lines: usize, out: &mut dyn Write) -> io::Result<()> {
+    for path in log_files(run_dir) {
+        let text = match fs::read(&path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(err) => {
+                writeln!(out, "\n===== {}: {err} =====", path.display())?;
+                continue;
             }
+        };
+        let all: Vec<&str> = text.lines().collect();
+        let tail = &all[all.len().saturating_sub(lines)..];
+        let extent = match all.len() {
+            1 => "1 line".to_owned(),
+            n if n == tail.len() => format!("{n} lines"),
+            n => format!("last {} of {n} lines", tail.len()),
+        };
+        writeln!(out, "\n===== {} ({extent}) =====", path.display())?;
+        for line in tail {
+            writeln!(out, "{line}")?;
         }
     }
+    Ok(())
 }
 
-fn dump_log_tails(run_dir: &Path, lines: usize) {
-    let mut stack = vec![run_dir.to_path_buf()];
+/// The `*.log` and `*.error` files under `dir`, sorted.
+fn log_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
                 stack.push(path);
-            } else if matches!(path.extension().and_then(|s| s.to_str()), Some("log" | "error")) {
-                let _ = writeln!(io::stderr(), "\n===== tail {} =====", path.display());
-                if let Ok(text) = fs::read_to_string(&path) {
-                    let all: Vec<&str> = text.lines().collect();
-                    for line in all.iter().skip(all.len().saturating_sub(lines)) {
-                        eprintln!("{line}");
-                    }
-                }
+            } else if file_type.is_file() && matches!(path.extension().and_then(|s| s.to_str()), Some("log" | "error"))
+            {
+                files.push(path);
             }
         }
     }
+    files.sort();
+    files
 }
 
 #[cfg(test)]

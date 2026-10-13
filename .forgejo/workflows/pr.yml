@@ -4,7 +4,9 @@ name: PR
 # protected, require these statuses on the pull request head (exact names, in Settings → Branches):
 #
 #   PR / test (pull_request)      cargo fmt --check, cargo build --all-targets, cargo clippy
-#                                 --all-targets -D warnings, and cargo test
+#                                 --all-targets -D warnings, cargo test, the Python unit tests of
+#                                 tools/hwtest, and the SF7 scenario of the Reticulum end-to-end
+#                                 test (cargo xtask rns-e2e)
 #   agent-actions/pr-agent        code review by pr-agent
 #   agent-actions/security-agent  dependency, secret and code security review by security-agent
 #   agent-actions/qa-agent        QA review by qa-agent (optional; require it to make QA block)
@@ -12,7 +14,8 @@ name: PR
 # Require the agent-actions/* statuses, not the agent jobs: a job skipped because the test job
 # failed counts as passing, while the statuses only exist once an agent reviewed that exact head
 # commit. The agents start only after the test job passes, so a broken pull request costs no AI
-# credits. The test job is a first, deliberately small gate.
+# credits. The test job is a first gate, kept quick: of the Reticulum end-to-end test it runs only
+# the SF7 scenario, about a minute; ci.yml runs every scenario on main.
 #
 # Settings (Settings → Actions, at the owner or repository level):
 #   secret   COPILOT_GITHUB_TOKEN  fine-grained GitHub PAT with "Copilot Requests" (required)
@@ -43,6 +46,8 @@ concurrency:
 jobs:
   test:
     runs-on: builder-node24
+    # About two minutes. The end-to-end test's own timeouts and retries end it within about a
+    # quarter of an hour even when downloads stall and the scenario hangs.
     timeout-minutes: 30
     env:
       # The runner has little memory and runs one job at a time (see infra/forgejo-runners), so keep
@@ -67,6 +72,46 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
         run: cargo test --locked
+      # The hardware test tools' unit tests: standard library only, so the image's Python runs
+      # them as it is.
+      - name: Python unit tests (tools/hwtest)
+        run: python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+      # uv runs the Reticulum end-to-end test's Python; the image has no uv or pip. The release is
+      # pinned and verified against the sha256 in its sha256.sum. ci.yml has the same step: bump
+      # both together (crates/xtask/README.md).
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          version=0.12.17
+          case "$(uname -m)" in
+            x86_64)
+              target=x86_64-unknown-linux-gnu
+              sha256=fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63 ;;
+            aarch64)
+              target=aarch64-unknown-linux-gnu
+              sha256=d636d1b678e9e7f367ecb22b46bd1cabbed234d6bc3b4d96365d2b507f72f86c ;;
+            *)
+              echo "no pinned uv for $(uname -m)" >&2
+              exit 1 ;;
+          esac
+          dir=$(mktemp -d "$RUNNER_TEMP/uv.XXXXXX")
+          curl --fail --silent --show-error --location --retry 3 --output "$dir/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/$version/uv-$target.tar.gz"
+          echo "$sha256  $dir/uv.tar.gz" | sha256sum --check --strict
+          tar -xzf "$dir/uv.tar.gz" -C "$dir" --strip-components=1 --no-same-owner
+          rm "$dir/uv.tar.gz"
+          "$dir/uv" --version
+          echo "$dir" >> "$FORGEJO_PATH"
+      # Reticulum's RNodeInterface against two simulated daemons, with the pinned Reticulum and
+      # Python packages. SF11, which takes about four minutes more, runs on main (ci.yml).
+      - name: RNS end-to-end (SF7)
+        env:
+          # The image's Python, never a downloaded one.
+          UV_PYTHON_DOWNLOADS: never
+          # uv's cache and the workspace are on different filesystems, so it copies instead of
+          # hardlinking; say so, rather than have it warn.
+          UV_LINK_MODE: copy
+        run: cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 
   pr-agent:
     needs: [test]

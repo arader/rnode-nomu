@@ -19,8 +19,8 @@ with real RNodes.
 - Modem drivers implement `rnode_core::Radio` in their own crates: `crates/rnode-sx126x` for the
   SX1262, `crates/rnode-sim` for the simulated radio. DRIVERS.md explains the contract.
 - `crates/xtask` — repository tasks: `cargo xtask rns-e2e` runs Reticulum against two simulated
-  daemons. It needs Reticulum and `uv`, so it runs by hand, not in CI; `tests/e2e/kiss_probe.py`
-  is its KISS probe.
+  daemons, with the Reticulum commit, uv release and Python packages pinned (crates/xtask/README.md
+  says where); `tests/e2e/kiss_probe.py` is its KISS probe.
 - `tools/hwtest` — hardware bring-up, SDR analysis and an over-the-air LXMF echo test against a
   real RNode (`lxmf_echo_ota.py`) for the reference board, outside the workspace.
 
@@ -37,8 +37,15 @@ we deliberately differ, say so in a doc comment.
 ## Rules
 
 - CI's `PR / test` runs `cargo fmt --all --check`, `cargo build --locked --all-targets`,
-  `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked`; all four must
-  pass (this is the CI gate), so run the same commands locally before pushing.
+  `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, the Python unit
+  tests of `tools/hwtest`, `python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v`, and
+  the SF7 scenario of the Reticulum end-to-end test,
+  `cargo xtask rns-e2e --fetch-reticulum --scenario sf7`; all six must pass (this is the CI
+  gate). Run the four cargo commands locally before every push, the Python unit tests when you
+  change `tools/hwtest`, and the end-to-end test (it needs `uv`) before pushing changes to
+  rnode-core, rnode-linux, rnode-sim or the harness (`crates/xtask`, `tests/e2e`). After each
+  merge, CI on `main` (`.forgejo/workflows/ci.yml`) runs the full suite: the same checks and
+  every end-to-end scenario.
 - Commit `Cargo.lock` whenever dependencies change. The CI runner has little memory: prefer small
   dependencies.
 - Every behaviour change comes with tests. Prefer golden values derived from the firmware over
