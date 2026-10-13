@@ -14,9 +14,17 @@ with real RNodes.
 - `crates/rnode-core` — hardware-independent RNode logic (KISS host protocol, TX queue, split
   framing, PHY/CSMA, the `Node` state machine) plus the `Radio` and `Storage` traits. No I/O;
   time is passed in as `now_ms` and randomness comes from a seed, so tests are deterministic.
-- `crates/rnode-linux` — the daemon (config, GPIO, SPI, PTY, event loop). Being moved onto
-  `rnode-core` (issue #24).
-- Modem drivers implement `rnode_core::Radio` in their own crates (e.g. `crates/rnode-sx126x`).
+- `crates/rnode-linux` — the daemon on top of `rnode-core` (config, GPIO, SPI, PTY, saved
+  settings, event loop).
+- Modem drivers implement `rnode_core::Radio` in their own crates: `crates/rnode-sx126x` for the
+  SX1262, `crates/rnode-sim` for the simulated radio. DRIVERS.md explains the contract.
+- `crates/xtask` — repository tasks: `cargo xtask rns-e2e` runs Reticulum against two simulated
+  daemons. It needs Reticulum and `uv`, so it runs by hand, not in CI; `tests/e2e/kiss_probe.py`
+  is its KISS probe.
+- `tools/hwtest` — hardware bring-up and SDR analysis for the reference board, outside the
+  workspace.
+
+Every crate's tests follow the Test layout section below.
 
 ## Reference implementations
 
@@ -28,14 +36,18 @@ we deliberately differ, say so in a doc comment.
 
 ## Rules
 
-- `cargo build --locked --all-targets` and `cargo test --locked` must pass (this is the CI gate);
-  keep `cargo clippy --all-targets` and `cargo fmt --check` clean for the crates you touch.
+- CI's `PR / test` runs `cargo fmt --all --check`, `cargo build --locked --all-targets`,
+  `cargo clippy --locked --all-targets -- -D warnings` and `cargo test --locked`; all four must
+  pass (this is the CI gate), so run the same commands locally before pushing.
 - Commit `Cargo.lock` whenever dependencies change. The CI runner has little memory: prefer small
   dependencies.
 - Every behaviour change comes with tests. Prefer golden values derived from the firmware over
   round-trip tests against our own code (a self-consistent but incompatible implementation is how
   the split-framing bug, #3, went unnoticed).
 - New code is `unsafe`-free (workspace lint `unsafe_code = "forbid"`).
+- Update README.md and DRIVERS.md with behaviour they describe (config keys, CLI flags, log
+  formats, the `Radio` contract). `crates/rnode-linux/tests/docs_examples.rs` loads their config
+  examples with the real parser and checks their links.
 - Never commit `.forgejo/token` or other secrets.
 
 ## Test layout
@@ -62,4 +74,5 @@ we deliberately differ, say so in a doc comment.
 
 The reference board is the uConsole (CM5) with the HackerGadgets AIO V2: SX1262 on
 `/dev/spidev1.0`, GPIO character device `gpiochip15` (pinctrl-rp1) lines 25 = NRESET,
-24 = BUSY, 26 = DIO1 (IRQ); 1.8 V TCXO driven by DIO3; DIO2 controls the RF switch.
+24 = BUSY, 26 = DIO1 (IRQ); 1.8 V TCXO driven by DIO3; DIO2 controls the RF switch; line 16
+enables the LoRa power rail, which the reference unit's `config.txt` turns off at boot.
