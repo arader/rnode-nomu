@@ -38,6 +38,17 @@ we deliberately differ, say so in a doc comment.
 - New code is `unsafe`-free (workspace lint `unsafe_code = "forbid"`).
 - Never commit `.forgejo/token` or other secrets.
 
+## Test layout
+
+- Keep source files free of inline test bodies.
+- Unit tests that need private access live in Rust's default test-module file: `src/tests.rs` for
+  `lib.rs`, or `src/<module>/tests.rs` for `src/<module>.rs`; keep only `#[cfg(test)] mod tests;`
+  in the source module.
+- Large unit-test files (about 600+ lines) may be split as `src/tests/mod.rs` plus topic files.
+- Tests that use only public API belong in `crates/<crate>/tests/<topic>.rs`.
+- Put shared unit-test helpers in one `#[cfg(test)]` helper module per crate; integration helpers
+  belong in `tests/common/mod.rs`.
+
 ## Workflow
 
 - `main` only changes through pull requests on Forgejo (`infra/rnode-linux`), squash-merged.
