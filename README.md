@@ -143,7 +143,7 @@ is off, the loop waits for at most 50 ms between checks.
 | [`crates/rnode-linux`](crates/rnode-linux) | The daemon: config, GPIO character device, spidev, PTY, saved settings and event loop. |
 | [`crates/xtask`](crates/xtask) | Repository automation: `cargo xtask rns-e2e` runs two simulated daemons under two Reticulum instances. |
 | [`tests/e2e/kiss_probe.py`](tests/e2e/kiss_probe.py) | Standalone KISS probe for a daemon PTY. |
-| [`tools/hwtest`](tools/hwtest) | Hardware bring-up for the uConsole AIO V2, RTL-SDR capture and LoRa burst analysis. Outside the Cargo workspace. |
+| [`tools/hwtest`](tools/hwtest) | Hardware bring-up for the uConsole AIO V2, RTL-SDR capture, LoRa burst analysis and an over-the-air LXMF echo test against a real RNode. Outside the Cargo workspace. |
 | [`config.example.toml`](config.example.toml), [`config.uconsole-aio-v2.toml`](config.uconsole-aio-v2.toml) | Example daemon configurations. |
 | [`contrib/rnode-linux.service`](contrib/rnode-linux.service) | Hardened systemd unit. |
 | [`DRIVERS.md`](DRIVERS.md) | How radio drivers work and how to add one. |
@@ -453,7 +453,12 @@ run on the reference uConsole AIO V2 at 914.875 MHz, 2 dBm, 125 kHz, SF7, CR 4/5
 - an RTL-SDR capture showed 24-symbol preambles, sync word `0x12` and frame durations within
   0.34 ms of the Semtech time on air.
 
-Reception over the air has not been tested yet: the setup has no second LoRa transmitter.
+A later run of `main` (commit `d001f7e`) exchanged LXMF messages over the air with a hardware
+RNode on a live Reticulum network (914.875 MHz, 125 kHz, SF8, CR 4/5, 2 dBm). The path request
+was answered, and opportunistic and direct messages and a 2 KB resource transfer completed in
+both directions, with two-frame split packets each way; one link packet was lost once and LXMF
+resent it. Every packet showed up in the daemon's debug log.
+[`tools/hwtest/README.md`](tools/hwtest/README.md) has the results.
 
 ### Mapping your own board
 
@@ -1140,6 +1145,9 @@ AIO V2, outside the Cargo workspace so that CI does not need Linux GPIO crates:
 - `bin/soapysdr_capture.c` records IQ samples from the AIO V2's RTL-SDR.
 - `lora_capture_analyze.py` finds LoRa bursts in a capture and checks duration, occupied bandwidth,
   preamble, sync word and frequency offset.
+- `lxmf_echo_ota.py` sends LXMF messages over the air through the daemon to an echo peer behind a
+  real RNode, checks the echoes, and matches every packet to the daemon's debug log. It applies
+  the same frequency and power limits.
 
 Build the bring-up tool on the target:
 

@@ -1,15 +1,16 @@
 # uConsole AIO V2 hardware tests
 
 This directory contains repeatable hardware checks for the uConsole CM5 with the
-HackerGadgets AIO V2 board: SX1262 on `/dev/spidev1.0` and the on-board RTL-SDR.
+HackerGadgets AIO V2 board: SX1262 on `/dev/spidev1.0` and the on-board RTL-SDR,
+plus an over-the-air LXMF round trip through the daemon against a real RNode.
 The tests are intentionally outside the main Cargo workspace so they can depend
 on Linux-only GPIO/SPI crates without affecting normal CI.
 
 ## Safety
 
-The procedure is for the US 902-928 MHz ISM band only.  The bring-up tool refuses
-frequencies outside that range and refuses TX power above 10 dBm.  Use short test
-frames only; the commands below use 914.875 MHz at 2 dBm.
+The procedure is for the US 902-928 MHz ISM band only.  The bring-up tool and
+`lxmf_echo_ota.py` refuse frequencies outside that range and TX power above
+10 dBm.  Use short test frames only; the commands below use 914.875 MHz at 2 dBm.
 
 ## SX1262 bring-up
 
@@ -168,10 +169,113 @@ Known integration gaps found during hardware validation:
   firmware, so host queries for them are ignored.
 - The `CMD_DIS_IA` runtime toggle is tracked in #36.  The firmware itself
   persists the setting and resets with no reply.
-- RX packet validation is still limited by the lack of a second LoRa transmitter;
-  current evidence covers RX/idle noise floor, DCD-idle behaviour and DIO1 low in
-  the direct bring-up tool, plus daemon channel telemetry.  Over-the-air RX
-  remains an open question.
+- RX packet validation was limited by the lack of a second LoRa transmitter at
+  this stage: the evidence covered RX/idle noise floor, DCD-idle behaviour and
+  DIO1 low in the direct bring-up tool, plus daemon channel telemetry.  Reception
+  from a real RNode was validated later; see "Over-the-air LXMF echo with a real
+  RNode" below.
 
 The split-frame SDR summary is kept in `captures/stage3_daemon_split_2026-10-13.txt`;
 IQ files are intentionally not committed.
+
+## Over-the-air LXMF echo with a real RNode
+
+`lxmf_echo_ota.py` checks that rnode-linux interoperates over the air with a
+hardware RNode, using an LXMF echo peer on an existing Reticulum network: any
+LXMF destination that answers each message with the same title and content.  The
+tool starts a Reticulum instance whose only interface is an `RNodeInterface` on
+the daemon's PTY, with transport and instance sharing off, so every packet it
+sends or receives crosses LoRa.  It then:
+
+1. waits for the interface to come online;
+2. requests a path to the echo destination, with retries, unless an announce
+   heard since start-up already gave one, and recalls its identity;
+3. registers an LXMF delivery destination for a persistent test identity and
+   announces it once;
+4. sends one message per requested size and delivery method (`opportunistic` or
+   `direct`; LXMF sends a direct message whose title and content exceed 319 bytes
+   as an RNS resource), one at a time, and checks that each echo comes back with
+   the same title and content.  It stops at the first failure unless
+   `--keep-going` is given;
+5. prints a summary with delivery and round-trip times and the RSSI/SNR of each
+   reply, and exits with status 1 if anything failed.
+
+Every packet through the interface is printed as a `WIRE` line (UTC time,
+direction, length, Reticulum packet type, and RSSI/SNR for received packets).
+With `--daemon-log`, the tool also matches each of them to the daemon's debug log
+(`TX packet: …` / `RX packet: …` lines, same host) and reports how many LoRa
+frames each took; a packet missing from the log, or a TX that did not end in
+`ok`, fails the run.
+
+The tool needs `rns` and `lxmf` (and `pyserial`) in a venv; otherwise it uses only
+the standard library.  Use the versions the peer runs where possible, e.g.:
+
+```sh
+ssh uconsole.local 'python3 -m venv ~/rnode-hw/venv-ota && \
+  ~/rnode-hw/venv-ota/bin/pip install rns==1.1.2 lxmf==0.9.3 pyserial'
+```
+
+Start the daemon with `log_level = "debug"` (here with `config.uconsole-aio-v2.toml`
+changed only to put the PTY symlink, saved settings and log under `~/rnode-hw/run`),
+then run the tool with the peer network's channel and the echo's destination hash:
+
+```sh
+ssh uconsole.local 'cd ~/rnode-hw && ~/rnode-hw/venv-ota/bin/python tools/hwtest/lxmf_echo_ota.py \
+  --port ~/rnode-hw/run/rnode0 --frequency 914875000 --bandwidth 125000 --sf 8 --cr 5 \
+  --txpower 2 --echo <echo destination hash> --identity ~/rnode-hw/run/ota/identity \
+  --sizes 200,300,2000 --methods opportunistic,direct,direct --timeout 180 \
+  --workdir ~/rnode-hw/run/ota --daemon-log ~/rnode-hw/run/ota1.log'
+```
+
+The identity file is created on the first run and reused afterwards, so repeated
+runs announce the same identity; its LXMF state (ratchet keys) is kept next to it
+in `IDENTITY.lxmf`.  The Reticulum config goes to a temporary directory under
+`--workdir`, which is removed at exit.  Start at low power and raise `--txpower`
+(at most 10 dBm) only if nothing comes back; on a shared channel send a few
+messages per session, not a stream.
+
+The tool's argument checks, packet decoding, path reporting, echo verdicts,
+identity-file handling and daemon-log matching have unit tests that need neither
+a radio nor Reticulum:
+
+```sh
+python3 -m unittest discover -s tools/hwtest -p 'test_*.py'
+```
+
+### Over-the-air echo with a real RNode, 2026-10-13
+
+Setup:
+
+- DUT: uConsole CM5 / AIO V2 running rnode-linux from `main` at `d001f7e` with
+  the uConsole config (debug log, run-directory paths), and the tool with
+  rns 1.1.2 and lxmf 0.9.3, the peer's versions.
+- Peer: an LXMF echo bot on the owner's Reticulum network (rns 1.1.2,
+  lxmf 0.9.3), behind a transport node with a hardware RNode on 914.875 MHz,
+  125 kHz, SF8, CR 4/5, 7 dBm; the echo is two hops from the DUT.
+- DUT TX power 2 dBm, never raised.  Two runs: sizes 200/300/2000 bytes
+  (opportunistic, direct, direct), then a repeat of the direct case
+  (300/300 bytes).
+
+| Check | Result |
+| --- | --- |
+| Path request | Answered 2.0 s and 2.2 s after the request: a 223-byte path response in one frame, RSSI -51 dBm, SNR 14 dB |
+| Opportunistic, 200 B content | 435-byte packet out in 2 frames, delivery proof after 2.0 s; 419-byte echo back in 2 frames, RSSI -51 dBm, SNR 13.5 dB; round trip 3.3 s |
+| Direct, 300 B content | Link request, link proof and RTT packet, then a 499-byte link packet in 2 frames each way.  Run 1: the first link packet drew no proof, LXMF retried on a new link and was delivered after 28.1 s, echo after 32.0 s.  Run 2: delivered after 3.7 s, echo after 19.6 s; a second message on the open links took 3.3 s and 4.7 s |
+| Direct, 2000 B content (resource) | Out: advertisement, 4 × 483-byte parts in 2 frames each plus a 115-byte part, proof after 11.2 s.  Back: 4 × 483 + 99 bytes, echo after 20.2 s |
+| Daemon log cross-check | Run 1: 26/26 TX packets (7 in 2 frames) and 22/22 RX packets (6 in 2 frames) matched; run 2: 12/12 TX and 11/11 RX.  No daemon TX/RX line without a tool packet; every TX ended `ok` |
+| Signal and channel | All 33 received packets at -50/-51 dBm, SNR 12.75–14.25 dB; noise floor -109 to -112 dBm; no `CMD_ERROR`, no Reticulum errors or warnings |
+
+Notes:
+
+- The one lost exchange (run 1, first direct link packet) is unexplained: the
+  daemon logged the 499-byte TX as `ok` in 2 frames and received nothing until
+  LXMF's receipt timeout (link RTT 1.52 s × 6 = 9.1 s) tore the link down.
+  Either the packet or its proof was lost on the shared channel; it did not
+  recur in the other 37 TX packets, 8 of them in 2 frames.
+- The 19.6 s echo in run 2 is the echo's own LXMF retry: LXMF keeps a closed
+  delivery link for up to 10 minutes, so the reply first found the link that
+  run 1 had closed, requested a path and waited its 10 s retry interval before
+  opening a new link.  The DUT received nothing in between.
+- The peer is close (-51 dBm), so weak-signal behaviour, other spreading
+  factors and long sessions remain untested.  The daemon does not log CSMA
+  deferrals or CRC-failed frames, so neither could be observed.

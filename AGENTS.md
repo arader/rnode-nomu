@@ -21,8 +21,8 @@ with real RNodes.
 - `crates/xtask` — repository tasks: `cargo xtask rns-e2e` runs Reticulum against two simulated
   daemons. It needs Reticulum and `uv`, so it runs by hand, not in CI; `tests/e2e/kiss_probe.py`
   is its KISS probe.
-- `tools/hwtest` — hardware bring-up and SDR analysis for the reference board, outside the
-  workspace.
+- `tools/hwtest` — hardware bring-up, SDR analysis and an over-the-air LXMF echo test against a
+  real RNode (`lxmf_echo_ota.py`) for the reference board, outside the workspace.
 
 Every crate's tests follow the Test layout section below.
 
