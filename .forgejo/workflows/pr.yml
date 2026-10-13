@@ -3,7 +3,8 @@ name: PR
 # Merge gates for pull requests, from infra/agent-actions (examples/pr-gates.yml). Once main is
 # protected, require these statuses on the pull request head (exact names, in Settings → Branches):
 #
-#   PR / test (pull_request)      cargo build --all-targets and cargo test
+#   PR / test (pull_request)      cargo fmt --check, cargo build --all-targets, cargo clippy
+#                                 --all-targets -D warnings, and cargo test
 #   agent-actions/pr-agent        code review by pr-agent
 #   agent-actions/security-agent  dependency, secret and code security review by security-agent
 #   agent-actions/qa-agent        QA review by qa-agent (optional; require it to make QA block)
@@ -54,9 +55,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Toolchain
-        run: cargo --version
+        run: |
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: Format
+        run: cargo fmt --all --check
       - name: Build
         run: cargo build --locked --all-targets
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
         run: cargo test --locked
 
