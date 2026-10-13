@@ -14,16 +14,26 @@
 //! air; deliberate differences are documented where they occur.
 
 pub mod csma;
+pub mod framing;
 pub mod identity;
+pub mod kiss;
 pub mod node;
 pub mod phy;
+pub mod queue;
 pub mod radio;
 pub mod rng;
+#[cfg(any(test, feature = "sim"))]
+pub mod sim;
 pub mod storage;
+
+#[cfg(test)]
+mod protocol_tests;
 
 pub use identity::DeviceIdentity;
 pub use node::{Node, NodeConfig};
 pub use radio::{Radio, RxFrame, TxOutcome};
+#[cfg(any(test, feature = "sim"))]
+pub use sim::{SimMedium, SimRadio};
 pub use storage::{MemoryStorage, RadioSettings, Storage};
 
 /// Offset added to RSSI values in dBm before they are sent to the host as a byte (firmware and

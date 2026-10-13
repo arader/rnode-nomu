@@ -10,5 +10,8 @@ description = "Hardware-independent RNode logic: KISS host protocol, framing, PH
 [lints]
 workspace = true
 
+[features]
+sim = []
+
 [dependencies]
 log = "0.4"
