@@ -1,211 +1,204 @@
-// Copyright (C) 2024, Mark Qvist
-// Ported to Rust for Linux by RNode contributors.
-// Licensed under the GNU General Public License v3.0 or later.
+use std::io;
+use std::os::fd::{AsFd, BorrowedFd};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use std::fs;
-use std::path::Path;
-use std::thread;
-use std::time::{Duration, Instant};
+use embedded_hal::digital::{ErrorKind, ErrorType, InputPin, OutputPin};
+use gpiocdev::Request;
+use gpiocdev::line::{EdgeDetection, Value};
 
-use crate::error::{RNodeError, Result};
+use crate::config::GpioConfig;
+use crate::event_loop::IrqSource;
 
-/// GPIO line direction/mode.
-#[derive(Debug, Clone, Copy)]
-pub enum Direction {
-    Output,
-    Input,
+#[derive(Debug, thiserror::Error)]
+pub enum GpioError {
+    #[error("gpio: {0}")]
+    Gpio(#[from] gpiocdev::Error),
+    #[error("gpio chip {0:?} not found")]
+    ChipNotFound(String),
+    #[error("io while scanning gpio chips: {0}")]
+    Io(#[from] io::Error),
 }
 
-/// Edge detection mode for input lines.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub enum Edge {
-    Rising,
-    Falling,
-    Both,
-}
-
-/// A single GPIO line accessed via Linux sysfs.
-///
-/// We use sysfs (`/sys/class/gpio`) for maximum compatibility across
-/// Linux SBCs without requiring libgpiod libraries at build time.
-/// For production use on modern kernels, consider migrating to the
-/// character device interface (libgpiod).
-#[allow(dead_code)]
-pub struct GpioLine {
-    line: u32,
-    #[allow(dead_code)]
-    chip: String,
-    exported: bool,
-}
-
-impl GpioLine {
-    /// Request a GPIO line.
-    pub fn new(chip: &str, line: u32, direction: Direction) -> Result<Self> {
-        let mut gpio = Self {
-            line,
-            chip: chip.to_string(),
-            exported: false,
-        };
-        gpio.export()?;
-        gpio.set_direction(direction)?;
-        Ok(gpio)
+impl embedded_hal::digital::Error for GpioError {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Other
     }
+}
 
-    fn export(&mut self) -> Result<()> {
-        let export_path = "/sys/class/gpio/export";
-        if !Path::new(&self.value_path()).exists() {
-            fs::write(export_path, self.line.to_string()).map_err(|e| {
-                RNodeError::Gpio(format!("Failed to export GPIO {}: {}", self.line, e))
-            })?;
-            // Give the kernel a moment to create sysfs entries
-            thread::sleep(Duration::from_millis(50));
-        }
-        self.exported = true;
+#[derive(Debug)]
+pub struct GpioOutputPin {
+    req: Request,
+    offset: u32,
+}
+
+impl GpioOutputPin {
+    fn request(chip: &Path, offset: u32, initial: Value, name: &str) -> Result<Self, GpioError> {
+        let req = Request::builder()
+            .on_chip(chip)
+            .with_consumer(name)
+            .with_line(offset)
+            .as_output(initial)
+            .request()?;
+        Ok(Self { req, offset })
+    }
+}
+
+impl ErrorType for GpioOutputPin {
+    type Error = GpioError;
+}
+
+impl OutputPin for GpioOutputPin {
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        self.req.set_value(self.offset, Value::Inactive)?;
         Ok(())
     }
 
-    fn base_path(&self) -> String {
-        format!("/sys/class/gpio/gpio{}", self.line)
-    }
-
-    fn value_path(&self) -> String {
-        format!("{}/value", self.base_path())
-    }
-
-    fn set_direction(&self, direction: Direction) -> Result<()> {
-        let dir_str = match direction {
-            Direction::Output => "out",
-            Direction::Input => "in",
-        };
-        let path = format!("{}/direction", self.base_path());
-        fs::write(&path, dir_str).map_err(|e| {
-            RNodeError::Gpio(format!(
-                "Failed to set direction for GPIO {}: {}",
-                self.line, e
-            ))
-        })
-    }
-
-    /// Set edge detection mode (for input lines).
-    pub fn set_edge(&self, edge: Edge) -> Result<()> {
-        let edge_str = match edge {
-            Edge::Rising => "rising",
-            Edge::Falling => "falling",
-            Edge::Both => "both",
-        };
-        let path = format!("{}/edge", self.base_path());
-        fs::write(&path, edge_str).map_err(|e| {
-            RNodeError::Gpio(format!(
-                "Failed to set edge for GPIO {}: {}",
-                self.line, e
-            ))
-        })
-    }
-
-    /// Read the current value of a GPIO line.
-    pub fn read(&self) -> Result<bool> {
-        let val = fs::read_to_string(&self.value_path()).map_err(|e| {
-            RNodeError::Gpio(format!("Failed to read GPIO {}: {}", self.line, e))
-        })?;
-        Ok(val.trim() == "1")
-    }
-
-    /// Set the value of an output GPIO line.
-    pub fn write(&self, high: bool) -> Result<()> {
-        let val = if high { "1" } else { "0" };
-        fs::write(&self.value_path(), val).map_err(|e| {
-            RNodeError::Gpio(format!("Failed to write GPIO {}: {}", self.line, e))
-        })
-    }
-
-    /// Open the value file for poll/epoll-based edge detection.
-    /// Returns a file that can be used with nix::poll.
-    pub fn open_value_fd(&self) -> Result<fs::File> {
-        fs::File::open(&self.value_path()).map_err(|e| {
-            RNodeError::Gpio(format!(
-                "Failed to open GPIO {} value fd: {}",
-                self.line, e
-            ))
-        })
-    }
-
-    /// Get the GPIO line number.
-    pub fn line_number(&self) -> u32 {
-        self.line
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        self.req.set_value(self.offset, Value::Active)?;
+        Ok(())
     }
 }
 
-impl Drop for GpioLine {
-    fn drop(&mut self) {
-        if self.exported {
-            let _ = fs::write("/sys/class/gpio/unexport", self.line.to_string());
+#[derive(Debug)]
+pub struct GpioInputPin {
+    req: Request,
+    offset: u32,
+}
+
+impl GpioInputPin {
+    fn request(chip: &Path, offset: u32, name: &str) -> Result<Self, GpioError> {
+        let req = Request::builder()
+            .on_chip(chip)
+            .with_consumer(name)
+            .with_line(offset)
+            .as_input()
+            .request()?;
+        Ok(Self { req, offset })
+    }
+}
+
+impl ErrorType for GpioInputPin {
+    type Error = GpioError;
+}
+
+impl InputPin for GpioInputPin {
+    fn is_high(&mut self) -> Result<bool, Self::Error> {
+        Ok(self.req.value(self.offset)? == Value::Active)
+    }
+
+    fn is_low(&mut self) -> Result<bool, Self::Error> {
+        Ok(self.req.value(self.offset)? == Value::Inactive)
+    }
+}
+
+#[derive(Debug)]
+pub struct GpioIrqLine {
+    req: Request,
+}
+
+impl GpioIrqLine {
+    fn request(chip: &Path, offset: u32, name: &str) -> Result<Self, GpioError> {
+        let req = Request::builder()
+            .on_chip(chip)
+            .with_consumer(name)
+            .with_line(offset)
+            .as_input()
+            .with_edge_detection(EdgeDetection::RisingEdge)
+            .request()?;
+        Ok(Self { req })
+    }
+}
+
+impl IrqSource for GpioIrqLine {
+    fn fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.req.as_fd())
+    }
+
+    fn drain(&mut self) -> io::Result<()> {
+        loop {
+            match self.req.has_edge_event() {
+                Ok(true) => {
+                    self.req.read_edge_event().map_err(io::Error::other)?;
+                }
+                Ok(false) => return Ok(()),
+                Err(e) => return Err(io::Error::other(e)),
+            }
         }
     }
 }
 
-/// Collection of GPIO lines needed by a LoRa radio.
-#[allow(dead_code)]
+#[derive(Debug)]
+pub struct GpioPowerGuard {
+    pin: GpioOutputPin,
+    off_on_drop: bool,
+}
+
+impl Drop for GpioPowerGuard {
+    fn drop(&mut self) {
+        if self.off_on_drop {
+            let _ = self.pin.set_low();
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct RadioGpio {
-    pub reset: GpioLine,
-    pub busy: GpioLine,
-    pub dio0: GpioLine,
-    pub rxen: Option<GpioLine>,
+    pub power: Option<GpioPowerGuard>,
+    pub reset: GpioOutputPin,
+    pub busy: GpioInputPin,
+    pub dio1: GpioIrqLine,
+    pub rxen: Option<GpioOutputPin>,
 }
 
 impl RadioGpio {
-    pub fn new(
-        chip: &str,
-        reset_line: u32,
-        busy_line: u32,
-        dio0_line: u32,
-        rxen_line: Option<u32>,
-    ) -> Result<Self> {
-        let reset = GpioLine::new(chip, reset_line, Direction::Output)?;
-        let busy = GpioLine::new(chip, busy_line, Direction::Input)?;
-        let dio0 = GpioLine::new(chip, dio0_line, Direction::Input)?;
-        dio0.set_edge(Edge::Rising)?;
-
-        let rxen = if let Some(line) = rxen_line {
-            Some(GpioLine::new(chip, line, Direction::Output)?)
-        } else {
-            None
-        };
-
+    pub fn open(config: &GpioConfig) -> Result<Self, GpioError> {
+        let chip = resolve_chip(&config.chip)?;
+        let power = config
+            .power
+            .map(|offset| GpioOutputPin::request(&chip, offset, Value::Active, "rnode-power"))
+            .transpose()?
+            .map(|pin| GpioPowerGuard {
+                pin,
+                off_on_drop: config.power_off_on_exit,
+            });
+        if power.is_some() && config.power_on_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(config.power_on_delay_ms));
+        }
         Ok(Self {
-            reset,
-            busy,
-            dio0,
-            rxen,
+            power,
+            reset: GpioOutputPin::request(&chip, config.reset, Value::Active, "rnode-reset")?,
+            busy: GpioInputPin::request(&chip, config.busy, "rnode-busy")?,
+            dio1: GpioIrqLine::request(&chip, config.dio1, "rnode-dio1")?,
+            rxen: config
+                .rxen
+                .map(|offset| GpioOutputPin::request(&chip, offset, Value::Inactive, "rnode-rxen"))
+                .transpose()?,
         })
     }
+}
 
-    /// Pulse the reset line low for 10ms then high for 10ms.
-    pub fn reset_radio(&self) -> Result<()> {
-        self.reset.write(false)?;
-        thread::sleep(Duration::from_millis(10));
-        self.reset.write(true)?;
-        thread::sleep(Duration::from_millis(10));
-        Ok(())
+pub fn resolve_chip(chip: &str) -> Result<PathBuf, GpioError> {
+    let as_path = Path::new(chip);
+    if as_path.is_absolute() {
+        return Ok(as_path.into());
     }
-
-    /// Wait for the busy line to go low, with a 100ms timeout.
-    pub fn wait_on_busy(&self) -> Result<()> {
-        let start = Instant::now();
-        while self.busy.read()? {
-            if start.elapsed() > Duration::from_millis(100) {
-                break;
+    if chip.starts_with("gpiochip") {
+        return Ok(Path::new("/dev").join(chip));
+    }
+    for entry in std::fs::read_dir("/dev")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("gpiochip") {
+            continue;
+        }
+        let path = entry.path();
+        if let Ok(chip_dev) = gpiocdev::chip::Chip::from_path(&path) {
+            if chip_dev.info()?.label == chip {
+                return Ok(path);
             }
-            thread::sleep(Duration::from_micros(100));
         }
-        Ok(())
     }
-
-    /// Enable the RX antenna switch (if present).
-    pub fn rx_ant_enable(&self) -> Result<()> {
-        if let Some(ref rxen) = self.rxen {
-            rxen.write(true)?;
-        }
-        Ok(())
-    }
+    Err(GpioError::ChipNotFound(chip.to_owned()))
 }

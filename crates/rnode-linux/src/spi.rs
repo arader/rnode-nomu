@@ -1,181 +1,268 @@
-// Copyright (C) 2024, Mark Qvist
-// Ported to Rust for Linux by RNode contributors.
-// Licensed under the GNU General Public License v3.0 or later.
-
-use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
+use std::fmt;
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::error::Result;
+use embedded_hal::spi::{ErrorKind, Operation};
 
-/// Thin wrapper around Linux spidev for LoRa radio communication.
-#[allow(dead_code)]
-pub struct SpiDevice {
-    dev: Spidev,
-    recorder: Option<SpiRecorder>,
+#[derive(Debug, thiserror::Error)]
+pub enum LinuxSpiError {
+    #[error("spi io: {0}")]
+    Io(#[from] io::Error),
+    #[error("unsupported non-u8 spi word")]
+    UnsupportedWord,
 }
 
-/// Records SPI transactions to a CSV file for debugging.
-struct SpiRecorder {
-    writer: BufWriter<File>,
+impl embedded_hal::spi::Error for LinuxSpiError {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Other
+    }
+}
+
+/// CSV recorder for hardware SPI debugging.
+#[allow(dead_code)]
+pub struct SpiRecorder {
+    writer: BufWriter<Box<dyn Write + Send>>,
     start: Instant,
     write_failed: bool,
+    #[cfg(test)]
+    warned_failures: usize,
+}
+
+impl fmt::Debug for SpiRecorder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpiRecorder")
+            .field("start", &self.start)
+            .field("write_failed", &self.write_failed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SpiRecorder {
-    fn new(path: &str) -> Result<Self> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
+    pub fn create(path: impl AsRef<Path>) -> Result<Self, LinuxSpiError> {
+        Self::from_writer(File::create(path)?)
+    }
+
+    fn from_writer(writer: impl Write + Send + 'static) -> Result<Self, LinuxSpiError> {
+        let mut writer = BufWriter::new(Box::new(writer) as Box<dyn Write + Send>);
         writeln!(writer, "timestamp_us,direction,tx,rx")?;
+        writer.flush()?;
         Ok(Self {
             writer,
             start: Instant::now(),
             write_failed: false,
+            #[cfg(test)]
+            warned_failures: 0,
         })
     }
 
-    fn log_transfer(&mut self, tx: &[u8], rx: &[u8]) {
-        let ts = self.start.elapsed().as_micros();
-        let tx_hex = hex_encode(tx);
-        let rx_hex = hex_encode(rx);
-        let result = writeln!(self.writer, "{},TXRX,{},{}", ts, tx_hex, rx_hex);
-        self.check(result);
-    }
-
-    fn log_write(&mut self, data: &[u8]) {
-        let ts = self.start.elapsed().as_micros();
-        let tx_hex = hex_encode(data);
-        let result = writeln!(self.writer, "{},TX,{},", ts, tx_hex);
-        self.check(result);
-    }
-
-    /// Warn once when the trace can no longer be written, so an incomplete trace is noticed.
-    fn check(&mut self, result: std::io::Result<()>) {
+    #[allow(dead_code)]
+    fn record(&mut self, direction: &str, tx: &[u8], rx: &[u8]) -> Result<(), LinuxSpiError> {
+        let result = writeln!(
+            self.writer,
+            "{},{},{},{}",
+            self.start.elapsed().as_micros(),
+            direction,
+            hex(tx),
+            hex(rx)
+        )
+        .and_then(|()| self.writer.flush());
         if let Err(e) = result {
-            if !self.write_failed {
-                log::warn!("SPI trace write failed, the trace is incomplete from here on: {}", e);
-                self.write_failed = true;
+            self.check(e);
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn check(&mut self, error: io::Error) {
+        if !self.write_failed {
+            log::warn!("SPI trace write failed, the trace is incomplete from here on: {error}");
+            self.write_failed = true;
+            #[cfg(test)]
+            {
+                self.warned_failures += 1;
             }
         }
     }
-}
 
-fn hex_encode(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-impl SpiDevice {
-    pub fn open(device: &str, speed_hz: u32, spi_log: Option<&str>) -> Result<Self> {
-        let path = Path::new(device);
-        let mut dev = Spidev::open(path)?;
-        let options = SpidevOptions::new()
-            .bits_per_word(8)
-            .max_speed_hz(speed_hz)
-            .mode(SpiModeFlags::SPI_MODE_0)
-            .build();
-        dev.configure(&options)?;
-        let recorder = match spi_log {
-            Some(path) => Some(SpiRecorder::new(path)?),
-            None => None,
-        };
-        Ok(Self { dev, recorder })
+    #[cfg(test)]
+    fn warned_failures_for_tests(&self) -> usize {
+        self.warned_failures
     }
+}
 
-    /// Full-duplex SPI transfer: writes `tx` and reads into `rx` simultaneously.
-    pub fn transfer(&mut self, tx: &[u8], rx: &mut [u8]) -> Result<()> {
-        let mut transfer = SpidevTransfer::read_write(tx, rx);
-        self.dev.transfer(&mut transfer)?;
-        if let Some(ref mut rec) = self.recorder {
-            rec.log_transfer(tx, rx);
+#[allow(dead_code)]
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpiSegmentKind {
+    Read,
+    Write,
+    Transfer,
+    InPlace,
+    DelayUs(u16),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpiSegmentPlan {
+    pub op_index: Option<usize>,
+    pub kind: SpiSegmentKind,
+    pub tx: Vec<u8>,
+    pub rx_len: usize,
+}
+
+pub fn build_segment_plan(operations: &[Operation<'_, u8>]) -> Vec<SpiSegmentPlan> {
+    let mut segments = Vec::new();
+    for (op_index, op) in operations.iter().enumerate() {
+        match op {
+            Operation::Read(buf) => segments.push(SpiSegmentPlan {
+                op_index: Some(op_index),
+                kind: SpiSegmentKind::Read,
+                tx: vec![0; buf.len()],
+                rx_len: buf.len(),
+            }),
+            Operation::Write(buf) => segments.push(SpiSegmentPlan {
+                op_index: Some(op_index),
+                kind: SpiSegmentKind::Write,
+                tx: buf.to_vec(),
+                rx_len: buf.len(),
+            }),
+            Operation::Transfer(read, write) => {
+                let len = read.len().max(write.len());
+                let mut tx = write.to_vec();
+                tx.resize(len, 0);
+                segments.push(SpiSegmentPlan {
+                    op_index: Some(op_index),
+                    kind: SpiSegmentKind::Transfer,
+                    tx,
+                    rx_len: len,
+                });
+            }
+            Operation::TransferInPlace(buf) => segments.push(SpiSegmentPlan {
+                op_index: Some(op_index),
+                kind: SpiSegmentKind::InPlace,
+                tx: buf.to_vec(),
+                rx_len: buf.len(),
+            }),
+            Operation::DelayNs(ns) => {
+                if *ns > 0 {
+                    segments.push(SpiSegmentPlan {
+                        op_index: None,
+                        kind: SpiSegmentKind::DelayUs(ns.div_ceil(1_000).min(u32::from(u16::MAX)) as u16),
+                        tx: Vec::new(),
+                        rx_len: 0,
+                    });
+                }
+            }
         }
-        Ok(())
+    }
+    segments
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::*;
+    use embedded_hal::spi::ErrorType;
+    use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
+
+    /// `embedded-hal` SPI device implemented with Linux spidev.
+    #[derive(Debug)]
+    pub struct LinuxSpiDevice {
+        dev: Spidev,
+        recorder: Option<SpiRecorder>,
     }
 
-    /// Write-only SPI transfer.
-    pub fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.dev.write_all(data)?;
-        if let Some(ref mut rec) = self.recorder {
-            rec.log_write(data);
+    impl LinuxSpiDevice {
+        pub fn open(
+            device: impl AsRef<Path>,
+            speed_hz: u32,
+            recorder: Option<SpiRecorder>,
+        ) -> Result<Self, LinuxSpiError> {
+            let mut dev = Spidev::open(device)?;
+            let options = SpidevOptions::new()
+                .bits_per_word(8)
+                .max_speed_hz(speed_hz)
+                .mode(SpiModeFlags::SPI_MODE_0)
+                .build();
+            dev.configure(&options)?;
+            Ok(Self { dev, recorder })
         }
-        Ok(())
     }
 
-    /// Execute an opcode with payload bytes (write-only, no response read).
-    /// Caller is responsible for CS assertion if not using kernel CS.
-    pub fn execute_opcode(&mut self, opcode: u8, buffer: &[u8]) -> Result<()> {
-        let mut cmd = Vec::with_capacity(1 + buffer.len());
-        cmd.push(opcode);
-        cmd.extend_from_slice(buffer);
-        self.write(&cmd)
+    impl ErrorType for LinuxSpiDevice {
+        type Error = LinuxSpiError;
     }
 
-    /// Execute an opcode and read response bytes.
-    /// Sends opcode + NOP byte, then reads `size` response bytes.
-    pub fn execute_opcode_read(&mut self, opcode: u8, size: usize) -> Result<Vec<u8>> {
-        // Opcode + 1 NOP + N read bytes
-        let tx_len = 2 + size;
-        let tx: Vec<u8> = {
-            let mut v = Vec::with_capacity(tx_len);
-            v.push(opcode);
-            v.resize(tx_len, 0x00);
-            v
-        };
-        let mut rx = vec![0u8; tx_len];
-        self.transfer(&tx, &mut rx)?;
-        // Response starts at byte 2 (after opcode echo + NOP)
-        Ok(rx[2..].to_vec())
-    }
+    impl embedded_hal::spi::SpiDevice<u8> for LinuxSpiDevice {
+        fn transaction(&mut self, operations: &mut [Operation<'_, u8>]) -> Result<(), Self::Error> {
+            struct Segment {
+                plan: SpiSegmentPlan,
+                rx: Vec<u8>,
+            }
 
-    /// Read a register at a 16-bit address (SX126x protocol).
-    pub fn read_register(&mut self, opcode: u8, address: u16) -> Result<u8> {
-        let tx = [
-            opcode,
-            (address >> 8) as u8,
-            (address & 0xFF) as u8,
-            0x00, // NOP for read
-            0x00, // value read here
-        ];
-        let mut rx = [0u8; 5];
-        self.transfer(&tx, &mut rx)?;
-        Ok(rx[4])
-    }
+            let mut segments: Vec<Segment> = build_segment_plan(operations)
+                .into_iter()
+                .map(|plan| {
+                    let rx = vec![0; plan.rx_len];
+                    Segment { plan, rx }
+                })
+                .collect();
 
-    /// Write a register at a 16-bit address (SX126x protocol).
-    pub fn write_register(&mut self, opcode: u8, address: u16, value: u8) -> Result<()> {
-        let tx = [
-            opcode,
-            (address >> 8) as u8,
-            (address & 0xFF) as u8,
-            value,
-        ];
-        self.write(&tx)
-    }
+            if segments.is_empty() {
+                return Ok(());
+            }
 
-    /// Write to the FIFO buffer (SX126x protocol).
-    pub fn write_fifo(&mut self, opcode: u8, offset: u8, data: &[u8]) -> Result<()> {
-        let mut tx = Vec::with_capacity(2 + data.len());
-        tx.push(opcode);
-        tx.push(offset);
-        tx.extend_from_slice(data);
-        self.write(&tx)
-    }
+            {
+                let mut transfers: Vec<SpidevTransfer<'_, '_>> = segments
+                    .iter_mut()
+                    .map(|segment| match segment.plan.kind {
+                        SpiSegmentKind::DelayUs(microseconds) => SpidevTransfer::delay(microseconds),
+                        _ => SpidevTransfer::read_write(&segment.plan.tx, &mut segment.rx),
+                    })
+                    .collect();
+                self.dev.transfer_multiple(&mut transfers)?;
+            }
 
-    /// Read from the FIFO buffer (SX126x protocol).
-    pub fn read_fifo(&mut self, opcode: u8, offset: u8, size: usize) -> Result<Vec<u8>> {
-        let tx_len = 3 + size; // opcode + offset + NOP + data
-        let mut tx = Vec::with_capacity(tx_len);
-        tx.push(opcode);
-        tx.push(offset);
-        tx.resize(tx_len, 0x00);
-        let mut rx = vec![0u8; tx_len];
-        self.transfer(&tx, &mut rx)?;
-        Ok(rx[3..].to_vec())
-    }
+            if let Some(recorder) = &mut self.recorder {
+                for segment in &segments {
+                    match segment.plan.kind {
+                        SpiSegmentKind::DelayUs(_) => {}
+                        _ => recorder.record("TXRX", &segment.plan.tx, &segment.rx)?,
+                    }
+                }
+            }
 
-    /// Get a mutable reference to the underlying spidev for advanced use.
-    pub fn inner_mut(&mut self) -> &mut Spidev {
-        &mut self.dev
+            for segment in segments {
+                let Some(op_index) = segment.plan.op_index else {
+                    continue;
+                };
+                match (&mut operations[op_index], segment.plan.kind) {
+                    (Operation::Read(buf), SpiSegmentKind::Read) => buf.copy_from_slice(&segment.rx[..buf.len()]),
+                    (Operation::Transfer(read, _), SpiSegmentKind::Transfer) => {
+                        read.copy_from_slice(&segment.rx[..read.len()]);
+                    }
+                    (Operation::TransferInPlace(buf), SpiSegmentKind::InPlace) => {
+                        buf.copy_from_slice(&segment.rx[..buf.len()]);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
     }
 }
+
+#[cfg(target_os = "linux")]
+pub use linux::LinuxSpiDevice;
+
+#[cfg(test)]
+mod tests;

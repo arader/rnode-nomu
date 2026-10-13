@@ -1,0 +1,34 @@
+[Unit]
+Description=RNode Linux daemon
+After=network.target
+
+[Service]
+Type=simple
+# Create this account and grant it access to the configured spidev/gpiochip nodes,
+# for example with udev rules for your board.
+User=rnode
+Group=rnode
+# To let a host running as another user (e.g. rnsd) open the PTY, hand the slave to a group
+# both users share: uncomment this, set [pty] group = "dialout" and mode = "0660" in
+# /etc/rnode-linux.toml, and add the host's user to dialout.
+# SupplementaryGroups=dialout
+ExecStart=/usr/local/bin/rnode-linux --config /etc/rnode-linux.toml
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=rnode
+StateDirectory=rnode
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DevicePolicy=closed
+# Adjust to match /etc/rnode-linux.toml. These cover the generic and uConsole examples.
+DeviceAllow=/dev/spidev0.0 rw
+DeviceAllow=/dev/spidev1.0 rw
+DeviceAllow=/dev/gpiochip0 rw
+DeviceAllow=/dev/gpiochip15 rw
+ReadWritePaths=/run/rnode /var/lib/rnode
+
+[Install]
+WantedBy=multi-user.target

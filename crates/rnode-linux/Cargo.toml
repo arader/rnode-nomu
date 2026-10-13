@@ -1,22 +1,33 @@
 [package]
 name = "rnode-linux"
 version.workspace = true
-# Still on edition 2021 and outside the workspace lints: this crate is the pre-workspace
-# implementation and will be rewritten on top of rnode-core (see issue #24).
-edition = "2021"
+edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Linux userspace LoRa daemon with KISS protocol interface, targeting SX1262"
+description = "Linux userspace RNode daemon built on rnode-core"
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+embedded-hal = "1"
 env_logger = "0.11"
-libc = "0.2"
 log = "0.4"
-nix = { version = "0.31", features = ["ioctl", "poll", "signal", "fs", "term", "process"] }
+nix = { version = "0.31", features = ["fs", "poll", "signal", "term", "user"] }
+rnode-core = { path = "../rnode-core" }
+rnode-sx126x = { path = "../rnode-sx126x" }
+rnode-sim = { path = "../rnode-sim" }
 serde = { version = "1", features = ["derive"] }
-spidev = "0.6"
+signal-hook = "0.3"
 thiserror = "2"
 toml = "0.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gpiocdev = "0.7"
+spidev = "0.6"
+
+[dev-dependencies]
+serial_test = "3"

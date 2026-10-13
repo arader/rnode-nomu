@@ -1,151 +1,152 @@
-// Copyright (C) 2024, Mark Qvist
-// Ported to Rust for Linux by RNode contributors.
-// Licensed under the GNU General Public License v3.0 or later.
+use std::collections::VecDeque;
+use std::io;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::path::{Path, PathBuf};
 
-//! PTY (pseudo-terminal) creation and I/O.
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::pty::openpty;
+use nix::sys::stat::{Mode, fchmod};
+use nix::sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr};
+use nix::unistd::{Gid, fchown, read, ttyname, write};
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::Path;
-
-use log::info;
-
-use crate::error::{RNodeError, Result};
-
-/// A PTY pair (master + slave) for KISS serial communication.
-#[allow(dead_code)]
+/// PTY pair used for the host KISS session.
+#[derive(Debug)]
 pub struct PtyPair {
-    pub master: OwnedFd,
-    pub slave_path: String,
-    symlink_path: Option<String>,
+    master: OwnedFd,
+    slave: OwnedFd,
+    slave_path: PathBuf,
+    symlink_path: Option<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PtyError {
+    #[error("pty operation failed: {0}")]
+    Nix(#[from] nix::Error),
+    #[error("pty io failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("symlink {link} -> {target} failed: {source}")]
+    Symlink {
+        link: PathBuf,
+        target: PathBuf,
+        source: io::Error,
+    },
+    #[error("remove symlink {path} failed: {source}")]
+    RemoveSymlink { path: PathBuf, source: io::Error },
+    #[error("give PTY slave to group {gid} failed (is the daemon a member?): {source}")]
+    SlaveGroup { gid: u32, source: nix::Error },
+    #[error("set PTY slave mode {mode:04o} failed: {source}")]
+    SlaveMode { mode: u32, source: nix::Error },
+}
+
+/// Ownership and permission bits for the PTY slave, applied before it is published.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PtyPermissions {
+    /// Group for `fchown(slave, -1, gid)`; `None` keeps the group `openpty()` chose.
+    pub gid: Option<u32>,
+    /// Permission bits for `fchmod(slave, mode)`; `None` keeps the mode `openpty()` chose.
+    pub mode: Option<u32>,
 }
 
 impl PtyPair {
-    /// Create a new PTY pair and optionally symlink the slave device.
-    pub fn open(symlink: Option<&str>) -> Result<Self> {
-        let mut master_fd: RawFd = -1;
-        let mut slave_fd: RawFd = -1;
+    /// Create a raw slave PTY, keep the slave fd open, and make the master non-blocking.
+    pub fn open(symlink: Option<&Path>) -> Result<Self, PtyError> {
+        Self::open_with_permissions(symlink, PtyPermissions::default())
+    }
 
-        let ret = unsafe {
-            libc::openpty(
-                &mut master_fd,
-                &mut slave_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if ret != 0 {
-            return Err(RNodeError::Pty(format!(
-                "openpty failed: {}",
-                std::io::Error::last_os_error()
-            )));
+    /// Like [`PtyPair::open`], applying `permissions` to the slave right after `openpty()`, before
+    /// the symlink is published, so a host running as another user can open it.
+    pub fn open_with_permissions(symlink: Option<&Path>, permissions: PtyPermissions) -> Result<Self, PtyError> {
+        let pair = openpty(None, None)?;
+        if let Some(gid) = permissions.gid {
+            fchown(&pair.slave, None, Some(Gid::from_raw(gid)))
+                .map_err(|source| PtyError::SlaveGroup { gid, source })?;
         }
-
-        let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
-        let slave = unsafe { OwnedFd::from_raw_fd(slave_fd) };
-
-        // Get the slave path via ttyname
-        let slave_path = get_ttyname(slave.as_raw_fd())?;
-
-        // Set master to non-blocking
-        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0 {
-            return Err(RNodeError::Pty(format!(
-                "fcntl F_GETFL: {}",
-                std::io::Error::last_os_error()
-            )));
+        if let Some(mode) = permissions.mode {
+            let bits = Mode::from_bits_truncate((mode & 0o7777) as nix::libc::mode_t);
+            fchmod(&pair.slave, bits).map_err(|source| PtyError::SlaveMode { mode, source })?;
         }
-        let ret =
-            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        if ret < 0 {
-            return Err(RNodeError::Pty(format!(
-                "fcntl F_SETFL: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
+        let mut termios = tcgetattr(&pair.slave)?;
+        cfmakeraw(&mut termios);
+        tcsetattr(&pair.slave, SetArg::TCSANOW, &termios)?;
 
-        // Create symlink if requested
+        let raw_flags = fcntl(&pair.master, FcntlArg::F_GETFL)?;
+        let flags = OFlag::from_bits_truncate(raw_flags) | OFlag::O_NONBLOCK;
+        fcntl(&pair.master, FcntlArg::F_SETFL(flags))?;
+
+        let slave_path = ttyname(&pair.slave)?;
         let symlink_path = if let Some(link) = symlink {
-            if Path::new(link).exists() || Path::new(link).is_symlink() {
-                let _ = std::fs::remove_file(link);
+            if link.exists() || link.is_symlink() {
+                match std::fs::remove_file(link) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(source) => {
+                        return Err(PtyError::RemoveSymlink {
+                            path: link.into(),
+                            source,
+                        });
+                    }
+                }
             }
-            std::os::unix::fs::symlink(&slave_path, link).map_err(|e| {
-                RNodeError::Pty(format!("symlink {} -> {}: {}", link, slave_path, e))
+            std::os::unix::fs::symlink(&slave_path, link).map_err(|source| PtyError::Symlink {
+                link: link.into(),
+                target: slave_path.clone(),
+                source,
             })?;
-            info!("PTY symlink: {} -> {}", link, slave_path);
-            Some(link.to_string())
+            Some(link.into())
         } else {
             None
         };
 
-        info!("PTY slave: {}", slave_path);
-
-        // Drop the slave fd — the host process will open it via the path
-        drop(slave);
-
         Ok(Self {
-            master,
+            master: pair.master,
+            slave: pair.slave,
             slave_path,
             symlink_path,
         })
     }
 
-    /// Get the raw fd of the master side (for poll/epoll).
-    pub fn master_fd(&self) -> RawFd {
+    pub fn slave_path(&self) -> &Path {
+        &self.slave_path
+    }
+
+    pub fn master_fd(&self) -> BorrowedFd<'_> {
+        self.master.as_fd()
+    }
+
+    pub fn master_raw_fd(&self) -> RawFd {
         self.master.as_raw_fd()
     }
 
-    /// Read bytes from the master side. Returns Ok(0) on EAGAIN (non-blocking).
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        let n = unsafe {
-            libc::read(
-                self.master.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-            )
-        };
-        if n >= 0 {
-            Ok(n as usize)
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                Ok(0)
-            } else {
-                Err(RNodeError::Pty(format!("read: {}", err)))
-            }
+    pub fn read(&self, buf: &mut [u8]) -> Result<usize, PtyError> {
+        match read(&self.master, buf) {
+            Ok(n) => Ok(n),
+            // Holding the slave fd open means Linux reports temporary idleness as EAGAIN;
+            // a real EIO would still be returned below if the invariant ever changes.
+            Err(nix::Error::EAGAIN) => Ok(0),
+            Err(e) => Err(e.into()),
         }
     }
 
-    /// Write bytes to the master side.
-    pub fn write(&self, data: &[u8]) -> Result<usize> {
-        let n = unsafe {
-            libc::write(
-                self.master.as_raw_fd(),
-                data.as_ptr() as *const libc::c_void,
-                data.len(),
-            )
-        };
-        if n >= 0 {
-            Ok(n as usize)
-        } else {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                Ok(0)
-            } else {
-                Err(RNodeError::Pty(format!("write: {}", err)))
-            }
+    pub fn write_nonblocking(&self, data: &[u8]) -> Result<usize, PtyError> {
+        match write(&self.master, data) {
+            Ok(n) => Ok(n),
+            // See read(): with the daemon-owned slave open, EAGAIN means the kernel PTY buffer is full.
+            Err(nix::Error::EAGAIN) => Ok(0),
+            Err(e) => Err(e.into()),
         }
     }
 
-    /// Write all bytes, retrying on partial writes.
-    pub fn write_all(&self, data: &[u8]) -> Result<()> {
-        let mut offset = 0;
-        while offset < data.len() {
-            let n = self.write(&data[offset..])?;
-            if n == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+    pub fn slave_fd_for_tests(&self) -> BorrowedFd<'_> {
+        self.slave.as_fd()
+    }
+
+    pub fn remove_symlink(&mut self) -> Result<(), PtyError> {
+        if let Some(path) = self.symlink_path.take() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(PtyError::RemoveSymlink { path, source }),
             }
-            offset += n;
         }
         Ok(())
     }
@@ -153,22 +154,138 @@ impl PtyPair {
 
 impl Drop for PtyPair {
     fn drop(&mut self) {
-        if let Some(ref link) = self.symlink_path {
-            let _ = std::fs::remove_file(link);
-        }
+        let _ = self.remove_symlink();
     }
 }
 
-/// Get the tty device path for a file descriptor.
-fn get_ttyname(fd: RawFd) -> Result<String> {
-    let mut buf = vec![0u8; 256];
-    let ret = unsafe { libc::ttyname_r(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-    if ret != 0 {
-        return Err(RNodeError::Pty(format!(
-            "ttyname_r failed: {}",
-            std::io::Error::from_raw_os_error(ret)
-        )));
+/// Output buffer for a single partially written KISS frame.
+///
+/// Output queued in the PTY while no host is attached is stale by the time one connects;
+/// RNodeInterface discards it because pyserial 3.5's `Serial.open()` flushes input with
+/// `tcflush(fd, TCIFLUSH)` (`serialposix.py`, `_reset_input_buffer()`).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PendingHostOutput {
+    tail: VecDeque<u8>,
+    warned_stall: bool,
+    dropped_frames: u64,
+}
+
+impl PendingHostOutput {
+    pub fn len(&self) -> usize {
+        self.tail.len()
     }
-    let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr() as *const libc::c_char) };
-    Ok(cstr.to_string_lossy().to_string())
+
+    pub fn buffered_bytes(&self) -> Vec<u8> {
+        self.tail.iter().copied().collect()
+    }
+
+    pub fn has_warned_drop_for_tests(&self) -> bool {
+        self.warned_stall
+    }
+
+    pub fn dropped_frames_for_tests(&self) -> u64 {
+        self.dropped_frames
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tail.is_empty()
+    }
+
+    pub fn flush_bytes_to(&mut self, data: &[u8], pty: &PtyPair) -> Result<(), PtyError> {
+        self.flush_bytes_with(data, |bytes| {
+            pty.write_nonblocking(bytes)
+                .map_err(|e| io::Error::other(e.to_string()))
+        })?;
+        Ok(())
+    }
+
+    pub fn flush_bytes_with<F>(&mut self, data: &[u8], mut write: F) -> io::Result<()>
+    where
+        F: FnMut(&[u8]) -> io::Result<usize>,
+    {
+        self.flush_with(&mut write)?;
+        for (index, frame) in kiss_frames(data).iter().enumerate() {
+            if !self.tail.is_empty() {
+                self.drop_frame();
+                continue;
+            }
+            match write(frame)? {
+                0 => self.drop_frame(),
+                n if n >= frame.len() => self.mark_progress(),
+                n => {
+                    self.mark_progress();
+                    self.tail.extend(&frame[n..]);
+                    for _ in index + 1..kiss_frames(data).len() {
+                        self.drop_frame();
+                    }
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn flush_with<F>(&mut self, mut write: F) -> io::Result<()>
+    where
+        F: FnMut(&[u8]) -> io::Result<usize>,
+    {
+        while !self.tail.is_empty() {
+            let contiguous = self.tail.make_contiguous();
+            let len = contiguous.len();
+            let written = write(contiguous)?;
+            if written == 0 {
+                break;
+            }
+            self.mark_progress();
+            self.tail.drain(..written.min(len));
+        }
+        Ok(())
+    }
+
+    fn drop_frame(&mut self) {
+        self.dropped_frames = self.dropped_frames.saturating_add(1);
+        if !self.warned_stall {
+            log::warn!("dropping host output because the PTY is not draining");
+            self.warned_stall = true;
+        }
+    }
+
+    fn mark_progress(&mut self) {
+        self.warned_stall = false;
+    }
+}
+
+fn kiss_frames(bytes: &[u8]) -> Vec<&[u8]> {
+    const FEND: u8 = 0xC0;
+    let mut frames = Vec::new();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == FEND {
+            let start = idx;
+            idx += 1;
+            while idx < bytes.len() {
+                if bytes[idx] == FEND {
+                    frames.push(&bytes[start..=idx]);
+                    idx += 1;
+                    break;
+                }
+                idx += 1;
+            }
+            if idx == bytes.len() && bytes.last() != Some(&FEND) {
+                frames.push(&bytes[start..]);
+            }
+        } else {
+            let start = idx;
+            while idx < bytes.len() && bytes[idx] != FEND {
+                idx += 1;
+            }
+            if idx < bytes.len() {
+                frames.push(&bytes[start..=idx]);
+                idx += 1;
+            } else {
+                frames.push(&bytes[start..]);
+            }
+        }
+    }
+    frames.into_iter().filter(|frame| !frame.is_empty()).collect()
 }

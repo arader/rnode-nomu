@@ -1,588 +1,149 @@
-// Copyright (C) 2024, Mark Qvist
-// Ported to Rust for Linux by RNode contributors.
-// Licensed under the GNU General Public License v3.0 or later.
+use std::fs::File;
+use std::io::Read;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-//! RNode Linux LoRa Daemon
-//!
-//! A userspace daemon that exposes a PTY serial device for KISS protocol
-//! communication and drives an SX1262 LoRa radio via Linux spidev + GPIO.
-
-use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use anyhow::Context;
 use clap::Parser;
-use log::{debug, error, info, trace, warn};
+use log::{info, warn};
+use rnode_linux::config::{Config, RadioDriver};
 
-use rnode_linux::config::{Config, RadioParams};
-use rnode_linux::csma::{self, CsmaState};
-use rnode_linux::error;
-use rnode_linux::gpio::RadioGpio;
-use rnode_linux::kiss::{self, KissCommand, KissParser};
-use rnode_linux::packet::{self, PacketQueue, RxReassembler};
-use rnode_linux::pty::PtyPair;
-use rnode_linux::radio::sx126x::Sx126x;
-use rnode_linux::radio::types::TcxoVoltage;
-use rnode_linux::radio::Radio;
-use rnode_linux::spi::SpiDevice;
-
-#[derive(Parser)]
-#[command(name = "rnode-linux", about = "RNode Linux LoRa daemon")]
+#[derive(Parser, Debug)]
+#[command(name = "rnode-linux", about = "RNode Linux daemon")]
 struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = "config.toml")]
-    config: String,
+    config: PathBuf,
 
-    /// Record all SPI transactions to a CSV file for debugging.
+    /// Record SPI transactions to a CSV file.
     #[arg(long)]
-    spilog: Option<String>,
+    spilog: Option<PathBuf>,
 }
 
 fn main() {
-    let cli = Cli::parse();
-
-    // Load config first to get log_level, then initialize logger.
-    // If config loading fails, fall back to default "info" level.
-    let config = match Config::load(&cli.config) {
-        Ok(c) => c,
-        Err(e) => {
-            // Initialize logger with default level to report the error
-            env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-                .init();
-            error!("Fatal: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(&config.logging.log_level),
-    )
-    .init();
-
-    info!("Loaded config from {}", cli.config);
-
-    if let Err(e) = run(config, cli.spilog.as_deref()) {
-        error!("Fatal: {}", e);
+    if let Err(e) = real_main() {
+        eprintln!("fatal: {e:#}");
         std::process::exit(1);
     }
 }
 
-fn run(config: Config, spi_log: Option<&str>) -> error::Result<()> {
-
-    // --- Signal handling ---
-    setup_signal_handlers();
-
-    // --- Initialize hardware ---
-    let spi = SpiDevice::open(&config.spi.device, config.spi.speed_hz, spi_log)?;
-    info!("Opened SPI device: {}", config.spi.device);
-    if let Some(path) = spi_log {
-        info!("SPI recording enabled: {}", path);
+fn real_main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let config = Config::load(&cli.config).with_context(|| format!("load {}", cli.config.display()))?;
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&config.logging.log_level)).init();
+    info!("loaded config from {}", cli.config.display());
+    for warning in config.warnings() {
+        warn!("{warning}");
     }
+    let seed = seed_from_urandom();
+    run_daemon(config, cli.spilog, seed)
+}
 
-    let rxen_line = config
+fn seed_from_urandom() -> u64 {
+    let mut bytes = [0_u8; 8];
+    if File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok()
+    {
+        return u64::from_le_bytes(bytes);
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_daemon(config: Config, _spilog: Option<PathBuf>, seed: u64) -> anyhow::Result<()> {
+    let shutdown = install_signal_flag()?;
+    match config.radio.driver {
+        RadioDriver::Sim => run_sim(config, seed, &shutdown),
+        RadioDriver::Sx1262 => Err(anyhow::anyhow!("sx1262 hardware daemon runs only on Linux")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_daemon(config: Config, spilog: Option<PathBuf>, seed: u64) -> anyhow::Result<()> {
+    let shutdown = install_signal_flag()?;
+    match config.radio.driver {
+        RadioDriver::Sx1262 => run_sx1262(config, spilog, seed, &shutdown),
+        RadioDriver::Sim => run_sim(config, seed, &shutdown),
+    }
+}
+
+fn run_sim(config: Config, seed: u64, shutdown: &std::sync::atomic::AtomicBool) -> anyhow::Result<()> {
+    use rnode_core::Node;
+    use rnode_linux::event_loop::{FdIrqSource, run};
+    use rnode_linux::storage::TomlStorage;
+    use rnode_sim::{SimConfig, SimRadio};
+    use std::os::fd::BorrowedFd;
+
+    let sim_config = SimConfig {
+        air_dir: config.radio.sim.air_dir.clone(),
+        node_name: config.radio.sim.node_name.clone(),
+        rssi_dbm: config.radio.sim.rssi_dbm,
+        snr_db: config.radio.sim.snr_db,
+        loss: config.radio.sim.loss,
+        seed,
+    };
+    let radio = SimRadio::new(sim_config).context("open simulated radio")?;
+    let irq_fd = BorrowedFd::try_clone_to_owned(&radio.irq_fd()).context("clone simulated IRQ fd")?;
+    let irq = FdIrqSource::new(irq_fd);
+    let pty = open_pty(&config)?;
+    let storage = TomlStorage::new(config.storage.radio_settings.clone());
+    let node = Node::new(radio, storage, config.node_config(), seed);
+    run(node, irq, pty, shutdown).map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+fn run_sx1262(
+    config: Config,
+    spilog: Option<PathBuf>,
+    seed: u64,
+    shutdown: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<()> {
+    use rnode_core::Node;
+    use rnode_linux::delay::StdDelay;
+    use rnode_linux::event_loop::run;
+    use rnode_linux::gpio::RadioGpio;
+    use rnode_linux::spi::{LinuxSpiDevice, SpiRecorder};
+    use rnode_linux::storage::TomlStorage;
+    use rnode_sx126x::Sx126x;
+
+    let spi_config = config
+        .spi
+        .as_ref()
+        .context("[spi] is required when radio.driver = \"sx1262\"")?;
+    let gpio_config = config
         .gpio
-        .rxen_line
-        .and_then(|l| if l >= 0 { Some(l as u32) } else { None });
+        .as_ref()
+        .context("[gpio] is required when radio.driver = \"sx1262\"")?;
+    let radio_config = config.radio.sx1262.driver_config().context("radio.sx1262")?;
 
-    let gpio = RadioGpio::new(
-        &config.gpio.chip,
-        config.gpio.reset_line,
-        config.gpio.busy_line,
-        config.gpio.dio0_line,
-        rxen_line,
-    )?;
-    info!("GPIO initialized");
+    let recorder = spilog.map(SpiRecorder::create).transpose().context("open SPI log")?;
+    let spi = LinuxSpiDevice::open(&spi_config.device, spi_config.speed_hz, recorder)
+        .with_context(|| format!("open SPI device {}", spi_config.device.display()))?;
+    let gpio = RadioGpio::open(gpio_config).context("open GPIO lines")?;
+    let pty = open_pty(&config)?;
 
-    // --- Construct radio driver based on config ---
-    match config.radio.driver.as_str() {
-        "sx1262" => {
-            let tcxo_voltage = config
-                .radio
-                .sx1262
-                .tcxo_voltage
-                .as_deref()
-                .and_then(TcxoVoltage::from_str)
-                .unwrap_or(TcxoVoltage::V3_3);
-
-            let radio = Sx126x::new(
-                spi,
-                gpio,
-                config.radio.sx1262.enable_tcxo,
-                tcxo_voltage,
-                config.radio.sx1262.dio2_as_rf_switch,
-            );
-            info!("Using SX1262 radio driver");
-            run_with_radio(radio, config)
-        }
-        other => {
-            Err(error::RNodeError::Config(format!(
-                "Unknown radio driver '{}'. Supported drivers: sx1262",
-                other
-            ))
-            .into())
-        }
-    }
+    let _power = gpio.power;
+    let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, StdDelay, radio_config);
+    let storage = TomlStorage::new(config.storage.radio_settings.clone());
+    let node = Node::new(radio, storage, config.node_config(), seed);
+    run(node, gpio.dio1, pty, shutdown).map_err(Into::into)
 }
 
-/// Run the main event loop with a specific radio driver.
-/// This function is generic over `R: Radio` and is monomorphized at compile time
-/// for zero-cost abstraction.
-fn run_with_radio<R: Radio>(mut radio: R, config: Config) -> error::Result<()> {
-
-    // --- Load saved radio settings (simulates EEPROM) ---
-    let mut radio_params = RadioParams::new();
-    let mut radio_online = false;
-
-    if let Some(ref settings_path) = config.radio.radio_settings {
-        if let Some(settings) = rnode_linux::config::RadioSettings::load(settings_path) {
-            info!(
-                "Loaded radio settings: freq={} Hz, bw={} Hz, sf={}, cr={}, txp={} dBm",
-                settings.frequency, settings.bandwidth, settings.spreading_factor,
-                settings.coding_rate, settings.tx_power
-            );
-            radio_params = RadioParams::from_settings(&settings);
-
-            if !radio_params.is_locked() {
-                radio.begin(radio_params.frequency)?;
-                radio.set_bandwidth(radio_params.bandwidth)?;
-                radio.set_spreading_factor(radio_params.spreading_factor)?;
-                radio.set_coding_rate(radio_params.coding_rate)?;
-                radio.set_tx_power(radio_params.tx_power)?;
-                radio.set_preamble_length(config.radio.preamble_symbols)?;
-                if config.radio.enable_crc {
-                    radio.enable_crc()?;
-                }
-                radio.receive()?;
-                radio_online = true;
-                info!("Radio online (loaded from settings)");
-            } else {
-                warn!("Saved settings have incomplete parameters — radio stays offline");
-            }
-        } else {
-            info!("No saved radio settings found — radio offline, awaiting KISS configuration");
-        }
-    } else {
-        info!("No radio_settings path configured — radio offline, awaiting KISS configuration");
-    }
-
-    // --- Create PTY ---
-    let pty = PtyPair::open(config.pty.symlink.as_deref())?;
-    info!("PTY ready: {}", pty.slave_path);
-
-    // --- State ---
-    let mut kiss_parser = KissParser::new();
-    let mut tx_queue = PacketQueue::new();
-    let mut rx_reassembler = RxReassembler::new();
-    let mut csma = CsmaState::new(
-        config.csma.enabled,
-        config.csma.slot_min_ms,
-        config.csma.slot_max_ms,
-    );
-    let mut promisc = false;
-    let mut stat_rx: u32 = 0;
-    let mut stat_tx: u32 = 0;
-
-    // --- Event loop ---
-    let mut read_buf = [0u8; 1024];
-    let poll_timeout_ms = 5; // 5ms poll interval for responsive DCD/CSMA
-
-    info!("Entering main event loop");
-
-    while GLOBAL_RUNNING.load(Ordering::Relaxed) {
-        // Poll PTY master for incoming data
-        let mut fds = [libc::pollfd {
-            fd: pty.master.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-        unsafe { libc::poll(fds.as_mut_ptr(), 1, poll_timeout_ms) };
-
-        // --- Read from PTY (host → radio) ---
-        if fds[0].revents & libc::POLLIN != 0 {
-                match pty.read(&mut read_buf) {
-                    Ok(0) => {}
-                    Ok(n) => {
-                        for &byte in &read_buf[..n] {
-                            if let Some(cmd) = kiss_parser.feed(byte) {
-                                handle_command(
-                                    cmd,
-                                    &mut radio,
-                                    &pty,
-                                    &mut tx_queue,
-                                    &mut csma,
-                                    &mut radio_online,
-                                    &mut radio_params,
-                                    &config,
-                                    &mut promisc,
-                                    stat_rx,
-                                    stat_tx,
-                                )?;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        debug!("PTY read error: {}", e);
-                    }
-                }
-            }
-        if fds[0].revents & libc::POLLHUP != 0 {
-            // Host closed the PTY — keep running and wait for reconnect
-            debug!("PTY HUP — host disconnected");
-        }
-
-        // --- Check for RX interrupt (DIO0 GPIO) ---
-        if radio_online {
-            // Poll GPIO for DIO0 rising edge
-            if let Ok(true) = check_dio0(&radio) {
-                match radio.handle_dio0_rise() {
-                    Ok(Some(pkt_len)) => {
-                        let mut frame = vec![0u8; pkt_len];
-                        if let Ok(n) = radio.read_packet(&mut frame) {
-                            frame.truncate(n);
-                            stat_rx += 1;
-
-                            let rssi = radio.packet_rssi().unwrap_or(-999);
-                            let snr = radio.packet_snr().unwrap_or(0.0);
-                            debug!("RX packet #{}: {} bytes, RSSI={} dBm, SNR={:.1} dB", stat_rx, n, rssi, snr);
-                            trace!("RX payload: {:02X?}", &frame);
-
-                            let payload = if promisc {
-                                Some(rx_reassembler.process_frame_promisc(&frame))
-                            } else {
-                                rx_reassembler.process_frame(&frame)
-                            };
-
-                            if let Some(data) = payload {
-                                let kiss_frame = kiss::indicate_data(&data);
-                                let _ = pty.write_all(&kiss_frame);
-                            }
-                        }
-                        // Re-enter receive mode
-                        let _ = radio.receive();
-                    }
-                    Ok(None) => {
-                        // CRC error, discard
-                    }
-                    Err(e) => {
-                        warn!("RX error: {}", e);
-                        let _ = radio.receive();
-                    }
-                }
-            }
-        }
-
-        // --- CSMA/DCD update ---
-        if radio_online {
-            csma.update_dcd(&mut radio);
-        }
-
-        // --- TX from queue ---
-        if radio_online && !tx_queue.is_empty() && csma.can_transmit() {
-            if let Some(data) = tx_queue.pop() {
-                let seq = tx_queue.next_seq();
-                let frames = packet::prepare_tx_frames(&data, seq);
-                let mut tx_ok = true;
-
-                debug!("TX packet: {} bytes, {} frame(s), seq={}", data.len(), frames.len(), seq);
-                trace!("TX payload: {:02X?}", &data);
-
-                for frame in &frames {
-                    let implicit = false;
-                    radio.begin_packet(implicit)?;
-                    radio.write_packet(frame)?;
-                    if !radio.end_packet()? {
-                        let _ = pty.write_all(&kiss::indicate_error(kiss::ERROR_TXFAILED));
-                        tx_ok = false;
-                        break;
-                    }
-
-                    // Track airtime
-                    let airtime_ms = csma::calculate_airtime_ms(
-                        frame.len(),
-                        radio.get_spreading_factor(),
-                        radio.get_signal_bandwidth(),
-                        radio.get_coding_rate() - 4,
-                        config.radio.preamble_symbols,
-                        implicit,
-                        config.radio.enable_crc,
-                        false, // low_data_rate checked internally
-                    );
-                    csma.add_airtime_ms(airtime_ms as u64);
-                }
-
-                if tx_ok {
-                    stat_tx += 1;
-                }
-
-                // Return to receive mode after TX
-                radio.receive()?;
-            }
-        }
-    }
-
-    info!("Shutting down");
-    let _ = radio.end();
-    Ok(())
+fn open_pty(config: &Config) -> anyhow::Result<rnode_linux::pty::PtyPair> {
+    let permissions = config.pty.slave_permissions()?;
+    let pty = rnode_linux::pty::PtyPair::open_with_permissions(config.pty.symlink.as_deref(), permissions)
+        .context("open PTY")?;
+    info!("PTY slave: {}", pty.slave_path().display());
+    Ok(pty)
 }
 
-/// Dispatch a parsed KISS command.
-fn handle_command<R: Radio>(
-    cmd: KissCommand,
-    radio: &mut R,
-    pty: &PtyPair,
-    tx_queue: &mut PacketQueue,
-    csma: &mut CsmaState,
-    radio_online: &mut bool,
-    radio_params: &mut RadioParams,
-    config: &Config,
-    promisc: &mut bool,
-    stat_rx: u32,
-    stat_tx: u32,
-) -> error::Result<()> {
-    match cmd {
-        KissCommand::Data(data) => {
-            if data.len() > packet::MTU {
-                warn!("Packet too large: {} > {}", data.len(), packet::MTU);
-                return Ok(());
-            }
-            if !tx_queue.push(&data) {
-                let _ = pty.write_all(&kiss::indicate_error(kiss::ERROR_QUEUE_FULL));
-            }
-        }
-        KissCommand::SetFrequency(freq) => {
-            if freq == 0 {
-                let _ = pty.write_all(&kiss::indicate_frequency(radio_params.frequency));
-            } else {
-                radio_params.frequency = freq;
-                if *radio_online {
-                    radio.set_frequency(freq)?;
-                }
-                let _ = pty.write_all(&kiss::indicate_frequency(freq));
-            }
-        }
-        KissCommand::SetBandwidth(bw) => {
-            if bw == 0 {
-                let _ = pty.write_all(&kiss::indicate_bandwidth(radio_params.bandwidth));
-            } else {
-                radio_params.bandwidth = bw;
-                if *radio_online {
-                    radio.set_bandwidth(bw)?;
-                }
-                let _ = pty.write_all(&kiss::indicate_bandwidth(bw));
-            }
-        }
-        KissCommand::SetTxPower(txp) => {
-            if txp == 0xFF {
-                let p = if radio_params.tx_power == 0x7F { 0xFF } else { radio_params.tx_power as u8 };
-                let _ = pty.write_all(&kiss::indicate_txpower(p));
-            } else {
-                let clamped = txp.min(22);
-                radio_params.tx_power = clamped as i8;
-                if *radio_online {
-                    radio.set_tx_power(clamped as i8)?;
-                }
-                let _ = pty.write_all(&kiss::indicate_txpower(clamped));
-            }
-        }
-        KissCommand::SetSf(sf) => {
-            if sf == 0xFF {
-                let s = if radio_params.spreading_factor == 0 { 0xFF } else { radio_params.spreading_factor };
-                let _ = pty.write_all(&kiss::indicate_spreadingfactor(s));
-            } else {
-                let sf = sf.clamp(5, 12);
-                radio_params.spreading_factor = sf;
-                if *radio_online {
-                    radio.set_spreading_factor(sf)?;
-                }
-                let _ = pty.write_all(&kiss::indicate_spreadingfactor(sf));
-            }
-        }
-        KissCommand::SetCr(cr) => {
-            if cr == 0xFF {
-                let c = if radio_params.coding_rate == 0 { 0xFF } else { radio_params.coding_rate };
-                let _ = pty.write_all(&kiss::indicate_codingrate(c));
-            } else {
-                let cr = cr.clamp(5, 8);
-                radio_params.coding_rate = cr;
-                if *radio_online {
-                    radio.set_coding_rate(cr)?;
-                }
-                let _ = pty.write_all(&kiss::indicate_codingrate(cr));
-            }
-        }
-        KissCommand::RadioState(state) => {
-            if state == 0xFF {
-                let s = if *radio_online {
-                    kiss::RADIO_STATE_ON
-                } else {
-                    kiss::RADIO_STATE_OFF
-                };
-                let _ = pty.write_all(&kiss::indicate_radiostate(s));
-            } else if state == 0x00 {
-                if *radio_online {
-                    radio.standby()?;
-                }
-                *radio_online = false;
-                let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_OFF));
-            } else if state == 0x01 {
-                if radio_params.is_locked() {
-                    warn!(
-                        "Cannot start radio: config incomplete (freq={}, bw={}, sf={}, cr={}, txp={})",
-                        radio_params.frequency, radio_params.bandwidth,
-                        radio_params.spreading_factor, radio_params.coding_rate,
-                        radio_params.tx_power
-                    );
-                    let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_OFF));
-                } else if !*radio_online {
-                    radio.begin(radio_params.frequency)?;
-                    radio.set_bandwidth(radio_params.bandwidth)?;
-                    radio.set_spreading_factor(radio_params.spreading_factor)?;
-                    radio.set_coding_rate(radio_params.coding_rate)?;
-                    radio.set_tx_power(radio_params.tx_power)?;
-                    radio.set_preamble_length(config.radio.preamble_symbols)?;
-                    if config.radio.enable_crc {
-                        radio.enable_crc()?;
-                    }
-                    radio.receive()?;
-                    *radio_online = true;
-                    info!("Radio online");
-                    let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_ON));
-                } else {
-                    // Already online
-                    let _ = pty.write_all(&kiss::indicate_radiostate(kiss::RADIO_STATE_ON));
-                }
-            }
-        }
-        KissCommand::RadioLock => {
-            let _ = pty.write_all(&kiss::indicate_radio_lock(radio_params.is_locked()));
-        }
-        KissCommand::Detect => {
-            let _ = pty.write_all(&kiss::indicate_detect());
-        }
-        KissCommand::SetImplicit(len) => {
-            if len > 0 {
-                radio.set_implicit_header_mode(len)?;
-            } else {
-                radio.set_explicit_header_mode()?;
-            }
-            let _ = pty.write_all(&kiss::indicate_implicit_length(len));
-        }
-        KissCommand::Leave => {
-            debug!("Host disconnected (CMD_LEAVE)");
-        }
-        KissCommand::ConfSave => {
-            if let Some(ref settings_path) = config.radio.radio_settings {
-                let settings = radio_params.to_settings();
-                match settings.save(settings_path) {
-                    Ok(()) => info!("Radio settings saved to {}", settings_path),
-                    Err(e) => warn!("Failed to save radio settings: {}", e),
-                }
-            } else {
-                warn!("CMD_CONF_SAVE received but no radio_settings path configured");
-            }
-        }
-        KissCommand::ConfDelete => {
-            if let Some(ref settings_path) = config.radio.radio_settings {
-                match rnode_linux::config::RadioSettings::delete(settings_path) {
-                    Ok(()) => info!("Radio settings deleted"),
-                    Err(e) => warn!("Failed to delete radio settings: {}", e),
-                }
-            } else {
-                warn!("CMD_CONF_DELETE received but no radio_settings path configured");
-            }
-        }
-        KissCommand::StAirlock(at) => {
-            if at == 0 {
-                csma.set_st_airtime_limit(0.0);
-            } else {
-                let limit = at as f32 / (100.0 * 100.0);
-                csma.set_st_airtime_limit(limit);
-            }
-            let _ = pty.write_all(&kiss::indicate_st_alock(csma.st_airtime_limit_raw()));
-        }
-        KissCommand::LtAirlock(at) => {
-            if at == 0 {
-                csma.set_lt_airtime_limit(0.0);
-            } else {
-                let limit = at as f32 / (100.0 * 100.0);
-                csma.set_lt_airtime_limit(limit);
-            }
-            let _ = pty.write_all(&kiss::indicate_lt_alock(csma.lt_airtime_limit_raw()));
-        }
-        KissCommand::Promisc(val) => {
-            *promisc = val == 0x01;
-            let _ = pty.write_all(&kiss::indicate_promisc(*promisc));
-        }
-        KissCommand::Ready => {
-            if tx_queue.is_full() {
-                let _ = pty.write_all(&kiss::indicate_not_ready());
-            } else {
-                let _ = pty.write_all(&kiss::indicate_ready());
-            }
-        }
-        KissCommand::StatRx => {
-            let _ = pty.write_all(&kiss::indicate_stat_rx(stat_rx));
-        }
-        KissCommand::StatTx => {
-            let _ = pty.write_all(&kiss::indicate_stat_tx(stat_tx));
-        }
-        KissCommand::StatRssi => {
-            let rssi = radio.current_rssi_raw().unwrap_or(0);
-            let _ = pty.write_all(&kiss::indicate_stat_rssi(rssi));
-        }
-        KissCommand::StatSnr => {
-            let snr = radio.packet_snr_raw().unwrap_or(0x80);
-            let _ = pty.write_all(&kiss::indicate_stat_snr(snr));
-        }
-        KissCommand::Blink(_) => {
-            // No LED on Linux, ignore
-        }
-        KissCommand::Random => {
-            let val = radio.random().unwrap_or(0);
-            let _ = pty.write_all(&kiss::indicate_random(val));
-        }
-        KissCommand::FwVersion => {
-            let _ = pty.write_all(&kiss::indicate_version());
-        }
-        KissCommand::Platform => {
-            let _ = pty.write_all(&kiss::indicate_platform());
-        }
-        KissCommand::Board => {
-            let _ = pty.write_all(&kiss::indicate_board());
-        }
-        KissCommand::Reset => {
-            info!("Reset requested — reinitializing radio");
-            if *radio_online {
-                let _ = radio.end();
-                if !radio_params.is_locked() {
-                    radio.begin(radio_params.frequency)?;
-                    radio.receive()?;
-                } else {
-                    *radio_online = false;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Check if DIO0 GPIO is high (indicating an RX done interrupt).
-/// In a production implementation, this would poll the GPIO fd via epoll.
-/// For now, we poll the IRQ status register directly from the radio.
-fn check_dio0<R: Radio>(_radio: &R) -> error::Result<bool> {
-    // Placeholder: the main loop should use GPIO edge detection.
-    // For initial testing, always return false (RX handled via polling).
-    Ok(false)
-}
-
-static GLOBAL_RUNNING: AtomicBool = AtomicBool::new(true);
-
-extern "C" fn handle_signal(_sig: libc::c_int) {
-    GLOBAL_RUNNING.store(false, Ordering::SeqCst);
-}
-
-fn setup_signal_handlers() {
-    unsafe {
-        libc::signal(libc::SIGINT, handle_signal as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_signal as *const () as libc::sighandler_t);
-    }
+fn install_signal_flag() -> anyhow::Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, std::sync::Arc::clone(&shutdown))?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, std::sync::Arc::clone(&shutdown))?;
+    Ok(shutdown)
 }

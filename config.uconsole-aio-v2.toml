@@ -1,0 +1,35 @@
+# Clockwork uConsole CM5 with HackerGadgets AIO V2 SX1262.
+
+[spi]
+device = "/dev/spidev1.0"
+speed_hz = 8_000_000
+
+[gpio]
+chip = "gpiochip15" # label: pinctrl-rp1
+power = 16
+power_on_delay_ms = 100
+power_off_on_exit = false
+reset = 25
+busy = 24
+dio1 = 26
+
+[radio]
+driver = "sx1262"
+avoid_interference = false
+
+[radio.sx1262]
+tcxo_voltage = "1.8V"
+dio2_as_rf_switch = true
+ocp = 0x28
+
+[pty]
+symlink = "/run/rnode/rnode0"
+# For an rnsd running as another user: SupplementaryGroups=dialout in the unit, then
+# group = "dialout"
+# mode = "0660"
+
+[storage]
+radio_settings = "/var/lib/rnode/radio_settings.toml"
+
+[logging]
+log_level = "info"
