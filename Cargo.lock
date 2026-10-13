@@ -351,8 +351,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "rnode-core"
+version = "0.2.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "rnode-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",

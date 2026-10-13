@@ -11,12 +11,12 @@ dio0_line = 22
 # rxen_line = -1
 
 [radio]
+# Which radio driver to use. Currently supported: "sx1262"
+driver = "sx1262"
+
 # Hardware-specific radio settings (not configurable via KISS)
 preamble_symbols = 18
 enable_crc = true
-enable_tcxo = false
-# tcxo_voltage options: "1.6V", "1.7V", "1.8V", "2.2V", "2.4V", "2.7V", "3.0V", "3.3V"
-# tcxo_voltage = "3.3V"
 
 # Path to saved radio settings (simulates EEPROM).
 # Radio link params (frequency, bandwidth, SF, CR, TX power) are configured
@@ -24,6 +24,13 @@ enable_tcxo = false
 # If this file exists at startup, the radio auto-configures and goes online.
 # If absent, the radio starts offline and waits for KISS configuration.
 radio_settings = "/var/lib/rnode/radio_settings.toml"
+
+# SX1262-specific hardware settings
+[radio.sx1262]
+enable_tcxo = false
+# tcxo_voltage options: "1.6V", "1.7V", "1.8V", "2.2V", "2.4V", "2.7V", "3.0V", "3.3V"
+# tcxo_voltage = "3.3V"
+dio2_as_rf_switch = true
 
 [pty]
 # Symlink created pointing to the PTY slave device

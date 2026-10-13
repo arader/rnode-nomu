@@ -1,2 +1,5 @@
-config.toml
+/config.toml
 target/
+lcov.info
+
+.forgejo/token

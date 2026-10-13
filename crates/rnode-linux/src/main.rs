@@ -31,6 +31,10 @@ struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = "config.toml")]
     config: String,
+
+    /// Record all SPI transactions to a CSV file for debugging.
+    #[arg(long)]
+    spilog: Option<String>,
 }
 
 fn main() {
@@ -56,20 +60,23 @@ fn main() {
 
     info!("Loaded config from {}", cli.config);
 
-    if let Err(e) = run(config) {
+    if let Err(e) = run(config, cli.spilog.as_deref()) {
         error!("Fatal: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run(config: Config) -> error::Result<()> {
+fn run(config: Config, spi_log: Option<&str>) -> error::Result<()> {
 
     // --- Signal handling ---
     setup_signal_handlers();
 
     // --- Initialize hardware ---
-    let spi = SpiDevice::open(&config.spi.device, config.spi.speed_hz)?;
+    let spi = SpiDevice::open(&config.spi.device, config.spi.speed_hz, spi_log)?;
     info!("Opened SPI device: {}", config.spi.device);
+    if let Some(path) = spi_log {
+        info!("SPI recording enabled: {}", path);
+    }
 
     let rxen_line = config
         .gpio
@@ -85,15 +92,41 @@ fn run(config: Config) -> error::Result<()> {
     )?;
     info!("GPIO initialized");
 
-    // --- Initialize radio hardware (TCXO, etc. — no link params yet) ---
-    let tcxo_voltage = config
-        .radio
-        .tcxo_voltage
-        .as_deref()
-        .and_then(TcxoVoltage::from_str)
-        .unwrap_or(TcxoVoltage::V3_3);
+    // --- Construct radio driver based on config ---
+    match config.radio.driver.as_str() {
+        "sx1262" => {
+            let tcxo_voltage = config
+                .radio
+                .sx1262
+                .tcxo_voltage
+                .as_deref()
+                .and_then(TcxoVoltage::from_str)
+                .unwrap_or(TcxoVoltage::V3_3);
 
-    let mut radio = Sx126x::new(spi, gpio, config.radio.enable_tcxo, tcxo_voltage, true);
+            let radio = Sx126x::new(
+                spi,
+                gpio,
+                config.radio.sx1262.enable_tcxo,
+                tcxo_voltage,
+                config.radio.sx1262.dio2_as_rf_switch,
+            );
+            info!("Using SX1262 radio driver");
+            run_with_radio(radio, config)
+        }
+        other => {
+            Err(error::RNodeError::Config(format!(
+                "Unknown radio driver '{}'. Supported drivers: sx1262",
+                other
+            ))
+            .into())
+        }
+    }
+}
+
+/// Run the main event loop with a specific radio driver.
+/// This function is generic over `R: Radio` and is monomorphized at compile time
+/// for zero-cost abstraction.
+fn run_with_radio<R: Radio>(mut radio: R, config: Config) -> error::Result<()> {
 
     // --- Load saved radio settings (simulates EEPROM) ---
     let mut radio_params = RadioParams::new();
@@ -292,9 +325,9 @@ fn run(config: Config) -> error::Result<()> {
 }
 
 /// Dispatch a parsed KISS command.
-fn handle_command(
+fn handle_command<R: Radio>(
     cmd: KissCommand,
-    radio: &mut Sx126x,
+    radio: &mut R,
     pty: &PtyPair,
     tx_queue: &mut PacketQueue,
     csma: &mut CsmaState,
@@ -535,7 +568,7 @@ fn handle_command(
 /// Check if DIO0 GPIO is high (indicating an RX done interrupt).
 /// In a production implementation, this would poll the GPIO fd via epoll.
 /// For now, we poll the IRQ status register directly from the radio.
-fn check_dio0(_radio: &Sx126x) -> error::Result<bool> {
+fn check_dio0<R: Radio>(_radio: &R) -> error::Result<bool> {
     // Placeholder: the main loop should use GPIO edge detection.
     // For initial testing, always return false (RX handled via polling).
     Ok(false)

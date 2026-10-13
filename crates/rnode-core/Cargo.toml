@@ -1,0 +1,14 @@
+[package]
+name = "rnode-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hardware-independent RNode logic: KISS host protocol, framing, PHY/CSMA and the node state machine"
+
+[lints]
+workspace = true
+
+[dependencies]
+log = "0.4"

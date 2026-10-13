@@ -3,8 +3,10 @@
 // Licensed under the GNU General Public License v3.0 or later.
 
 use spidev::{SpiModeFlags, Spidev, SpidevOptions, SpidevTransfer};
-use std::io::Write;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::time::Instant;
 
 use crate::error::Result;
 
@@ -12,10 +14,60 @@ use crate::error::Result;
 #[allow(dead_code)]
 pub struct SpiDevice {
     dev: Spidev,
+    recorder: Option<SpiRecorder>,
+}
+
+/// Records SPI transactions to a CSV file for debugging.
+struct SpiRecorder {
+    writer: BufWriter<File>,
+    start: Instant,
+    write_failed: bool,
+}
+
+impl SpiRecorder {
+    fn new(path: &str) -> Result<Self> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(writer, "timestamp_us,direction,tx,rx")?;
+        Ok(Self {
+            writer,
+            start: Instant::now(),
+            write_failed: false,
+        })
+    }
+
+    fn log_transfer(&mut self, tx: &[u8], rx: &[u8]) {
+        let ts = self.start.elapsed().as_micros();
+        let tx_hex = hex_encode(tx);
+        let rx_hex = hex_encode(rx);
+        let result = writeln!(self.writer, "{},TXRX,{},{}", ts, tx_hex, rx_hex);
+        self.check(result);
+    }
+
+    fn log_write(&mut self, data: &[u8]) {
+        let ts = self.start.elapsed().as_micros();
+        let tx_hex = hex_encode(data);
+        let result = writeln!(self.writer, "{},TX,{},", ts, tx_hex);
+        self.check(result);
+    }
+
+    /// Warn once when the trace can no longer be written, so an incomplete trace is noticed.
+    fn check(&mut self, result: std::io::Result<()>) {
+        if let Err(e) = result {
+            if !self.write_failed {
+                log::warn!("SPI trace write failed, the trace is incomplete from here on: {}", e);
+                self.write_failed = true;
+            }
+        }
+    }
+}
+
+fn hex_encode(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 impl SpiDevice {
-    pub fn open(device: &str, speed_hz: u32) -> Result<Self> {
+    pub fn open(device: &str, speed_hz: u32, spi_log: Option<&str>) -> Result<Self> {
         let path = Path::new(device);
         let mut dev = Spidev::open(path)?;
         let options = SpidevOptions::new()
@@ -24,19 +76,29 @@ impl SpiDevice {
             .mode(SpiModeFlags::SPI_MODE_0)
             .build();
         dev.configure(&options)?;
-        Ok(Self { dev })
+        let recorder = match spi_log {
+            Some(path) => Some(SpiRecorder::new(path)?),
+            None => None,
+        };
+        Ok(Self { dev, recorder })
     }
 
     /// Full-duplex SPI transfer: writes `tx` and reads into `rx` simultaneously.
     pub fn transfer(&mut self, tx: &[u8], rx: &mut [u8]) -> Result<()> {
         let mut transfer = SpidevTransfer::read_write(tx, rx);
         self.dev.transfer(&mut transfer)?;
+        if let Some(ref mut rec) = self.recorder {
+            rec.log_transfer(tx, rx);
+        }
         Ok(())
     }
 
     /// Write-only SPI transfer.
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         self.dev.write_all(data)?;
+        if let Some(ref mut rec) = self.recorder {
+            rec.log_write(data);
+        }
         Ok(())
     }
 

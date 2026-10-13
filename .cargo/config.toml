@@ -1,0 +1,9 @@
+[alias]
+# Generate an HTML coverage report (opens in target/llvm-cov/html/)
+coverage = ["llvm-cov", "--html"]
+
+# Generate an LCOV report for CI integration
+coverage-lcov = ["llvm-cov", "--lcov", "--output-path", "lcov.info"]
+
+# Print a coverage summary to the terminal
+coverage-summary = ["llvm-cov"]

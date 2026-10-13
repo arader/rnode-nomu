@@ -112,6 +112,9 @@ dio0_line = 22     # Connected to SX1262 DIO1 pin
 # rxen_line = 5
 
 [radio]
+# Which radio driver to use. Currently supported: "sx1262"
+driver = "sx1262"
+
 # Hardware-specific radio settings. These are properties of the physical
 # module and do not change between radio links.
 
@@ -122,6 +125,17 @@ preamble_symbols = 18
 # Enable CRC checking on received packets.
 enable_crc = true
 
+# Path to the saved radio settings file. Radio link parameters (frequency,
+# bandwidth, spreading factor, coding rate, TX power) are configured via
+# KISS commands from the host and can be persisted here.
+# If this file exists at startup, the radio auto-configures and goes online.
+# If absent, the radio starts offline and waits for KISS configuration.
+radio_settings = "/var/lib/rnode/radio_settings.toml"
+
+# SX1262-specific hardware settings.
+# These only apply when driver = "sx1262".
+[radio.sx1262]
+
 # Enable TCXO (temperature-compensated crystal oscillator).
 # Set to true if your module has a TCXO (e.g., Waveshare SX1262 HAT).
 enable_tcxo = false
@@ -130,12 +144,8 @@ enable_tcxo = false
 # Options: "1.6V", "1.7V", "1.8V", "2.2V", "2.4V", "2.7V", "3.0V", "3.3V"
 # tcxo_voltage = "3.3V"
 
-# Path to the saved radio settings file. Radio link parameters (frequency,
-# bandwidth, spreading factor, coding rate, TX power) are configured via
-# KISS commands from the host and can be persisted here.
-# If this file exists at startup, the radio auto-configures and goes online.
-# If absent, the radio starts offline and waits for KISS configuration.
-radio_settings = "/var/lib/rnode/radio_settings.toml"
+# Use DIO2 as the RF switch control. Most SX1262 modules use this.
+dio2_as_rf_switch = true
 
 [pty]
 # Optional symlink pointing to the PTY slave device.
@@ -220,6 +230,7 @@ cat /sys/kernel/debug/gpio
 Some LoRa modules (like the Waveshare SX1262 HAT) have a TCXO instead of a plain crystal. Check your module's datasheet or schematic. If it has a TCXO:
 
 ```toml
+[radio.sx1262]
 enable_tcxo = true
 tcxo_voltage = "3.3V"   # Match your module's TCXO voltage
 ```
@@ -409,8 +420,19 @@ All KISS frames are delimited by `FEND` (0xC0) with standard `FESC`/`TFEND`/`TFE
 
 ### Source Layout
 
+The repository is a Cargo workspace. `crates/rnode-core` holds the hardware-independent RNode
+logic and the `Radio`/`Storage` traits; `crates/rnode-linux` is the daemon. The daemon is being
+moved onto `rnode-core` (issue #24); until then its modules are:
+
 ```
-src/
+crates/rnode-core/src/
+├── lib.rs           # Crate root
+├── radio.rs         # Radio trait: the modem contract implemented by drivers and simulators
+├── storage.rs       # RadioSettings persistence trait (CMD_CONF_SAVE / CMD_CONF_DELETE)
+├── identity.rs      # Platform / MCU / board / firmware version reported to the host
+└── node.rs          # Node: the RNode state machine driven by the platform layer
+
+crates/rnode-linux/src/
 ├── main.rs          # CLI entry point, event loop, KISS command dispatch
 ├── lib.rs           # Library crate root (public module re-exports)
 ├── config.rs        # TOML config parsing, RadioSettings, RadioParams
@@ -426,7 +448,7 @@ src/
     ├── sx126x.rs    # SX1262 driver (port of Arduino sx126x.cpp)
     └── types.rs     # Bandwidth codes, TCXO voltage enums
 
-tests/
+crates/rnode-linux/tests/
 ├── kiss_tests.rs          # 43 tests — KISS parser/encoder
 ├── packet_tests.rs        # 19 tests — packet queue, splitting, reassembly
 ├── csma_tests.rs          # 14 tests — CSMA and airtime calculations
@@ -436,14 +458,58 @@ tests/
 
 ## Extending to Other Radio Chips
 
-The `Radio` trait in `src/radio/mod.rs` defines the interface that all radio drivers must implement. To add support for a new chip (e.g., SX1276 or SX1280):
+The radio driver system uses Rust generics for zero-cost abstraction. The `Radio` trait in `src/radio/mod.rs` defines the interface that all drivers must implement, and `main.rs` dispatches to a monomorphized `run_with_radio<R: Radio>()` based on the `driver` field in the config.
+
+To add support for a new chip (e.g., SX1276 or SX1280):
 
 1. Create a new module (e.g., `src/radio/sx127x.rs`).
 2. Implement the `Radio` trait for your driver struct.
 3. Add the module to `src/radio/mod.rs`.
-4. Update `main.rs` to select the driver based on configuration.
+4. Add a chip-specific config section (e.g., `Sx127xConfig`) to `src/config.rs`.
+5. Add a match arm in `run()` in `main.rs` to construct your driver and call `run_with_radio()`.
+6. Set `driver = "sx1276"` in `config.toml` and add `[radio.sx1276]` with chip-specific settings.
 
 The existing SX1262 driver (`src/radio/sx126x.rs`) serves as a comprehensive reference implementation.
+
+## Test Coverage
+
+Code coverage reports are generated with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov), which uses rustc's built-in LLVM instrumentation for accurate source-based coverage. This is **fully optional** — if you don't need coverage reports, you don't need to install anything extra.
+
+### One-Time Setup
+
+```bash
+# Install the cargo subcommand
+cargo install cargo-llvm-cov
+
+# Install the LLVM tools component
+rustup component add llvm-tools-preview
+```
+
+### Generating Reports
+
+Cargo aliases are provided in `.cargo/config.toml` for convenience:
+
+```bash
+# Generate an HTML report (output in target/llvm-cov/html/index.html)
+cargo coverage
+
+# Print a coverage summary to the terminal
+cargo coverage-summary
+
+# Generate an LCOV report for CI services (output: lcov.info)
+cargo coverage-lcov
+```
+
+These are equivalent to running `cargo llvm-cov --html`, `cargo llvm-cov`, and `cargo llvm-cov --lcov` directly. All standard `cargo llvm-cov` flags are available if you need more control.
+
+### Viewing the Report
+
+After running `cargo coverage`, open the HTML report:
+
+```bash
+open target/llvm-cov/html/index.html    # macOS
+xdg-open target/llvm-cov/html/index.html  # Linux
+```
 
 ## License
 

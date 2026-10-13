@@ -13,11 +13,15 @@ dio0_line = 22
 rxen_line = 5
 
 [radio]
+driver = "sx1276"
 preamble_symbols = 20
 enable_crc = false
+radio_settings = "/tmp/test_rnode_settings.toml"
+
+[radio.sx1262]
 enable_tcxo = true
 tcxo_voltage = "1.8V"
-radio_settings = "/tmp/test_rnode_settings.toml"
+dio2_as_rf_switch = false
 
 [pty]
 symlink = "/tmp/test_rnode"
@@ -38,11 +42,14 @@ fn parse_full_config() {
     assert_eq!(config.gpio.busy_line, 27);
     assert_eq!(config.gpio.dio0_line, 22);
     assert_eq!(config.gpio.rxen_line, Some(5));
+    assert_eq!(config.radio.driver, "sx1276");
     assert_eq!(config.radio.preamble_symbols, 20);
     assert!(!config.radio.enable_crc);
-    assert!(config.radio.enable_tcxo);
-    assert_eq!(config.radio.tcxo_voltage.as_deref(), Some("1.8V"));
     assert_eq!(config.radio.radio_settings.as_deref(), Some("/tmp/test_rnode_settings.toml"));
+    // SX1262-specific config
+    assert!(config.radio.sx1262.enable_tcxo);
+    assert_eq!(config.radio.sx1262.tcxo_voltage.as_deref(), Some("1.8V"));
+    assert!(!config.radio.sx1262.dio2_as_rf_switch);
     assert_eq!(config.pty.symlink.as_deref(), Some("/tmp/test_rnode"));
     assert!(!config.csma.enabled);
     assert_eq!(config.csma.slot_min_ms, 10);
@@ -69,10 +76,14 @@ dio0_line = 6
     assert_eq!(config.spi.speed_hz, 16_000_000); // default
     assert_eq!(config.gpio.chip, "gpiochip0"); // default
     assert!(config.gpio.rxen_line.is_none());
+    assert_eq!(config.radio.driver, "sx1262"); // default
     assert_eq!(config.radio.preamble_symbols, 18); // default
     assert!(config.radio.enable_crc); // default true
-    assert!(!config.radio.enable_tcxo); // default false
     assert!(config.radio.radio_settings.is_none());
+    // SX1262 defaults
+    assert!(!config.radio.sx1262.enable_tcxo);
+    assert!(config.radio.sx1262.tcxo_voltage.is_none());
+    assert!(config.radio.sx1262.dio2_as_rf_switch); // default true
     assert!(config.pty.symlink.is_none());
     // CSMA defaults
     assert!(config.csma.enabled);

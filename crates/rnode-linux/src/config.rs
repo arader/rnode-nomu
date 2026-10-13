@@ -43,15 +43,45 @@ fn default_gpio_chip() -> String {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RadioConfig {
+    /// Which radio driver to use (e.g., "sx1262").
+    #[serde(default = "default_driver")]
+    pub driver: String,
     #[serde(default = "default_preamble")]
     pub preamble_symbols: u16,
     #[serde(default = "default_true")]
     pub enable_crc: bool,
-    #[serde(default)]
-    pub enable_tcxo: bool,
-    pub tcxo_voltage: Option<String>,
     /// Path to the saved radio settings file (simulates EEPROM).
     pub radio_settings: Option<String>,
+    /// SX1262-specific configuration.
+    #[serde(default)]
+    pub sx1262: Sx1262Config,
+}
+
+/// SX1262-specific hardware configuration.
+#[derive(Debug, Deserialize, Clone)]
+pub struct Sx1262Config {
+    /// Enable TCXO (temperature-compensated crystal oscillator).
+    #[serde(default)]
+    pub enable_tcxo: bool,
+    /// TCXO supply voltage: "1.6V", "1.7V", "1.8V", "2.2V", "2.4V", "2.7V", "3.0V", "3.3V".
+    pub tcxo_voltage: Option<String>,
+    /// Use DIO2 as RF antenna switch control (common on SX1262 modules).
+    #[serde(default = "default_true")]
+    pub dio2_as_rf_switch: bool,
+}
+
+impl Default for Sx1262Config {
+    fn default() -> Self {
+        Self {
+            enable_tcxo: false,
+            tcxo_voltage: None,
+            dio2_as_rf_switch: true,
+        }
+    }
+}
+
+fn default_driver() -> String {
+    "sx1262".to_string()
 }
 
 fn default_preamble() -> u16 {
