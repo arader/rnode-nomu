@@ -15,3 +15,7 @@ sim = []
 
 [dependencies]
 log = "0.4"
+
+[dev-dependencies]
+# The integration tests in tests/ run nodes on the simulated medium, which needs the `sim` feature.
+rnode-core = { path = ".", features = ["sim"] }

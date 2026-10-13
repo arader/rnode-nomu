@@ -487,6 +487,7 @@ name = "rnode-core"
 version = "0.2.0"
 dependencies = [
  "log",
+ "rnode-core",
 ]
 
 [[package]]

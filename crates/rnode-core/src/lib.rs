@@ -27,13 +27,6 @@ pub mod rng;
 pub mod sim;
 pub mod storage;
 
-#[cfg(test)]
-mod log_capture;
-#[cfg(test)]
-mod logging_tests;
-#[cfg(test)]
-mod protocol_tests;
-
 pub use identity::DeviceIdentity;
 pub use node::{Node, NodeConfig};
 pub use radio::{Radio, RxFrame, TxOutcome};

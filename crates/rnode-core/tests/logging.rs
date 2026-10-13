@@ -1,12 +1,14 @@
 //! Per-packet logging (#42): debug lines for received, sent and dropped packets, trace hex dumps,
 //! and no effect on what the node sends.
 
+mod common;
+
 use log::{Level, LevelFilter};
 
-use crate::kiss::*;
-use crate::log_capture::{Captured, capture};
-use crate::protocol_tests::{data, init, listener, node, plain, split_frames, tick_until};
-use crate::{MemoryStorage, Node, NodeConfig, Radio, SimMedium, SimRadio};
+use common::log_capture::{Captured, capture};
+use common::{data, init, listener, node, plain, split_frames, tick_until};
+use rnode_core::kiss::*;
+use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, SimMedium, SimRadio};
 
 /// The messages of `records` at `level` that start with `prefix`.
 fn messages(records: &[Captured], level: Level, prefix: &str) -> Vec<String> {

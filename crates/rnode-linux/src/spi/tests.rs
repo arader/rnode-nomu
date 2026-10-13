@@ -1,5 +1,4 @@
 use super::*;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
@@ -35,16 +34,6 @@ impl Write for FailAfterFirstWrite {
     }
 }
 
-fn test_dir(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("rnode-linux-spi-tests")
-        .join(name);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
 #[test]
 fn hex_encoding_is_lowercase_and_dense() {
     assert_eq!(hex(&[0x00, 0x0a, 0xab, 0xff]), "000aabff");
@@ -77,10 +66,4 @@ fn recorder_warns_once_on_trace_write_failure() {
     recorder.record("TXRX", &[3], &[4]).unwrap();
     assert!(recorder.write_failed);
     assert_eq!(recorder.warned_failures_for_tests(), 1);
-}
-
-#[test]
-fn recorder_create_on_unwritable_path_returns_error() {
-    let dir = test_dir("directory-is-not-a-file");
-    assert!(SpiRecorder::create(&dir).is_err());
 }

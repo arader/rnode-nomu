@@ -6,8 +6,8 @@
 //! neither sees another test's records nor changes its level, and `log::log_enabled!` answers
 //! per thread. Threads that never call [`capture`] log nothing.
 //!
-//! Only `std` and the public `log` API are used, so this module can move to `tests/common/` as it
-//! is.
+//! It uses only `std` and the public `log` API, so every integration test crate can include it
+//! through `tests/common/`.
 
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
