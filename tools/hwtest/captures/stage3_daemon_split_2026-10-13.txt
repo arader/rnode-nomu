@@ -1,0 +1,33 @@
+Stage 3 integrated-daemon SDR summary (2026-10-13)
+
+Hardware: uConsole CM5 + HackerGadgets AIO V2.
+Integration branch: origin/main plus origin/feat/core-csma, origin/fix/tx-timeout-scaling,
+origin/feat/sim-radio, origin/feat/core-protocol and origin/feat/linux-daemon.
+Daemon build on uconsole: cargo build --release -p rnode-linux.
+RF: 914.875 MHz, 125 kHz, SF7, CR 4/5, TX power 2 dBm, firmware sync word 0x1424.
+Capture: RTL-SDR CF32, 1.000000 MS/s, center 915.075 MHz, gain 0 dB.
+
+KISS transmit sequence through daemon PTY:
+- host payload 1 B  -> one LoRa frame (header + 1 payload byte)
+- host payload 254 B -> one LoRa frame (header + 254 payload bytes)
+- host payload 255 B -> two back-to-back LoRa frames (255-byte first frame, 2-byte second frame)
+- host payload 508 B -> two back-to-back LoRa frames (255-byte first frame, 255-byte second frame)
+
+Analyzer results for captures/stage3_split2.cfile (IQ not committed):
+- BURSTS detected=6, matching expected 1 + 1 + 2 + 2 frames.
+- Small frames (2 on-air bytes): expected ToA 47.360 ms; measured bursts 1 and 4 at 47.694 ms (+0.334 ms).
+- Full 255-byte frames: expected ToA 416.000 ms; measured bursts 2, 3 and 5 at 416.334 ms (+0.334 ms), burst 6 at 416.335 ms (+0.335 ms).
+- Occupied bandwidth: approximately 125.2-125.9 kHz across detected bursts.
+- Preamble: 24/24 expected upchirps detected on every burst, median dechirp SNR about 61-62 dB.
+- Sync: bins [8, 16] on every burst, matching LoRa sync word 0x12 / SX126x registers 0x1424.
+- Frequency offset estimates: mostly +/-976.6 Hz, final burst -2929.7 Hz; all within RTL-SDR tolerance.
+
+Representative analyzer lines:
+
+LORA sf=7 bw_hz=125000 samples_per_symbol=1024 actual_bw_from_sps_hz=125000.000 ldro=False expected_toa_ms=416.000
+BURST index=1 duration_ms=47.694 occupied_bw_99pct_hz=125626 preamble_upchirps=24/24 sync_bins=[8, 16]
+BURST index=2 duration_ms=416.334 toa_delta_ms=0.334 occupied_bw_99pct_hz=125582 preamble_upchirps=24/24 sync_bins=[8, 16]
+BURST index=3 duration_ms=416.334 toa_delta_ms=0.334 occupied_bw_99pct_hz=125513 preamble_upchirps=24/24 sync_bins=[8, 16]
+BURST index=4 duration_ms=47.694 occupied_bw_99pct_hz=125507 preamble_upchirps=24/24 sync_bins=[8, 16]
+BURST index=5 duration_ms=416.334 toa_delta_ms=0.334 occupied_bw_99pct_hz=125500 preamble_upchirps=24/24 sync_bins=[8, 16]
+BURST index=6 duration_ms=416.335 toa_delta_ms=0.335 occupied_bw_99pct_hz=125551 preamble_upchirps=24/24 sync_bins=[8, 16]

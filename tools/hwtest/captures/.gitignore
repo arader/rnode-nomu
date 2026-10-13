@@ -1,0 +1,9 @@
+*.cfile
+*.cu8
+*.cs16
+*.cf32
+*.npy
+*.npz
+*.log
+*.stdout
+*.stderr

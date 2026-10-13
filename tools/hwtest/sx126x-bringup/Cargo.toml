@@ -1,0 +1,17 @@
+[package]
+name = "sx126x-bringup"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow = "1"
+embedded-hal = "1.0"
+gpiocdev = "0.7"
+rnode-core = { path = "../../../crates/rnode-core" }
+rnode-sx126x = { path = "../../../crates/rnode-sx126x" }
+spidev = "0.6"

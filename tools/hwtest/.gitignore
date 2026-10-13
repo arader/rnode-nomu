@@ -1,0 +1,7 @@
+# Local SDR captures can be tens of megabytes; keep only procedures/results in git.
+captures/*
+!captures/.gitignore
+!captures/*.txt
+
+# The bring-up crate is built directly with --manifest-path and has its own target dir.
+sx126x-bringup/target/
