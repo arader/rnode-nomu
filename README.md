@@ -674,8 +674,9 @@ When the file holds a complete set, the radio comes up without a host at startup
 it and renames it into place, with mode `0600`, and creates missing parent directories. A missing
 file means nothing is saved; a corrupt one is ignored with a `WARN` line.
 
-`rnodeconf --tnc` cannot configure rnode-linux (see [Limitations](#limitations)). To provision TNC
-mode, write this file yourself, or have a host configure the radio and send `CMD_CONF_SAVE`.
+`rnodeconf --tnc` cannot configure rnode-linux (see [Using rnodeconf](#using-rnodeconf)). To
+provision TNC mode, write this file yourself, or have a host configure the radio and send
+`CMD_CONF_SAVE`.
 
 ## Running with Reticulum
 
@@ -725,6 +726,44 @@ spreading factor.
   Reticulum after restarting a simulated daemon.
 - Several Reticulum programs cannot share one PTY. Run a shared `rnsd` instance and let the other
   programs connect to it.
+
+### Using rnodeconf
+
+`rnodeconf`, Reticulum's tool for setting up RNode devices, does not work with rnode-linux. Before
+anything else it reads the RNode's EEPROM with `CMD_ROM_READ`. rnode-linux has no EEPROM and
+ignores that command, so `rnodeconf` gives up and exits with status 0.
+`rnodeconf /run/rnode/rnode0 --info`, for example, ends with:
+
+```text
+[14:11:47] Device connected
+[14:11:47] Current firmware version: 1.86
+[14:11:47] Reading EEPROM...
+[14:11:47] Could not download EEPROM from device. Is a valid firmware installed?
+```
+
+Nothing that uses the radio is affected: Reticulum's `RNodeInterface` (also the Android one) and
+`RNodeMultiInterface` never read the EEPROM. The config file describes the hardware, and each
+`rnodeconf` job has an equivalent or does not apply:
+
+| `rnodeconf` job | rnode-linux |
+| --- | --- |
+| TNC mode (`--tnc`) | The [saved settings file](#saved-radio-settings): write it, or have a host configure the radio and send `CMD_CONF_SAVE` |
+| Normal mode (`--normal`) | Delete the saved settings file, or have a host send `CMD_CONF_DELETE`. From the next start or `CMD_RESET`, the radio waits for a host |
+| Interference avoidance (`--ia-enable`, `--ia-disable`) | [`[radio] avoid_interference`](#radio). A host's `CMD_DIS_IA` lasts until the daemon exits |
+| Device info (`--info`, `--config`) | `rnode-linux --version`, the config file, and the `radio online …` [log line](#what-info-shows) |
+| Firmware update and installation (`--update`, `--autoinstall`, `--flash`, `--extract`) | Not applicable: install a new rnode-linux build instead |
+| EEPROM bootstrap, signing and wipe (`--rom`, `--sign`, `--eeprom-wipe`) | Not applicable: there is no EEPROM or device signature |
+| Bluetooth, display, NeoPixel and Wi-Fi settings | Not applicable |
+
+`--eeprom-wipe` is the only option with an effect, because `rnodeconf` sends it before reading the
+EEPROM. rnode-linux ignores the wipe but carries out the `CMD_RESET` that follows: the node resets
+(`radio offline (reset)`, then `radio online (saved settings)` if a settings file exists), and the
+saved settings stay.
+
+**Future work:** issue #66 records what
+`rnodeconf` expects and how rnode-linux could emulate the EEPROM, so that `--info`, `--config`,
+`--tnc`, `--normal` and the interference-avoidance options work while firmware, signing and wipe
+operations are refused. It is not scheduled.
 
 ## Running as a systemd service
 
@@ -1158,11 +1197,8 @@ never answered on request; and data frames over 508 bytes are dropped without an
 
 ## Limitations
 
-- **`rnodeconf` does not work.** It starts by reading the RNode's EEPROM with `CMD_ROM_READ`, which
-  rnode-linux does not implement, and stops with "Could not download EEPROM from device". There is no
-  EEPROM to provision, sign or update: the hardware description is the config file,
-  `--tnc`/`--normal` correspond to the [saved settings file](#saved-radio-settings), and
-  `--ia-enable`/`--ia-disable` correspond to `[radio] avoid_interference`.
+- **`rnodeconf` does not work:** rnode-linux has no EEPROM for it to read. See
+  [Using rnodeconf](#using-rnodeconf) for the equivalents.
 - **Commands for microcontroller boards are ignored:** display, framebuffer, Bluetooth, Wi-Fi, LEDs,
   device signatures, firmware hashes and firmware updates.
 - **SX1262 only.** Other modems need a driver; see [DRIVERS.md](DRIVERS.md).
@@ -1198,6 +1234,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
+| `rnodeconf`: "Could not download EEPROM from device" | rnode-linux has no EEPROM; see [Using rnodeconf](#using-rnodeconf) |
 | Two RNodes do not hear each other | They must share frequency, bandwidth and spreading factor. With `RUST_LOG=debug`, a `TX packet` line on one side and no `RX packet` line on the other points at RF: antenna, distance or power |
 | `WARN … dropping host output because the PTY is not draining` | No host is reading the PTY. Harmless while none is attached |
 | The daemon takes long to stop | It finishes the packet on the air, which takes seconds at high spreading factors and minutes at SF12 with the narrowest bandwidths; see [Stopping the daemon](#stopping-the-daemon) |
