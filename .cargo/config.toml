@@ -7,3 +7,6 @@ coverage-lcov = ["llvm-cov", "--lcov", "--output-path", "lcov.info"]
 
 # Print a coverage summary to the terminal
 coverage-summary = ["llvm-cov"]
+
+# Run repository automation tasks
+xtask = ["run", "-p", "xtask", "--"]
