@@ -70,10 +70,11 @@ fn avoid_interference_sets_the_node_config() {
 #[test]
 fn warns_once_when_saved_radio_settings_cannot_persist() {
     let ephemeral = Config::from_toml("[radio]\ndriver = \"sim\"\n").unwrap();
-    let warnings = ephemeral.warnings();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("storage.radio_settings"), "{}", warnings[0]);
-    assert!(warnings[0].contains("CMD_CONF_SAVE"), "{}", warnings[0]);
+    // Without a file nothing is saved: the radio comes up offline after a restart, and after a
+    // host's CMD_RESET too, as `Node::boot()` then finds no settings.
+    let expected = "storage.radio_settings is not set: radio settings the host saves with CMD_CONF_SAVE \
+                    are not kept, so they are lost on restart and on CMD_RESET";
+    assert_eq!(ephemeral.warnings(), [expected]);
 
     let persistent =
         Config::from_toml("[radio]\ndriver = \"sim\"\n[storage]\nradio_settings = \"settings.toml\"\n").unwrap();

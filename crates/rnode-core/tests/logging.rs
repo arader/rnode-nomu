@@ -6,9 +6,9 @@ mod common;
 use log::{Level, LevelFilter};
 
 use common::log_capture::{Captured, capture};
-use common::{data, init, listener, node, plain, split_frames, tick_until};
+use common::{cmd, data, init, listener, node, plain, split_frames, tick_until};
 use rnode_core::kiss::*;
-use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, SimMedium, SimRadio};
+use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, RadioSettings, SimMedium, SimRadio};
 
 /// The messages of `records` at `level` that start with `prefix`.
 fn messages(records: &[Captured], level: Level, prefix: &str) -> Vec<String> {
@@ -295,6 +295,57 @@ fn tx_drops_are_logged_with_their_reason() {
     );
 }
 
+/// Issue #51: the packets a stop request left queued are dropped at shutdown, with a debug line
+/// each like the other drops, and counted at info.
+#[test]
+fn packets_queued_at_shutdown_are_dropped_with_their_reason() {
+    let (medium, _air, mut n) = online_node();
+    n.handle_host_input(&[data(&[1; 300]), data(&[2; 20]), data(&[3; 30])].concat(), 0);
+    let cap = capture(LevelFilter::Debug);
+    let mut asked = 0;
+    while n.queued_packets() == 3 && medium.now_ms() < 5_000 {
+        n.tick_with(medium.now_ms(), || {
+            asked += 1;
+            asked > 1
+        });
+        medium.advance_ms(1);
+    }
+    n.shutdown();
+    let records = cap.take();
+    assert_eq!(messages(&records, Level::Debug, "TX packet").len(), 1, "{records:?}");
+    assert_eq!(
+        messages(&records, Level::Debug, "dropping"),
+        [
+            "dropping 20-byte TX packet: shutting down",
+            "dropping 30-byte TX packet: shutting down",
+        ]
+    );
+    assert_eq!(
+        messages(&records, Level::Info, "shutting down"),
+        ["shutting down with 2 TX packets queued; dropping them"]
+    );
+    assert_eq!(n.queued_packets(), 0);
+    assert!(!n.is_radio_online());
+
+    // Packets queued while the radio is off are dropped the same way.
+    let mut offline = node(2);
+    offline.handle_host_input(&data(&[4; 5]), 0);
+    offline.shutdown();
+    let records = cap.take();
+    assert_eq!(
+        messages(&records, Level::Info, "shutting down"),
+        ["shutting down with 1 TX packet queued; dropping it"]
+    );
+    assert_eq!(
+        messages(&records, Level::Debug, "dropping"),
+        ["dropping 5-byte TX packet: shutting down"]
+    );
+
+    // Nothing queued, nothing to report.
+    offline.shutdown();
+    assert!(messages(&cap.take(), Level::Info, "shutting down").is_empty());
+}
+
 #[test]
 fn rx_drops_are_logged_with_their_reason() {
     let mut n = node(1);
@@ -338,17 +389,273 @@ fn rx_drops_are_logged_with_their_reason() {
     );
 }
 
+/// The level and message of every record in `records`.
+fn lines(records: &[Captured]) -> Vec<(Level, &str)> {
+    records.iter().map(|r| (r.level, r.message.as_str())).collect()
+}
+
+/// Run `n` as the daemon's event loop does while idle: service the radio and tick every
+/// `STATUS_INTERVAL_MS` of medium time until `until_ms`, calling `before` ahead of each step.
+fn run_idle(
+    n: &mut Node<SimRadio, MemoryStorage>,
+    medium: &SimMedium,
+    until_ms: u64,
+    mut before: impl FnMut(&mut Node<SimRadio, MemoryStorage>, u64),
+) {
+    while medium.now_ms() < until_ms {
+        before(n, medium.now_ms());
+        n.service_radio(medium.now_ms());
+        n.tick(medium.now_ms());
+        medium.advance_ms(rnode_core::node::STATUS_INTERVAL_MS);
+    }
+}
+
+/// Issue #53: a DCD read that fails on every 3 ms status tick for 24 s logs one warning, then a
+/// summary per 10 s, and an info line once it has worked for 10 s; not 8000 warnings.
+#[test]
+fn persistent_status_failures_log_one_warning_then_summaries_and_a_recovery() {
+    let (medium, _air, mut n) = online_node();
+    n.radio_mut().inject_dcd_errors(8_000);
+    let cap = capture(LevelFilter::Info);
+    run_idle(&mut n, &medium, 40_000, |_, _| {});
+    // Failures at 0, 3, ... 23997 ms; summaries at the first failure 10 s after the last line.
+    assert_eq!(
+        lines(&cap.take()),
+        [
+            (Level::Warn, "radio DCD failed: simulated DCD error"),
+            (
+                Level::Warn,
+                "radio DCD failed 3334 more times in the last 10.0 s: simulated DCD error"
+            ),
+            (
+                Level::Warn,
+                "radio DCD failed 3334 more times in the last 10.0 s: simulated DCD error"
+            ),
+            (Level::Info, "radio DCD recovered after 8000 failures in 24.0 s"),
+        ]
+    );
+}
+
+/// Issue #53: a call that fails every other time stays one episode: a warning, a summary per 10 s
+/// and one recovery, instead of a warning and a recovery line for each of its 3334 failures.
+#[test]
+fn intermittent_status_failures_are_summarised_as_one_episode() {
+    let (medium, _air, mut n) = online_node();
+    let cap = capture(LevelFilter::Info);
+    run_idle(&mut n, &medium, 40_000, |n, now| {
+        if now < 20_000 && now % 6 == 0 {
+            n.radio_mut().inject_dcd_errors(1);
+        }
+    });
+    assert_eq!(
+        lines(&cap.take()),
+        [
+            (Level::Warn, "radio DCD failed: simulated DCD error"),
+            (
+                Level::Warn,
+                "radio DCD failed 1667 more times in the last 10.0 s: simulated DCD error"
+            ),
+            (Level::Info, "radio DCD recovered after 3334 failures in 20.0 s"),
+        ]
+    );
+}
+
+/// Issue #53: the RSSI read and the receive poll are limited the same way, each on its own; a
+/// fault that recurs after a recovery is a new episode with a new first warning.
+#[test]
+fn rssi_and_rx_failures_are_rate_limited_per_call() {
+    let (medium, _air, mut n) = online_node();
+    n.radio_mut().inject_rssi_errors(5);
+    n.radio_mut().inject_rx_errors(4_000);
+    let cap = capture(LevelFilter::Info);
+    run_idle(&mut n, &medium, 30_000, |n, now| {
+        if now == 25_002 {
+            n.radio_mut().inject_rssi_errors(1);
+        }
+    });
+    assert_eq!(
+        lines(&cap.take()),
+        [
+            (Level::Warn, "radio RX service failed: simulated RX error"),
+            (Level::Warn, "radio RSSI failed: simulated RSSI error"),
+            (
+                Level::Warn,
+                "radio RX service failed 3334 more times in the last 10.0 s: simulated RX error"
+            ),
+            (Level::Info, "radio RSSI recovered after 5 failures in 12 ms"),
+            (Level::Info, "radio RX service recovered after 4000 failures in 12.0 s"),
+            (Level::Warn, "radio RSSI failed: simulated RSSI error"),
+        ]
+    );
+}
+
+/// Issue #54: one info line on each online and offline transition, saying why, with the settings
+/// as the radio applied them (here a 30 kHz bandwidth quantised to 31.25 kHz), and nothing when a
+/// request changes nothing.
+#[test]
+fn radio_online_and_offline_transitions_are_logged_at_info_with_the_settings() {
+    let medium = SimMedium::new();
+    let saved = RadioSettings {
+        frequency: 433_775_000,
+        bandwidth: 30_000,
+        spreading_factor: 10,
+        coding_rate: 6,
+        tx_power: (-2_i8) as u8,
+    };
+    let mut n = Node::new(
+        medium.radio(),
+        MemoryStorage::with_settings(saved),
+        NodeConfig::default(),
+        1,
+    );
+    let cap = capture(LevelFilter::Info);
+    n.boot(0);
+    n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_ON]), 0);
+    n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_OFF]), 0);
+    n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_OFF]), 0);
+    init(&mut n);
+    n.handle_host_input(&plain(CMD_RESET, &[CMD_RESET_BYTE]), 0);
+    n.shutdown();
+    n.shutdown();
+    let records = cap.take();
+    assert!(records.iter().all(|r| r.level == Level::Info), "{records:?}");
+    let saved_line = "433.775 MHz, 31.25 kHz, SF10, CR 4/6, -2 dBm";
+    let host_line = "867.2 MHz, 125 kHz, SF7, CR 4/5, 14 dBm";
+    assert_eq!(
+        messages(&records, Level::Info, ""),
+        [
+            format!("radio online (saved settings): {saved_line}"),
+            format!("radio offline (host request): {saved_line}"),
+            format!("radio online (host request): {host_line}"),
+            format!("radio offline (reset): {host_line}"),
+            format!("radio online (saved settings): {saved_line}"),
+            format!("radio offline (shutdown): {saved_line}"),
+        ]
+    );
+
+    // A radio that fails to start never comes online.
+    let mut radio = medium.radio();
+    radio.inject_begin_failures(1);
+    let mut failing = Node::new(radio, MemoryStorage::with_settings(saved), NodeConfig::default(), 2);
+    failing.boot(0);
+    assert_eq!(
+        lines(&cap.take()),
+        [(Level::Warn, "radio begin failed: simulated begin failure")]
+    );
+}
+
+/// The frequency and bandwidth formats in the online and offline lines.
+#[test]
+fn radio_settings_lines_print_frequencies_without_trailing_zeros() {
+    let mut n = node(1);
+    let cap = capture(LevelFilter::Info);
+    for (frequency, bandwidth) in [
+        (868_000_000_u32, 7_800_u32),
+        (915_000_001, 10_400),
+        (2_400_000_000, 62_500),
+        (169_400_000, 500_000),
+    ] {
+        n.handle_host_input(&cmd(CMD_FREQUENCY, &frequency.to_be_bytes()), 0);
+        n.handle_host_input(&cmd(CMD_BANDWIDTH, &bandwidth.to_be_bytes()), 0);
+        n.handle_host_input(&[plain(CMD_TXPOWER, &[0]), plain(CMD_SF, &[12])].concat(), 0);
+        n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_ON]), 0);
+        n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_OFF]), 0);
+    }
+    assert_eq!(
+        messages(&cap.take(), Level::Info, "radio online"),
+        [
+            "radio online (host request): 868 MHz, 7.8 kHz, SF12, CR 4/5, 0 dBm",
+            "radio online (host request): 915.000001 MHz, 10.4 kHz, SF12, CR 4/5, 0 dBm",
+            "radio online (host request): 2400 MHz, 62.5 kHz, SF12, CR 4/5, 0 dBm",
+            "radio online (host request): 169.4 MHz, 500 kHz, SF12, CR 4/5, 0 dBm",
+        ]
+    );
+}
+
+/// When the host retunes the online radio, one info line gives the settings the radio now runs
+/// with, 100 ms after the first config command of a burst, so the online line is never stale for
+/// long. Nothing is logged when the settings end up unchanged, and going offline reports them.
+#[test]
+fn host_retunes_of_the_online_radio_are_logged_once_per_burst() {
+    let (medium, _air, mut n) = online_node();
+    let cap = capture(LevelFilter::Info);
+    let info = |cap: &common::log_capture::Capture| messages(&cap.take(), Level::Info, "");
+
+    // RNodeInterface's initRadio() as it reconnects with other settings: five config commands and
+    // RADIO_STATE on, back to back, here arriving in two reads that split a frame.
+    let burst = [
+        cmd(CMD_FREQUENCY, &868_100_000u32.to_be_bytes()),
+        cmd(CMD_BANDWIDTH, &250_000u32.to_be_bytes()),
+        plain(CMD_TXPOWER, &[17]),
+        plain(CMD_SF, &[9]),
+        plain(CMD_CR, &[6]),
+        plain(CMD_RADIO_STATE, &[RADIO_STATE_ON]),
+    ]
+    .concat();
+    medium.set_now_ms(1_000);
+    n.handle_host_input(&burst[..10], 1_000);
+    n.handle_host_input(&burst[10..], 1_001);
+    run_idle(&mut n, &medium, 1_100, |_, _| {});
+    assert!(info(&cap).is_empty(), "not before 100 ms");
+    run_idle(&mut n, &medium, 2_000, |_, _| {});
+    assert_eq!(
+        info(&cap),
+        ["radio settings changed: 868.1 MHz, 250 kHz, SF9, CR 4/6, 17 dBm"]
+    );
+
+    // The same settings again, or a change undone within the burst: nothing changed.
+    n.handle_host_input(&burst, 2_000);
+    n.handle_host_input(&plain(CMD_SF, &[10]), 2_001);
+    n.handle_host_input(&plain(CMD_SF, &[9]), 2_050);
+    run_idle(&mut n, &medium, 3_000, |_, _| {});
+    assert!(info(&cap).is_empty());
+
+    // Each later burst gets its own line.
+    n.handle_host_input(&plain(CMD_SF, &[10]), 3_000);
+    run_idle(&mut n, &medium, 4_000, |_, _| {});
+    n.handle_host_input(&plain(CMD_CR, &[8]), 4_000);
+    run_idle(&mut n, &medium, 5_000, |_, _| {});
+    assert_eq!(
+        info(&cap),
+        [
+            "radio settings changed: 868.1 MHz, 250 kHz, SF10, CR 4/6, 17 dBm",
+            "radio settings changed: 868.1 MHz, 250 kHz, SF10, CR 4/8, 17 dBm",
+        ]
+    );
+
+    // Turned off right after a retune: the offline line has the new settings.
+    n.handle_host_input(&plain(CMD_TXPOWER, &[10]), 5_000);
+    n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_OFF]), 5_001);
+    run_idle(&mut n, &medium, 6_000, |_, _| {});
+    assert_eq!(
+        info(&cap),
+        ["radio offline (host request): 868.1 MHz, 250 kHz, SF10, CR 4/8, 10 dBm"]
+    );
+
+    // Settings changed while offline are in the online line, not a change line.
+    n.handle_host_input(&plain(CMD_SF, &[8]), 6_000);
+    n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_ON]), 6_001);
+    run_idle(&mut n, &medium, 7_000, |_, _| {});
+    assert_eq!(
+        info(&cap),
+        ["radio online (host request): 868.1 MHz, 250 kHz, SF8, CR 4/8, 10 dBm"]
+    );
+}
+
 /// What a scripted session shows to the outside, step by step: host output of both nodes, the
 /// time each transmission completed and the node's next wake-up.
 type Observed = (Vec<Vec<u8>>, Vec<u64>);
 
-/// Two nodes exchange packets of every size class, with drops, a driver error, stray split halves
-/// and a reset with packets queued on the way.
+/// Two nodes exchange packets of every size class, with drops, driver errors (TX, status reads and
+/// the receive poll), stray split halves and a reset with packets queued on the way.
 fn scripted_session() -> Observed {
     let medium = SimMedium::new();
     let mut a = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
     let mut b = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 2);
     let mut outputs = vec![init(&mut a), init(&mut b)];
+    a.radio_mut().inject_dcd_errors(3);
+    a.radio_mut().inject_rssi_errors(2);
+    b.radio_mut().inject_rx_errors(2);
     let mut times = Vec::new();
     for (i, len) in [1usize, 254, 255, 508, 300].into_iter().enumerate() {
         let payload: Vec<u8> = (0..len).map(|j| (i + j) as u8).collect();
@@ -395,5 +702,8 @@ fn logging_at_trace_does_not_change_host_output_or_timing() {
     }
     assert!(records.iter().any(|r| r.message.contains("radio error on frame 2/2")));
     assert!(records.iter().any(|r| r.message.ends_with("queue cleared by reset")));
+    for failure in ["radio DCD failed", "radio RSSI failed", "radio RX service failed"] {
+        assert!(records.iter().any(|r| r.message.starts_with(failure)), "{failure}");
+    }
     assert_eq!(traced, quiet);
 }

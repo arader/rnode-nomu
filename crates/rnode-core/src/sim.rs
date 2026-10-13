@@ -122,6 +122,9 @@ impl SimMedium {
             receive_calls: 0,
             end_calls: 0,
             dcd_timing: (0, 0),
+            dcd_failures: 0,
+            rssi_failures: 0,
+            rx_failures: 0,
         }
     }
 }
@@ -139,6 +142,9 @@ pub struct SimRadio {
     receive_calls: usize,
     end_calls: usize,
     dcd_timing: (u32, u32),
+    dcd_failures: usize,
+    rssi_failures: usize,
+    rx_failures: usize,
 }
 
 impl SimRadio {
@@ -158,6 +164,21 @@ impl SimRadio {
 
     pub fn inject_timeout_on_call(&mut self, call_index: usize) {
         self.timeout_tx_call = Some(call_index);
+    }
+
+    /// Make the next `count` [`Radio::dcd`] calls fail.
+    pub fn inject_dcd_errors(&mut self, count: usize) {
+        self.dcd_failures = count;
+    }
+
+    /// Make the next `count` [`Radio::current_rssi`] calls fail.
+    pub fn inject_rssi_errors(&mut self, count: usize) {
+        self.rssi_failures = count;
+    }
+
+    /// Make the next `count` [`Radio::poll_rx`] calls fail.
+    pub fn inject_rx_errors(&mut self, count: usize) {
+        self.rx_failures = count;
     }
 
     pub fn receive_calls(&self) -> usize {
@@ -198,6 +219,18 @@ impl SimRadio {
     fn with_ep_mut<T>(&self, f: impl FnOnce(&mut Endpoint) -> T) -> T {
         let mut st = self.medium.0.borrow_mut();
         f(st.radios.get_mut(&self.id).expect("sim radio endpoint exists"))
+    }
+
+    /// Whether a transmission is on the air at `now_ms`.
+    fn carrier(&self, now_ms: u64) -> bool {
+        self.medium.0.borrow().busy_until_ms > now_ms
+    }
+
+    /// Count down an injected failure: true if this call fails.
+    fn take_failure(remaining: &mut usize) -> bool {
+        let fail = *remaining > 0;
+        *remaining = remaining.saturating_sub(1);
+        fail
     }
 }
 
@@ -323,13 +356,22 @@ impl Radio for SimRadio {
     }
 
     fn poll_rx(&mut self) -> Result<Option<RxFrame>, Self::Error> {
+        if Self::take_failure(&mut self.rx_failures) {
+            return Err(SimError::Injected("simulated RX error"));
+        }
         Ok(self.with_ep_mut(|e| e.rx.pop_front()))
     }
     fn dcd(&mut self, now_ms: u64) -> Result<bool, Self::Error> {
-        Ok(self.medium.0.borrow().busy_until_ms > now_ms)
+        if Self::take_failure(&mut self.dcd_failures) {
+            return Err(SimError::Injected("simulated DCD error"));
+        }
+        Ok(self.carrier(now_ms))
     }
     fn current_rssi(&mut self) -> Result<i16, Self::Error> {
-        let carrier = self.dcd(self.medium.now_ms())?;
+        if Self::take_failure(&mut self.rssi_failures) {
+            return Err(SimError::Injected("simulated RSSI error"));
+        }
+        let carrier = self.carrier(self.medium.now_ms());
         Ok(if carrier { -42 } else { self.medium.0.borrow().noise_dbm })
     }
     fn set_dcd_timing(&mut self, preamble_ms: u32, header_ms: u32) {

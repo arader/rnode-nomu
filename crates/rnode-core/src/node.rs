@@ -10,10 +10,10 @@
 //!     wait for host input, the radio IRQ line, or next_wakeup_ms()
 //!     handle_host_input(bytes, now) when the host sent data
 //!     service_radio(now)            when the radio IRQ fired (and periodically as a safety net)
-//!     tick(now)                     always
+//!     tick_with(now, should_stop)   always; should_stop() reports a pending shutdown request
 //!     write take_host_output() to the host
 //! }
-//! shutdown()
+//! shutdown()                        drops the packets still queued and puts the radio to sleep
 //! ```
 //!
 //! Observable behaviour follows RNode_Firmware v1.86's TNC path: `serial_callback()`,
@@ -30,6 +30,14 @@
 //!   their payloads;
 //! - implicit-header receive is only enabled in promiscuous mode, so normal split RNode frames
 //!   keep explicit LoRa headers;
+//! - a TX burst can be cut short. The firmware's `flush_queue()` sends every queued packet back
+//!   to back and never stops; each [`Radio::transmit`] blocks for the frame's airtime, so a full
+//!   queue at SF11/SF12 keeps one tick busy for minutes. [`Node::tick_with`] asks the platform
+//!   before each packet whether to stop, so the platform can exit within one packet's airtime of
+//!   a shutdown request, and [`Node::shutdown`] drops the packets left in the queue. The check is
+//!   made between packets only, never between the two frames of a split packet: a receiver keeps
+//!   a lone first half, and `receive_callback()` would join it to the next split frame that
+//!   carries the same 4-bit sequence number (1 in 16), corrupting that packet;
 //! - `CMD_DIS_IA` changes interference avoidance for the running process only. The firmware's
 //!   `dia_conf_save()` writes the setting to EEPROM and reboots; we neither write anything nor
 //!   reset. [`NodeConfig::avoid_interference`] (the daemon's config file) is the persistent source
@@ -41,18 +49,24 @@
 //! and one per dropped packet with the reason; at trace level, a hex dump of each delivered or
 //! sent payload. Packet lines come from this module; drops are logged where they are detected (the
 //! KISS decoder, the TX queue, the split reassembler and this module). Radio driver errors and
-//! modem TX timeouts, which hard-reset the node, are also logged at warn level. Formatting is
-//! lazy, so disabled levels cost nothing, and logging never changes what the node sends to the
-//! host or the radio.
+//! modem TX timeouts, which hard-reset the node, are also logged at warn level. At info level, one
+//! line reports each time the radio goes online or offline, with why and the settings it runs
+//! with; one reports the new settings when the host retunes the online radio, once per burst of
+//! config commands; and one counts the packets still queued at shutdown. Errors of the radio calls
+//! made every few milliseconds (DCD and RSSI reads, receive polling) are rate-limited: a warning
+//! for the first, then at most one summary per 10 s while the call keeps failing, and an info line
+//! once it has worked for 10 s. Formatting is lazy, so disabled levels cost nothing, and logging
+//! never changes what the node sends to the host or the radio.
 
 use core::fmt;
 
 use crate::RSSI_OFFSET;
 use crate::csma::{Access, Csma, StatusUpdate};
+use crate::fault_log::FaultLog;
 use crate::framing::{self, Reassembly, RxReassembler};
 use crate::identity::DeviceIdentity;
 use crate::kiss;
-use crate::packet_log::{HexDump, PacketSummary, plural};
+use crate::packet_log::{HexDump, PacketSummary, RadioSummary, plural};
 use crate::phy::{self, Modulation, PhyParams};
 use crate::queue::TxQueue;
 use crate::radio::{Radio, RxFrame, TxOutcome};
@@ -62,6 +76,10 @@ use crate::storage::{RadioSettings, Storage};
 /// Firmware `STATUS_INTERVAL_MS`: how often the modem status (DCD, RSSI) is sampled.
 pub const STATUS_INTERVAL_MS: u64 = 3;
 const OFFLINE_WAKEUP_MS: u64 = 1_000;
+/// How long after the host first changes the settings of the online radio the change is logged.
+/// The config commands of one burst (RNodeInterface sends them back to back) give one line, and
+/// the last line logged is never stale for longer than this.
+const RETUNE_LOG_DELAY_MS: u64 = 100;
 const MIN_TX_POWER_DBM: i8 = -9;
 
 /// Static configuration of a [`Node`].
@@ -150,6 +168,13 @@ pub struct Node<R: Radio, S: Storage> {
     stat_tx: u32,
     last_status_ms: Option<u64>,
     phy: Option<PhyParams>,
+    dcd_faults: FaultLog,
+    rssi_faults: FaultLog,
+    rx_faults: FaultLog,
+    /// The settings in the last online or settings-changed line.
+    logged_settings: Option<RadioSummary>,
+    /// When the host started retuning the online radio, if that is not logged yet.
+    retune_pending_since: Option<u64>,
 }
 
 impl<R: Radio, S: Storage> Node<R, S> {
@@ -184,6 +209,11 @@ impl<R: Radio, S: Storage> Node<R, S> {
             stat_tx: 0,
             last_status_ms: None,
             phy: None,
+            dcd_faults: FaultLog::new("radio DCD"),
+            rssi_faults: FaultLog::new("radio RSSI"),
+            rx_faults: FaultLog::new("radio RX service"),
+            logged_settings: None,
+            retune_pending_since: None,
         }
     }
 
@@ -193,7 +223,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
             Ok(Some(settings)) => {
                 self.apply_settings(settings);
                 if !self.radio_locked() {
-                    self.start_radio(now_ms);
+                    self.start_radio(now_ms, "saved settings");
                 }
             }
             Ok(None) => {}
@@ -213,27 +243,45 @@ impl<R: Radio, S: Storage> Node<R, S> {
     }
 
     /// Service received radio frames and deliver complete host packets preceded by RSSI/SNR.
-    pub fn service_radio(&mut self, _now_ms: u64) {
+    pub fn service_radio(&mut self, now_ms: u64) {
         if !self.radio_online {
             return;
         }
         loop {
             match self.radio.poll_rx() {
-                Ok(Some(frame)) => self.handle_rx_frame(frame),
-                Ok(None) => break,
+                Ok(frame) => {
+                    self.rx_faults.succeeded(now_ms);
+                    match frame {
+                        Some(frame) => self.handle_rx_frame(frame),
+                        None => break,
+                    }
+                }
                 Err(e) => {
-                    log::warn!("radio RX service failed: {e}");
+                    self.rx_faults.failed(now_ms, &e);
                     break;
                 }
             }
         }
     }
 
-    /// Periodic modem status, CSMA and TX queue work.
+    /// Periodic modem status, CSMA and TX queue work: [`Node::tick_with`] that never stops a TX
+    /// burst early.
     pub fn tick(&mut self, now_ms: u64) {
+        self.tick_with(now_ms, || false);
+    }
+
+    /// Periodic modem status, CSMA and TX queue work. `should_stop` is asked before each packet
+    /// of a TX burst; once it returns true the burst ends, and the packets not yet sent stay
+    /// queued for a later tick or for [`Node::shutdown`] to drop. A packet already on the air,
+    /// including the second frame of a split packet, is always finished (see the module docs).
+    ///
+    /// Pass the platform's shutdown request, so that a burst of long transmissions cannot delay
+    /// exit by more than one packet's airtime.
+    pub fn tick_with(&mut self, now_ms: u64, mut should_stop: impl FnMut() -> bool) {
         if !self.radio_online {
             return;
         }
+        self.log_retune(now_ms);
         if self
             .last_status_ms
             .is_none_or(|last| now_ms.saturating_sub(last) >= STATUS_INTERVAL_MS)
@@ -243,7 +291,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
                 self.emit_status_update(update);
             }
         }
-        self.drain_tx_queue(now_ms);
+        self.drain_tx_queue(now_ms, &mut should_stop);
     }
 
     /// Take the bytes queued for the host (KISS frames); the caller writes them out.
@@ -265,13 +313,22 @@ impl<R: Radio, S: Storage> Node<R, S> {
         self.radio_online
     }
 
-    /// Take the radio offline before the process exits.
+    /// Drop the packets still queued for TX (a debug line each) and take the radio offline before
+    /// the process exits.
     pub fn shutdown(&mut self) {
-        if self.radio_online {
-            if let Err(e) = self.radio.end() {
-                log::warn!("failed to put the radio to sleep: {e}");
+        let queued = self.queue.len();
+        if queued > 0 {
+            log::info!(
+                "shutting down with {queued} TX packet{} queued; dropping {}",
+                plural(queued),
+                if queued == 1 { "it" } else { "them" }
+            );
+            while let Some(packet) = self.queue.pop() {
+                log::debug!("dropping {}-byte TX packet: shutting down", packet.len());
             }
-            self.radio_online = false;
+        }
+        if self.radio_online {
+            self.stop_radio("shutdown");
         }
     }
 
@@ -403,11 +460,11 @@ impl<R: Radio, S: Storage> Node<R, S> {
             kiss::CMD_RADIO_STATE => match b0 {
                 0xFF => self.reply_radio_state(),
                 kiss::RADIO_STATE_OFF => {
-                    self.stop_radio();
+                    self.stop_radio("host request");
                     self.reply_radio_state();
                 }
                 kiss::RADIO_STATE_ON => {
-                    self.start_radio(now_ms);
+                    self.start_radio(now_ms, "host request");
                 }
                 _ => {}
             },
@@ -488,9 +545,34 @@ impl<R: Radio, S: Storage> Node<R, S> {
             // ROM data; we ignore them harmlessly unless covered above.
             _ => {}
         }
+        let retune = matches!(
+            cmd,
+            kiss::CMD_FREQUENCY | kiss::CMD_BANDWIDTH | kiss::CMD_TXPOWER | kiss::CMD_SF | kiss::CMD_CR
+        );
+        if retune && self.radio_online {
+            self.retune_pending_since.get_or_insert(now_ms);
+        }
     }
 
-    fn start_radio(&mut self, _now_ms: u64) -> bool {
+    /// Log the settings of the online radio once [`RETUNE_LOG_DELAY_MS`] have passed since the
+    /// host started retuning it, if they differ from the last line logged.
+    fn log_retune(&mut self, now_ms: u64) {
+        let Some(since) = self.retune_pending_since else {
+            return;
+        };
+        if now_ms.saturating_sub(since) < RETUNE_LOG_DELAY_MS {
+            return;
+        }
+        self.retune_pending_since = None;
+        let settings = self.radio_summary();
+        if self.logged_settings != Some(settings) {
+            log::info!("radio settings changed: {settings}");
+            self.logged_settings = Some(settings);
+        }
+    }
+
+    /// Bring the radio online (firmware `startRadio()`); `cause` is for the log.
+    fn start_radio(&mut self, _now_ms: u64, cause: &str) -> bool {
         if self.radio_online {
             self.reply_radio_state();
             return true;
@@ -530,20 +612,41 @@ impl<R: Radio, S: Storage> Node<R, S> {
         let _ = self.apply_radio(|r| r.set_crc(true));
         self.update_phy();
         self.enter_receive();
+        let settings = self.radio_summary();
+        log::info!("radio online ({cause}): {settings}");
+        self.logged_settings = Some(settings);
+        self.retune_pending_since = None;
         self.reply_radio_state();
         true
     }
 
-    fn stop_radio(&mut self) {
+    /// Put the radio to sleep (firmware `stopRadio()`); `cause` is for the log.
+    fn stop_radio(&mut self, cause: &str) {
         if let Err(e) = self.radio.end() {
-            log::warn!("radio end failed: {e}");
+            log::warn!("failed to put the radio to sleep: {e}");
+        }
+        if self.radio_online {
+            // This line has the current settings, so a pending settings-changed line is moot.
+            log::info!("radio offline ({cause}): {}", self.radio_summary());
+            self.retune_pending_since = None;
         }
         self.radio_online = false;
     }
 
+    /// The settings the radio runs with, for the online and offline lines.
+    fn radio_summary(&self) -> RadioSummary {
+        RadioSummary {
+            frequency_hz: self.freq,
+            bandwidth_hz: self.bw,
+            spreading_factor: self.sf,
+            coding_rate: self.cr,
+            tx_power_dbm: self.txp as i8,
+        }
+    }
+
     fn hard_reset(&mut self, now_ms: u64) {
         if self.radio_online {
-            self.stop_radio();
+            self.stop_radio("reset");
         }
         if log::log_enabled!(log::Level::Debug) {
             while let Some(packet) = self.queue.pop() {
@@ -623,30 +726,23 @@ impl<R: Radio, S: Storage> Node<R, S> {
         let _ = self.apply_radio(|r| r.receive(implicit));
     }
 
-    fn drain_tx_queue(&mut self, now_ms: u64) {
+    fn drain_tx_queue(&mut self, now_ms: u64, should_stop: &mut dyn FnMut() -> bool) {
         let mut sent_any = false;
         let mut radio_attempted = false;
         let mut reset_during_batch = false;
         if !self.queue.is_empty() && !self.csma.airtime_locked() && self.observe_status(now_ms).is_some() {
-            match self.csma.poll_access(now_ms, &mut self.rng) {
-                Access::Wait => {}
-                Access::Single => {
-                    if let Some(pkt) = self.queue.pop() {
-                        let (any_sent, _complete, attempted, reset) = self.transmit_packet(&pkt, now_ms);
-                        sent_any |= any_sent;
-                        radio_attempted |= attempted;
-                        reset_during_batch |= reset;
-                    }
-                }
-                Access::Flush => {
-                    while let Some(pkt) = self.queue.pop() {
-                        let (any_sent, complete, attempted, reset) = self.transmit_packet(&pkt, now_ms);
-                        sent_any |= any_sent;
-                        radio_attempted |= attempted;
-                        reset_during_batch |= reset;
-                        if !complete {
-                            break;
-                        }
+            let access = self.csma.poll_access(now_ms, &mut self.rng);
+            if access != Access::Wait {
+                // Firmware `pop_queue()` sends one packet and `flush_queue()` all of them; unlike
+                // the firmware, either stops before a packet once `should_stop` says so.
+                while !self.queue.is_empty() && !should_stop() {
+                    let Some(pkt) = self.queue.pop() else { break };
+                    let (any_sent, complete, attempted, reset) = self.transmit_packet(&pkt, now_ms);
+                    sent_any |= any_sent;
+                    radio_attempted |= attempted;
+                    reset_during_batch |= reset;
+                    if access == Access::Single || !complete {
+                        break;
                     }
                 }
             }
@@ -756,16 +852,22 @@ impl<R: Radio, S: Storage> Node<R, S> {
 
     fn observe_status(&mut self, now_ms: u64) -> Option<()> {
         let carrier = match self.radio.dcd(now_ms) {
-            Ok(v) => v,
+            Ok(v) => {
+                self.dcd_faults.succeeded(now_ms);
+                v
+            }
             Err(e) => {
-                log::warn!("radio DCD failed: {e}");
+                self.dcd_faults.failed(now_ms, &e);
                 return None;
             }
         };
         let rssi = match self.radio.current_rssi() {
-            Ok(v) => v,
+            Ok(v) => {
+                self.rssi_faults.succeeded(now_ms);
+                v
+            }
             Err(e) => {
-                log::warn!("radio RSSI failed: {e}");
+                self.rssi_faults.failed(now_ms, &e);
                 return None;
             }
         };

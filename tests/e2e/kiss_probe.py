@@ -11,7 +11,6 @@ radio settings.
 """
 
 import argparse
-import os
 import struct
 import sys
 import time

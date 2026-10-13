@@ -42,6 +42,7 @@ loss = 0.0
 
 [pty]
 # Avoid /tmp for managed deployments; choose a persistent runtime directory.
+# A symlink already at this path is replaced; any other file there makes startup fail.
 symlink = "target/rnode0"
 # Let a host running as another user (e.g. rnsd) open the PTY: hand the slave to a group the
 # daemon is a member of (systemd SupplementaryGroups=) and give that group read/write access.

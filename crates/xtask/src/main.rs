@@ -1,11 +1,14 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use rnode_core::kiss::{MTU, SINGLE_MTU};
+use rnode_core::phy::{self, Modulation, PhyParams};
 
 const FREQUENCY_HZ: u32 = 914_875_000;
 const BANDWIDTH_HZ: u32 = 125_000;
@@ -120,6 +123,34 @@ struct Scenario {
     sf: u8,
 }
 
+impl Scenario {
+    /// How long the processes get to exit after SIGTERM. A daemon finishes the packet on the air
+    /// before it exits (#51), so this covers the longest one, `MTU` bytes in two full
+    /// `SINGLE_MTU`-byte LoRa frames, at the scenario's modulation, with half again as margin, plus
+    /// the 3 s the processes need to exit. rnode-core's airtime is the firmware's estimate; the
+    /// simulated air uses Semtech's time on air, which is a few percent longer.
+    fn sigterm_wait(self) -> Duration {
+        let modulation = Modulation {
+            bandwidth_hz: BANDWIDTH_HZ,
+            spreading_factor: self.sf,
+            coding_rate: CODING_RATE,
+        };
+        let phy = PhyParams::new(modulation);
+        let low_data_rate = phy::low_data_rate(self.sf, BANDWIDTH_HZ);
+        let frame_ms = phy::airtime_ms(
+            SINGLE_MTU,
+            modulation,
+            low_data_rate,
+            phy.preamble_symbols,
+            phy.symbol_time_ms,
+        );
+        // Each frame carries a header byte and `SINGLE_MTU - 1` bytes of the packet.
+        let frames = MTU.div_ceil(SINGLE_MTU - 1) as f64;
+        let packet = Duration::from_secs_f64(frames * f64::from(frame_ms) / 1000.0);
+        packet + packet / 2 + Duration::from_secs(3)
+    }
+}
+
 fn run_scenario(
     base_run_dir: &Path,
     daemon: &Path,
@@ -219,7 +250,7 @@ fn run_scenario(
     if result.is_err() {
         dump_log_tails(&run_dir, 40);
     }
-    let shutdown_result = children.terminate_all();
+    let shutdown_result = children.terminate_all(scenario.sigterm_wait());
     result.and(shutdown_result)
 }
 
@@ -337,7 +368,7 @@ fn write_python_scripts(run_dir: &Path) -> io::Result<()> {
 }
 
 const KISS_BOUNDARY_PY: &str = r#"
-import os, struct, sys, time
+import struct, sys, time
 import serial
 FEND=0xC0; FESC=0xDB; TFEND=0xDC; TFESC=0xDD
 CMD_DATA=0x00; CMD_FREQUENCY=0x01; CMD_BANDWIDTH=0x02; CMD_TXPOWER=0x03; CMD_SF=0x04; CMD_CR=0x05; CMD_RADIO_STATE=0x06; CMD_DETECT=0x08; CMD_STAT_RSSI=0x23; CMD_STAT_SNR=0x24; CMD_STAT_CHTM=0x25; CMD_STAT_PHYPRM=0x26; CMD_STAT_CSMA=0x28; CMD_ERROR=0x90; DETECT_REQ=0x73; DETECT_RESP=0x46
@@ -414,30 +445,27 @@ def configure(port, freq, bw, txp, sf, cr):
 
 def drain(port): port.read_frames(time.time()+0.25)
 def send(port, payload): port.write(frame(CMD_DATA, payload))
+def describe(frames):
+    # Data frames by length only: they can be 508 bytes long.
+    return [(cmd, len(data)) if cmd == CMD_DATA else (cmd, data) for cmd,data in frames]
+
 def expect(port, payload, timeout):
     end=time.time()+timeout; seen=[]
     while time.time()<end:
         for cmd,data in port.read_frames(min(end, time.time()+0.25)):
-            if cmd == CMD_DATA:
-                if data == payload:
-                    if len(seen) < 2 or seen[-2][0] != CMD_STAT_RSSI or seen[-1][0] != CMD_STAT_SNR:
-                        raise RuntimeError(f'missing RSSI/SNR immediately before data len {len(payload)}: {seen[-4:]}')
-                    return
-                seen.append(len(data))
-            else:
-                seen.append((cmd, data))
-    raise RuntimeError(f'missing payload len {len(payload)}, saw {seen}')
+            if cmd == CMD_DATA and data == payload:
+                if [c for c,_ in seen[-2:]] != [CMD_STAT_RSSI, CMD_STAT_SNR]:
+                    raise RuntimeError(f'missing RSSI/SNR immediately before data len {len(payload)}: {describe(seen[-4:])}')
+                return
+            seen.append((cmd, data))
+    raise RuntimeError(f'missing payload len {len(payload)}, saw {describe(seen)}')
 
 def expect_absent(port, payload, timeout):
     end=time.time()+timeout; seen=[]
     while time.time()<end:
-        for cmd,data in port.read_frames(min(end, time.time()+0.25)):
-            if cmd == CMD_DATA:
-                seen.append(len(data))
-            else:
-                seen.append((cmd, data))
-    if any(isinstance(item, int) for item in seen):
-        raise RuntimeError(f'over-MTU payload produced CMD_DATA frames: {seen!r}')
+        seen += port.read_frames(min(end, time.time()+0.25))
+    if any(cmd == CMD_DATA for cmd,_ in seen):
+        raise RuntimeError(f'over-MTU payload produced CMD_DATA frames: {describe(seen)}')
 
 def expect_no_query_reply(port, cmd):
     drain(port)
@@ -446,44 +474,48 @@ def expect_no_query_reply(port, cmd):
     if any(c == cmd for c,_ in frames):
         raise RuntimeError(f'host query 0x{cmd:02x} unexpectedly replied: {frames!r}')
 
-a_path,b_path,freq,bw,txp,sf,cr=sys.argv[1],sys.argv[2],int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]),int(sys.argv[7])
-with_a=KissPort(a_path); with_b=KissPort(b_path)
-try:
-    a=with_a; b=with_b
-    configure(a, freq, bw, txp, sf, cr); frames=configure(b, freq, bw, txp, sf, cr)
-    frames += b.read_frames(time.time()+3)
-    if not any(cmd == CMD_STAT_CHTM and len(data) == 11 for cmd,data in frames):
-        raise RuntimeError(f'CHTM push missing while online: {frames!r}')
-    for cmd,data in frames:
-        if cmd == CMD_STAT_CSMA and len(data) != 3:
-            raise RuntimeError(f'bad CSMA push length {len(data)}: {data.hex()}')
-    for p in (a,b):
-        p.write(frame(CMD_RADIO_STATE, bytes([0])))
-    drain(a); drain(b)
-    for cmd in (CMD_STAT_CHTM, CMD_STAT_PHYPRM, CMD_STAT_CSMA):
-        expect_no_query_reply(a, cmd)
-    for p in (a,b):
-        p.write(frame(CMD_RADIO_STATE, bytes([1])))
-    drain(a); drain(b)
-    timeout=20 if sf >= 11 else 8
-    for size in (1, 254, 255, 508):
-        payload=bytes([x%251 for x in range(size)])
-        send(a, payload); expect(b, payload, timeout)
-        send(b, payload[::-1]); expect(a, payload[::-1], timeout)
-    # Firmware queues over-MTU host CMD_DATA, but flush_queue()/pop_queue() silently drop
-    # lengths greater than MTU (508) without CMD_ERROR.
-    over=bytes([x%251 for x in range(509)])
-    send(a, over)
-    expect_absent(b, over, timeout)
-    seen_a=a.read_frames(time.time()+0.5)
-    if any(cmd == 0x90 for cmd,_ in seen_a):
-        raise RuntimeError(f'over-MTU payload emitted CMD_ERROR: {seen_a!r}')
-    follow=b'after-over-mtu'
-    send(a, follow); expect(b, follow, timeout)
-    a.write(frame(CMD_RADIO_STATE, bytes([0]))); b.write(frame(CMD_RADIO_STATE, bytes([0])))
-finally:
-    with_a.close(); with_b.close()
-print('KISS boundary probe passed')
+def main():
+    a_path,b_path,freq,bw,txp,sf,cr=sys.argv[1],sys.argv[2],int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]),int(sys.argv[7])
+    with_a=KissPort(a_path); with_b=KissPort(b_path)
+    try:
+        a=with_a; b=with_b
+        configure(a, freq, bw, txp, sf, cr); frames=configure(b, freq, bw, txp, sf, cr)
+        frames += b.read_frames(time.time()+3)
+        if not any(cmd == CMD_STAT_CHTM and len(data) == 11 for cmd,data in frames):
+            raise RuntimeError(f'CHTM push missing while online: {frames!r}')
+        for cmd,data in frames:
+            if cmd == CMD_STAT_CSMA and len(data) != 3:
+                raise RuntimeError(f'bad CSMA push length {len(data)}: {data.hex()}')
+        for p in (a,b):
+            p.write(frame(CMD_RADIO_STATE, bytes([0])))
+        drain(a); drain(b)
+        for cmd in (CMD_STAT_CHTM, CMD_STAT_PHYPRM, CMD_STAT_CSMA):
+            expect_no_query_reply(a, cmd)
+        for p in (a,b):
+            p.write(frame(CMD_RADIO_STATE, bytes([1])))
+        drain(a); drain(b)
+        timeout=20 if sf >= 11 else 8
+        for size in (1, 254, 255, 508):
+            payload=bytes([x%251 for x in range(size)])
+            send(a, payload); expect(b, payload, timeout)
+            send(b, payload[::-1]); expect(a, payload[::-1], timeout)
+        # Firmware queues over-MTU host CMD_DATA, but flush_queue()/pop_queue() silently drop
+        # lengths greater than MTU (508) without CMD_ERROR.
+        over=bytes([x%251 for x in range(509)])
+        send(a, over)
+        expect_absent(b, over, timeout)
+        seen_a=a.read_frames(time.time()+0.5)
+        if any(cmd == 0x90 for cmd,_ in seen_a):
+            raise RuntimeError(f'over-MTU payload emitted CMD_ERROR: {seen_a!r}')
+        follow=b'after-over-mtu'
+        send(a, follow); expect(b, follow, timeout)
+        a.write(frame(CMD_RADIO_STATE, bytes([0]))); b.write(frame(CMD_RADIO_STATE, bytes([0])))
+    finally:
+        with_a.close(); with_b.close()
+    print('KISS boundary probe passed')
+
+if __name__ == '__main__':
+    main()
 "#;
 
 const SERVER_PY: &str = r#"
@@ -688,7 +720,10 @@ impl Children {
         Ok(())
     }
 
-    fn terminate_all(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// SIGTERM every process that is still running, wait up to `sigterm_wait` for all of them
+    /// to exit, then kill the rest. Fails if a daemon had to be killed, exited with an error or
+    /// left its PTY symlink behind.
+    fn terminate_all(&mut self, sigterm_wait: Duration) -> Result<(), Box<dyn std::error::Error>> {
         let mut errors = Vec::new();
         for proc in &mut self.0 {
             if proc.child.try_wait()?.is_none() {
@@ -698,7 +733,7 @@ impl Children {
                     .status();
             }
         }
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + sigterm_wait;
         for proc in &mut self.0 {
             let status = loop {
                 if let Some(status) = proc.child.try_wait()? {
@@ -735,6 +770,8 @@ impl Children {
     }
 }
 
+/// A safety net for a scenario that ends without `terminate_all()`, which checks how the
+/// processes exit; this only makes sure none is left running.
 impl Drop for Children {
     fn drop(&mut self) {
         for proc in &mut self.0 {
@@ -858,9 +895,24 @@ fn wait_for_path(path: &Path, timeout: Duration, what: &str) -> Result<(), Box<d
     Err(format!("timed out waiting for {what}: {}", path.display()).into())
 }
 
+/// Create `path`, and any missing parents, private to its owner (mode 0700) as rnode-sim requires
+/// of its air directory. `mkdir(2)` applies the mode, so the directory is never open to others,
+/// as it was between `create_dir_all()` and a later `chmod` (#60). An existing directory that is
+/// not private is refused, not changed.
 fn create_private_dir(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if !metadata.is_dir() || mode != 0o700 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not a directory private to its owner (mode {mode:04o})",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn dump_logs(run_dir: &Path) {

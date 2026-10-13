@@ -16,6 +16,7 @@
 //! remains running across host disconnect/reconnect, that DIO1 IRQs increment RX activity, and that
 //! removing the antenna or otherwise inducing radio I/O errors logs warnings instead of exiting.
 
+pub mod cli;
 pub mod config;
 pub mod delay;
 pub mod event_loop;

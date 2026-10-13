@@ -147,15 +147,18 @@ where
             node.service_radio(now);
         }
 
-        // Safety net for missed/level-stuck IRQs (#2) and regular protocol work.
+        // Safety net for missed/level-stuck IRQs (#2) and regular protocol work. A shutdown request
+        // ends a TX burst after the packet on the air (#51).
         node.service_radio(now);
-        node.tick(now);
+        node.tick_with(now, || shutdown.load(Ordering::Relaxed));
         let host_output = node.take_host_output();
         output.flush_bytes_to(&host_output, &pty)?;
     }
 
     node.shutdown();
-    let _ = pty.remove_symlink();
+    if let Err(e) = pty.remove_symlink() {
+        log::warn!("{e}");
+    }
     Ok(())
 }
 

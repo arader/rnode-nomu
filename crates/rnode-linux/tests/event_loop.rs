@@ -1,6 +1,6 @@
-//! Event-loop tests: the poll timeout derived from `Node::next_wakeup_ms()`, shutdown, IRQ
-//! draining, a received frame travelling from a simulated radio's IRQ to the host's PTY, and host
-//! packets travelling from the PTY to a peer on the simulated air.
+//! Event-loop tests: the poll timeout derived from `Node::next_wakeup_ms()`, shutdown (also in the
+//! middle of a long TX burst), IRQ draining, a received frame travelling from a simulated radio's
+//! IRQ to the host's PTY, and host packets travelling from the PTY to a peer on the simulated air.
 
 mod common;
 
@@ -8,11 +8,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use rnode_core::phy::{Modulation, PhyParams, airtime_ms, low_data_rate};
 use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, RadioSettings, RxFrame, TxOutcome};
 use rnode_linux::config::Config;
 use rnode_linux::event_loop::{FdIrqSource, NoIrq, POLL_TIMEOUT_CAP_MS, cap_timeout_ms, compute_timeout_ms, run};
@@ -47,7 +48,8 @@ const RNODEINTERFACE_INIT_RADIO: &[u8] = &[
 const RADIO_STATE_OFF: &[u8] = &[0xC0, 0x06, 0x00, 0xC0];
 const RADIO_STATE_ON_REPLY: &[u8] = &[0xC0, 0x06, 0x01, 0xC0];
 
-/// A radio that reads back whatever it was configured with and never receives.
+/// A radio that reads back whatever it was configured with and never receives. With `air` set, it
+/// also records what it transmits on a simulated clock.
 #[derive(Debug, Default)]
 struct TestRadio {
     frequency: u32,
@@ -55,6 +57,36 @@ struct TestRadio {
     spreading_factor: u8,
     coding_rate: u8,
     tx_power: i8,
+    air: Option<SimulatedAir>,
+}
+
+/// Transmissions that take simulated airtime instead of wall-clock time, so a test of a long TX
+/// burst neither waits for it nor depends on the machine's speed. The daemon's shutdown flag is
+/// raised as frame `stop_on_frame` (counted from 1) starts, as a SIGTERM arriving while that frame
+/// is on the air would.
+#[derive(Debug)]
+struct SimulatedAir {
+    log: Arc<Mutex<AirLog>>,
+    shutdown: Arc<AtomicBool>,
+    stop_on_frame: usize,
+}
+
+/// What a [`SimulatedAir`] radio transmitted.
+#[derive(Debug, Default)]
+struct AirLog {
+    /// The length of each frame, in order.
+    frames: Vec<usize>,
+    /// Simulated time: the airtime of every frame so far, in ms.
+    clock_ms: f32,
+    /// The simulated time at which the shutdown flag was raised.
+    stopped_at_ms: Option<f32>,
+}
+
+/// Airtime in ms of a `len`-byte frame (firmware `add_airtime()`).
+fn frame_airtime_ms(len: usize, modulation: Modulation) -> f32 {
+    let phy = PhyParams::new(modulation);
+    let low_data_rate = low_data_rate(modulation.spreading_factor, modulation.bandwidth_hz);
+    airtime_ms(len, modulation, low_data_rate, phy.preamble_symbols, phy.symbol_time_ms)
 }
 
 impl Radio for TestRadio {
@@ -113,7 +145,21 @@ impl Radio for TestRadio {
     fn receive(&mut self, _: Option<u8>) -> Result<(), Self::Error> {
         Ok(())
     }
-    fn transmit(&mut self, _: &[u8], _: bool) -> Result<TxOutcome, Self::Error> {
+    fn transmit(&mut self, frame: &[u8], _: bool) -> Result<TxOutcome, Self::Error> {
+        if let Some(air) = &self.air {
+            let modulation = Modulation {
+                bandwidth_hz: self.bandwidth,
+                spreading_factor: self.spreading_factor,
+                coding_rate: self.coding_rate,
+            };
+            let mut log = air.log.lock().unwrap();
+            if log.frames.len() + 1 == air.stop_on_frame {
+                air.shutdown.store(true, Ordering::Relaxed);
+                log.stopped_at_ms = Some(log.clock_ms);
+            }
+            log.frames.push(frame.len());
+            log.clock_ms += frame_airtime_ms(frame.len(), modulation);
+        }
         Ok(TxOutcome::Done)
     }
     fn poll_rx(&mut self) -> Result<Option<RxFrame>, Self::Error> {
@@ -461,4 +507,81 @@ fn event_loop_transmits_host_kiss_frames_on_simulated_air() {
     assert_eq!(frames[2][0], frames[1][0], "both halves carry the same header");
     assert_eq!(frames[1][1..], split[..254]);
     assert_eq!(frames[2][1..], split[254..]);
+}
+
+/// The settings of the issue #51 report: SF12 at 125 kHz, where a split packet takes about 12 s.
+const SF12_SETTINGS: RadioSettings = RadioSettings {
+    spreading_factor: 12,
+    ..SAVED_SETTINGS
+};
+
+/// Issue #51: SIGTERM during a long TX burst. The host queues eight split packets at SF12, and the
+/// shutdown flag goes up as the first frame of the third packet starts. `run()` must finish that
+/// packet, both of its frames, and return without starting the fourth: one packet's airtime after
+/// the signal, not the six packets (over a minute) a firmware `flush_queue()` would still send.
+/// Airtime is simulated, so the test takes as long as channel access (DIFS and the contention
+/// window, under 2 s at SF12), whatever the burst.
+#[test]
+#[serial]
+fn event_loop_ends_a_tx_burst_one_packet_after_shutdown_is_requested() {
+    const PACKETS: usize = 8;
+    const STOP_DURING_PACKET: usize = 3;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let log = Arc::new(Mutex::new(AirLog::default()));
+    let radio = TestRadio {
+        air: Some(SimulatedAir {
+            log: Arc::clone(&log),
+            shutdown: Arc::clone(&shutdown),
+            stop_on_frame: 2 * STOP_DURING_PACKET - 1,
+        }),
+        ..TestRadio::default()
+    };
+    let node = Node::new(
+        radio,
+        MemoryStorage::with_settings(SF12_SETTINGS),
+        NodeConfig::default(),
+        6,
+    );
+    let pty = PtyPair::open(None).unwrap();
+    let mut host = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pty.slave_path())
+        .unwrap();
+    let (result_tx, result_rx) = mpsc::channel();
+    let thread_shutdown = Arc::clone(&shutdown);
+    let daemon = std::thread::spawn(move || result_tx.send(run(node, NoIrq, pty, &thread_shutdown)).unwrap());
+    let stop = StopOnDrop(Arc::clone(&shutdown));
+
+    // All packets reach the queue long before the first transmission: channel access waits at
+    // least DIFS (200 ms at SF12) after the first one.
+    let packet = [0x55_u8; 300];
+    host.write_all(&rnodeinterface_data_frame(&packet).repeat(PACKETS))
+        .unwrap();
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("run() did not return after the shutdown flag was raised");
+    result.unwrap();
+    drop(stop);
+    daemon.join().unwrap();
+
+    let log = log.lock().unwrap();
+    let frames = [255_usize, 47];
+    assert_eq!(
+        log.frames,
+        frames.repeat(STOP_DURING_PACKET),
+        "frame lengths on the air: the packet in flight is finished, the next is not started"
+    );
+    let modulation = Modulation {
+        bandwidth_hz: SF12_SETTINGS.bandwidth,
+        spreading_factor: SF12_SETTINGS.spreading_factor,
+        coding_rate: SF12_SETTINGS.coding_rate,
+    };
+    let packet_ms: f32 = frames.iter().map(|&len| frame_airtime_ms(len, modulation)).sum();
+    assert!(packet_ms > 10_000.0, "a long packet: {packet_ms} ms");
+    let after_stop_ms = log.clock_ms - log.stopped_at_ms.expect("the shutdown flag was raised");
+    assert!(
+        (after_stop_ms - packet_ms).abs() < 1.0,
+        "airtime between the signal and the exit: {after_stop_ms} ms, one packet: {packet_ms} ms"
+    );
 }

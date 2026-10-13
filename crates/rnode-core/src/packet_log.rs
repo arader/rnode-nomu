@@ -1,4 +1,5 @@
-//! Lazy formatting for the per-packet debug and trace logs.
+//! Lazy formatting for the node's log lines: the per-packet debug and trace logs, and the radio
+//! settings in the online and offline lines.
 //!
 //! These types implement [`fmt::Display`] and are passed to the `log` macros as format arguments,
 //! so nothing is formatted unless a logger has the record's level enabled.
@@ -77,5 +78,56 @@ impl fmt::Display for HexDump<'_> {
             f.write_char('|')?;
         }
         Ok(())
+    }
+}
+
+/// A frequency or bandwidth in Hz, in the largest unit that keeps it at least 1 and without
+/// trailing zeros: `867.2 MHz`, `125 kHz`, `7.8 kHz`, `31.25 kHz`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Hz(pub u32);
+
+impl fmt::Display for Hz {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (scale, unit) = match self.0 {
+            1_000_000.. => (1_000_000, "MHz"),
+            1_000.. => (1_000, "kHz"),
+            _ => (1, "Hz"),
+        };
+        write!(f, "{}", self.0 / scale)?;
+        let mut fraction = self.0 % scale;
+        if fraction != 0 {
+            let mut digits = scale.ilog10() as usize;
+            while fraction % 10 == 0 {
+                fraction /= 10;
+                digits -= 1;
+            }
+            write!(f, ".{fraction:0digits$}")?;
+        }
+        write!(f, " {unit}")
+    }
+}
+
+/// The radio settings in the online, offline and settings-changed lines:
+/// `867.2 MHz, 125 kHz, SF7, CR 4/5, 14 dBm`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RadioSummary {
+    pub frequency_hz: u32,
+    pub bandwidth_hz: u32,
+    pub spreading_factor: u8,
+    pub coding_rate: u8,
+    pub tx_power_dbm: i8,
+}
+
+impl fmt::Display for RadioSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}, {}, SF{}, CR 4/{}, {} dBm",
+            Hz(self.frequency_hz),
+            Hz(self.bandwidth_hz),
+            self.spreading_factor,
+            self.coding_rate,
+            self.tx_power_dbm
+        )
     }
 }

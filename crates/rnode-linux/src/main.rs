@@ -1,28 +1,43 @@
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::Parser;
 use log::{info, warn};
+use rnode_linux::cli::ErrorChain;
 use rnode_linux::config::{Config, RadioDriver};
 
 #[derive(Parser, Debug)]
-#[command(name = "rnode-linux", about = "RNode Linux daemon")]
+#[command(name = "rnode-linux", about = "RNode Linux daemon", version = version())]
 struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
 
-    /// Record SPI transactions to a CSV file.
+    /// Record SPI transactions to a CSV file (radio.driver = "sx1262" only).
     #[arg(long)]
     spilog: Option<PathBuf>,
 }
 
+/// The `--version` text: the daemon's version, then the RNode firmware version it reports to
+/// hosts with `CMD_FW_VERSION`, formatted as rnodeconf shows it.
+fn version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let (major, minor) = rnode_core::identity::FW_VERSION;
+        format!(
+            "{} (reports RNode firmware {major}.{minor:02} to hosts)",
+            env!("CARGO_PKG_VERSION")
+        )
+    })
+}
+
 fn main() {
     if let Err(e) = real_main() {
-        eprintln!("fatal: {e:#}");
+        eprintln!("fatal: {}", ErrorChain(&*e));
         std::process::exit(1);
     }
 }
@@ -30,6 +45,12 @@ fn main() {
 fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config).with_context(|| format!("load {}", cli.config.display()))?;
+    if cli.spilog.is_some() && config.radio.driver != RadioDriver::Sx1262 {
+        anyhow::bail!(
+            "--spilog records SPI transactions, but radio.driver = \"{}\" has no SPI bus",
+            config.radio.driver
+        );
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(&config.logging.log_level)).init();
     info!("loaded config from {}", cli.config.display());
     for warning in config.warnings() {

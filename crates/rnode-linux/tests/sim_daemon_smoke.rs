@@ -16,7 +16,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -601,10 +601,15 @@ impl RunDir {
         let dir =
             Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("sim-daemon-smoke-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir).expect("create run directory");
-        // rnode-sim only joins an air directory that is private to its owner.
+        // rnode-sim only joins an air directory that is private to its owner. Create it with that
+        // mode in one step, so it is never open to others while it waits for a chmod (#60).
         let air = dir.join(AIR_DIR);
-        fs::create_dir(&air).expect("create air directory");
-        fs::set_permissions(&air, fs::Permissions::from_mode(0o700)).expect("make air directory private");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&air)
+            .expect("create air directory");
+        let mode = fs::metadata(&air).expect("stat air directory").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "air directory {} is not private", air.display());
         Self(dir)
     }
 }

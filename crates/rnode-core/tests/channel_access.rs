@@ -5,7 +5,7 @@ mod common;
 
 use common::{cmd, data, init, listener, node, plain, split_frames, tick_until};
 use rnode_core::kiss::*;
-use rnode_core::{MemoryStorage, Node, NodeConfig, SimMedium};
+use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, SimMedium};
 // The code below refers to these as `crate::csma`, `crate::node`, `crate::phy` and `crate::SimRadio`.
 use rnode_core::{SimRadio, csma, node, phy};
 
@@ -116,6 +116,87 @@ fn tx_queue_sends_one_packet_per_tick_at_guard_rate() {
     medium.advance_ms(101);
     tick_until(&mut n, &medium, 5_000, |n| n.queued_packets() == 0);
     assert_eq!(n.queued_packets(), 0);
+}
+
+/// The frames `radio` has received so far.
+fn received_frames(radio: &mut crate::SimRadio) -> Vec<Vec<u8>> {
+    std::iter::from_fn(|| radio.poll_rx().unwrap())
+        .map(|frame| frame.data)
+        .collect()
+}
+
+/// Issue #51: a stop request ends a burst (firmware `flush_queue()`) before the next packet. The
+/// packet on the air is finished, including the second frame of a split packet, and the rest
+/// stays queued for a later tick.
+#[test]
+fn tick_with_stop_ends_a_burst_after_the_packet_on_the_air_and_keeps_the_rest() {
+    let medium = SimMedium::new();
+    let mut air = listener(&medium);
+    let mut n = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
+    init(&mut n);
+    let packets: Vec<Vec<u8>> = [300_usize, 1, 2, 3].iter().map(|&len| vec![len as u8; len]).collect();
+    for packet in &packets {
+        n.handle_host_input(&data(packet), 0);
+    }
+    assert_eq!(n.queued_packets(), 4);
+
+    // Stop once the first packet has gone out: the second question gets "yes".
+    let mut asked = 0;
+    while n.queued_packets() == 4 && medium.now_ms() < 5_000 {
+        n.tick_with(medium.now_ms(), || {
+            asked += 1;
+            asked > 1
+        });
+        medium.advance_ms(1);
+    }
+    assert_eq!(asked, 2, "asked before the first packet and before the second");
+    let frames = received_frames(&mut air);
+    let lengths: Vec<usize> = frames.iter().map(Vec::len).collect();
+    assert_eq!(lengths, [255, 47], "both frames of the split packet");
+    assert_eq!(frames[0][0], frames[1][0], "one split packet");
+    assert_eq!(n.queued_packets(), 3);
+
+    // Without a stop request the next burst sends the rest, in order.
+    tick_until(&mut n, &medium, 5_000, |n| n.queued_packets() == 0);
+    let rest: Vec<Vec<u8>> = received_frames(&mut air).into_iter().map(|f| f[1..].to_vec()).collect();
+    assert_eq!(rest, packets[1..]);
+}
+
+/// Issue #51: a stop request that is already pending when the channel becomes free sends nothing,
+/// in burst mode and at the guard bitrate, where the firmware's `pop_queue()` sends one packet per
+/// grant.
+#[test]
+fn tick_with_pending_stop_sends_nothing_in_either_access_mode() {
+    for bandwidth in [125_000_u32, 500_000] {
+        let medium = SimMedium::new();
+        let mut air = listener(&medium);
+        air.set_bandwidth(bandwidth).unwrap();
+        let mut n = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
+        let mut input = Vec::new();
+        input.extend(cmd(CMD_FREQUENCY, &867_200_000u32.to_be_bytes()));
+        input.extend(cmd(CMD_BANDWIDTH, &bandwidth.to_be_bytes()));
+        input.extend(plain(CMD_TXPOWER, &[14]));
+        input.extend(plain(CMD_SF, &[7]));
+        input.extend(plain(CMD_CR, &[5]));
+        input.extend(plain(CMD_RADIO_STATE, &[RADIO_STATE_ON]));
+        input.extend(data(&[1]));
+        input.extend(data(&[2]));
+        n.handle_host_input(&input, 0);
+        let mut asked = 0;
+        while medium.now_ms() < 2_000 {
+            n.tick_with(medium.now_ms(), || {
+                asked += 1;
+                true
+            });
+            medium.advance_ms(1);
+        }
+        assert!(asked > 0, "{bandwidth} Hz: the channel was granted");
+        assert_eq!(n.queued_packets(), 2, "{bandwidth} Hz");
+        assert!(received_frames(&mut air).is_empty(), "{bandwidth} Hz");
+
+        tick_until(&mut n, &medium, 5_000, |n| n.queued_packets() == 0);
+        assert_eq!(received_frames(&mut air).len(), 2, "{bandwidth} Hz");
+    }
 }
 
 #[test]

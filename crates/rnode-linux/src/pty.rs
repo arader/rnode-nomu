@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
+use std::fs;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
@@ -30,6 +32,8 @@ pub enum PtyError {
         target: PathBuf,
         source: io::Error,
     },
+    #[error("refusing to replace {path} with the PTY symlink: it is a {kind}, not a symlink")]
+    NotASymlink { path: PathBuf, kind: &'static str },
     #[error("remove symlink {path} failed: {source}")]
     RemoveSymlink { path: PathBuf, source: io::Error },
     #[error("give PTY slave to group {gid} failed (is the daemon a member?): {source}")]
@@ -49,6 +53,10 @@ pub struct PtyPermissions {
 
 impl PtyPair {
     /// Create a raw slave PTY, keep the slave fd open, and make the master non-blocking.
+    ///
+    /// With `symlink`, publish the slave under that path too. A symlink already there, such as
+    /// one left by an earlier run, is replaced; anything else is kept and refused with
+    /// [`PtyError::NotASymlink`], so a mistyped path cannot delete a file.
     pub fn open(symlink: Option<&Path>) -> Result<Self, PtyError> {
         Self::open_with_permissions(symlink, PtyPermissions::default())
     }
@@ -75,23 +83,7 @@ impl PtyPair {
 
         let slave_path = ttyname(&pair.slave)?;
         let symlink_path = if let Some(link) = symlink {
-            if link.exists() || link.is_symlink() {
-                match std::fs::remove_file(link) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(source) => {
-                        return Err(PtyError::RemoveSymlink {
-                            path: link.into(),
-                            source,
-                        });
-                    }
-                }
-            }
-            std::os::unix::fs::symlink(&slave_path, link).map_err(|source| PtyError::Symlink {
-                link: link.into(),
-                target: slave_path.clone(),
-                source,
-            })?;
+            publish_symlink(link, &slave_path)?;
             Some(link.into())
         } else {
             None
@@ -140,15 +132,88 @@ impl PtyPair {
         self.slave.as_fd()
     }
 
+    /// Remove the published symlink, if it still points to this PTY's slave. A path that another
+    /// process has since replaced, with another symlink or anything else, is left alone.
     pub fn remove_symlink(&mut self) -> Result<(), PtyError> {
-        if let Some(path) = self.symlink_path.take() {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => return Err(PtyError::RemoveSymlink { path, source }),
-            }
+        let Some(path) = self.symlink_path.take() else {
+            return Ok(());
+        };
+        // Not atomic with the removal below; see `publish_symlink()`.
+        let ours = match fs::read_link(&path) {
+            Ok(target) => target == self.slave_path,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            // `read_link()` fails with EINVAL when the path is not a symlink.
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => false,
+            Err(source) => return Err(PtyError::RemoveSymlink { path, source }),
+        };
+        if !ours {
+            log::warn!(
+                "leaving {} in place: it is no longer the symlink to this daemon's PTY {}",
+                path.display(),
+                self.slave_path.display()
+            );
+            return Ok(());
         }
-        Ok(())
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(PtyError::RemoveSymlink { path, source }),
+        }
+    }
+}
+
+/// Make `link` a symlink to `target`, replacing a symlink already there but nothing else (#52).
+///
+/// Checking and replacing are separate steps, so this is not atomic: something another process
+/// puts at `link` between them is removed all the same. POSIX has no "replace only a symlink", and
+/// `rename()` over the path would replace a regular file too. The window is microseconds and needs
+/// a concurrent writer in the link's directory, which under systemd is the daemon's own runtime
+/// directory. [`PtyPair::remove_symlink`] has the same window between its check and the removal.
+fn publish_symlink(link: &Path, target: &Path) -> Result<(), PtyError> {
+    let symlink_error = |source| PtyError::Symlink {
+        link: link.into(),
+        target: target.into(),
+        source,
+    };
+    match fs::symlink_metadata(link) {
+        Ok(existing) if existing.file_type().is_symlink() => match fs::remove_file(link) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(PtyError::RemoveSymlink {
+                    path: link.into(),
+                    source,
+                });
+            }
+        },
+        Ok(existing) => {
+            return Err(PtyError::NotASymlink {
+                path: link.into(),
+                kind: file_kind(existing.file_type()),
+            });
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => return Err(symlink_error(source)),
+    }
+    std::os::unix::fs::symlink(target, link).map_err(symlink_error)
+}
+
+/// What a non-symlink file is called in [`PtyError::NotASymlink`].
+fn file_kind(file_type: fs::FileType) -> &'static str {
+    if file_type.is_dir() {
+        "directory"
+    } else if file_type.is_file() {
+        "regular file"
+    } else if file_type.is_socket() {
+        "socket"
+    } else if file_type.is_fifo() {
+        "FIFO"
+    } else if file_type.is_char_device() {
+        "character device"
+    } else if file_type.is_block_device() {
+        "block device"
+    } else {
+        "file"
     }
 }
 
@@ -163,11 +228,16 @@ impl Drop for PtyPair {
 /// Output queued in the PTY while no host is attached is stale by the time one connects;
 /// RNodeInterface discards it because pyserial 3.5's `Serial.open()` flushes input with
 /// `tcflush(fd, TCIFLUSH)` (`serialposix.py`, `_reset_input_buffer()`).
+///
+/// Frames that do not fit are dropped, and the first drop of a stall logs a warning. The warning
+/// re-arms only once the PTY has taken a whole frame again: one written in one go, or the rest of
+/// a partly written one. A host that reads only a trickle keeps it latched (#56).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PendingHostOutput {
     tail: VecDeque<u8>,
     warned_stall: bool,
     dropped_frames: u64,
+    stall_warnings: u64,
 }
 
 impl PendingHostOutput {
@@ -187,6 +257,11 @@ impl PendingHostOutput {
         self.dropped_frames
     }
 
+    /// How many times the stall warning has been logged.
+    pub fn stall_warnings_for_tests(&self) -> u64 {
+        self.stall_warnings
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tail.is_empty()
     }
@@ -204,7 +279,8 @@ impl PendingHostOutput {
         F: FnMut(&[u8]) -> io::Result<usize>,
     {
         self.flush_with(&mut write)?;
-        for (index, frame) in kiss_frames(data).iter().enumerate() {
+        for frame in kiss_frames(data) {
+            // While part of an earlier frame waits, the PTY is full: drop the frame.
             if !self.tail.is_empty() {
                 self.drop_frame();
                 continue;
@@ -212,14 +288,8 @@ impl PendingHostOutput {
             match write(frame)? {
                 0 => self.drop_frame(),
                 n if n >= frame.len() => self.mark_progress(),
-                n => {
-                    self.mark_progress();
-                    self.tail.extend(&frame[n..]);
-                    for _ in index + 1..kiss_frames(data).len() {
-                        self.drop_frame();
-                    }
-                    break;
-                }
+                // Not a whole frame yet: the rest waits, and progress counts once it has drained.
+                n => self.tail.extend(&frame[n..]),
             }
         }
         Ok(())
@@ -229,6 +299,9 @@ impl PendingHostOutput {
     where
         F: FnMut(&[u8]) -> io::Result<usize>,
     {
+        if self.tail.is_empty() {
+            return Ok(());
+        }
         while !self.tail.is_empty() {
             let contiguous = self.tail.make_contiguous();
             let len = contiguous.len();
@@ -236,8 +309,11 @@ impl PendingHostOutput {
             if written == 0 {
                 break;
             }
-            self.mark_progress();
             self.tail.drain(..written.min(len));
+        }
+        if self.tail.is_empty() {
+            // The partly written frame has gone out whole.
+            self.mark_progress();
         }
         Ok(())
     }
@@ -247,6 +323,7 @@ impl PendingHostOutput {
         if !self.warned_stall {
             log::warn!("dropping host output because the PTY is not draining");
             self.warned_stall = true;
+            self.stall_warnings = self.stall_warnings.saturating_add(1);
         }
     }
 

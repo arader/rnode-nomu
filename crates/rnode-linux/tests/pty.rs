@@ -6,13 +6,16 @@ mod common;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, symlink};
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::sys::stat::Mode;
 use nix::sys::termios::{ControlFlags, FlushArg, InputFlags, LocalFlags, OutputFlags, tcflush, tcgetattr};
-use nix::unistd::getegid;
-use rnode_linux::pty::{PendingHostOutput, PtyPair, PtyPermissions};
+use nix::unistd::{getegid, mkfifo};
+use rnode_linux::pty::{PendingHostOutput, PtyError, PtyPair, PtyPermissions};
 use serial_test::serial;
 
 use common::test_dir;
@@ -108,6 +111,100 @@ fn pty_slave_gets_configured_group_and_mode() {
     assert_eq!(stat.gid(), default_gid);
 }
 
+/// Issue #52: `[pty] symlink` replaces a symlink, stale or dangling, and refuses everything else,
+/// keeping it as it was.
+#[test]
+#[serial]
+fn pty_symlink_replaces_only_a_symlink() {
+    let dir = test_dir("pty-symlink");
+    let refused = |path: &Path| match PtyPair::open(Some(path)).unwrap_err() {
+        PtyError::NotASymlink { path: reported, kind } => {
+            assert_eq!(reported, path);
+            kind
+        }
+        other => panic!("{}: unexpected error {other}", path.display()),
+    };
+
+    let file = dir.join("file");
+    fs::write(&file, b"precious").unwrap();
+    assert_eq!(refused(&file), "regular file");
+    assert_eq!(fs::read(&file).unwrap(), b"precious");
+    assert_eq!(
+        PtyPair::open(Some(&file)).unwrap_err().to_string(),
+        format!(
+            "refusing to replace {} with the PTY symlink: it is a regular file, not a symlink",
+            file.display()
+        )
+    );
+
+    let subdir = dir.join("dir");
+    fs::create_dir(&subdir).unwrap();
+    assert_eq!(refused(&subdir), "directory");
+    assert!(subdir.is_dir());
+
+    let fifo = dir.join("fifo");
+    mkfifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
+    assert_eq!(refused(&fifo), "FIFO");
+    assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+
+    // Relative, because Unix socket paths are limited to about 104 bytes.
+    let socket = PathBuf::from(format!("target/pty-symlink-{}.sock", std::process::id()));
+    let _ = fs::remove_file(&socket);
+    let listener = UnixListener::bind(&socket).unwrap();
+    assert_eq!(refused(&socket), "socket");
+    assert!(fs::symlink_metadata(&socket).unwrap().file_type().is_socket());
+    drop(listener);
+    fs::remove_file(&socket).unwrap();
+
+    // A symlink left by an earlier run is replaced; what it pointed to is untouched.
+    let link = dir.join("rnode0");
+    let target = dir.join("target");
+    fs::write(&target, b"target").unwrap();
+    symlink(&target, &link).unwrap();
+    let pty = PtyPair::open(Some(&link)).unwrap();
+    assert_eq!(fs::read_link(&link).unwrap(), pty.slave_path());
+    assert_eq!(fs::read(&target).unwrap(), b"target");
+    drop(pty);
+    assert!(fs::symlink_metadata(&link).is_err(), "removed on exit");
+
+    let dangling = dir.join("gone");
+    symlink(&dangling, &link).unwrap();
+    let pty = PtyPair::open(Some(&link)).unwrap();
+    assert_eq!(fs::read_link(&link).unwrap(), pty.slave_path());
+}
+
+/// Issue #52: on exit the symlink is removed only while it still points to this daemon's slave;
+/// a path another process has taken over in the meantime is left alone.
+#[test]
+#[serial]
+fn pty_symlink_is_removed_on_exit_only_while_it_is_ours() {
+    let dir = test_dir("pty-symlink-exit");
+    let link = dir.join("rnode0");
+
+    let mut pty = PtyPair::open(Some(&link)).unwrap();
+    pty.remove_symlink().unwrap();
+    assert!(fs::symlink_metadata(&link).is_err());
+    pty.remove_symlink().unwrap();
+
+    // Another daemon published its own PTY under the same name.
+    let mut pty = PtyPair::open(Some(&link)).unwrap();
+    let other = dir.join("other-pty");
+    fs::remove_file(&link).unwrap();
+    symlink(&other, &link).unwrap();
+    pty.remove_symlink().unwrap();
+    assert_eq!(fs::read_link(&link).unwrap(), other);
+    drop(pty);
+    assert_eq!(fs::read_link(&link).unwrap(), other);
+
+    // Replaced by something that is not a symlink: dropping the PTY leaves it too.
+    fs::remove_file(&link).unwrap();
+    let pty = PtyPair::open(Some(&link)).unwrap();
+    fs::remove_file(&link).unwrap();
+    fs::write(&link, b"someone else's").unwrap();
+    drop(pty);
+    assert_eq!(fs::read(&link).unwrap(), b"someone else's");
+}
+
 #[test]
 fn pending_host_output_drops_new_frames_when_writer_stalls() {
     let mut output = PendingHostOutput::default();
@@ -140,6 +237,21 @@ fn pending_host_output_finishes_partial_tail_before_next_frame() {
 }
 
 #[test]
+fn pending_host_output_drops_the_frames_after_a_partial_write() {
+    let mut output = PendingHostOutput::default();
+    let mut offered = Vec::new();
+    output
+        .flush_bytes_with(&[0xC0, 0x01, 0xC0, 0xC0, 0x02, 0xC0, 0xC0, 0x03, 0xC0], |bytes| {
+            offered.push(bytes.to_vec());
+            Ok(bytes.len().min(2))
+        })
+        .unwrap();
+    assert_eq!(offered, [[0xC0, 0x01, 0xC0]], "the later frames are not offered");
+    assert_eq!(output.buffered_bytes(), [0xC0]);
+    assert_eq!(output.dropped_frames_for_tests(), 2);
+}
+
+#[test]
 fn pending_host_output_warning_rearms_after_successful_write() {
     let mut output = PendingHostOutput::default();
     output.flush_bytes_with(&[0xC0, 0x01, 0xC0], |_| Ok(0)).unwrap();
@@ -155,6 +267,56 @@ fn pending_host_output_warning_rearms_after_successful_write() {
     output.flush_bytes_with(&[0xC0, 0x04, 0xC0], |_| Ok(0)).unwrap();
     assert!(output.has_warned_drop_for_tests());
     assert_eq!(output.dropped_frames_for_tests(), 3);
+}
+
+/// A writer for a host that reads `budget` more bytes and then stops: the PTY takes that much
+/// and is full after it.
+fn trickle(budget: usize) -> impl FnMut(&[u8]) -> std::io::Result<usize> {
+    let mut left = budget;
+    move |bytes| {
+        let n = bytes.len().min(left);
+        left -= n;
+        Ok(n)
+    }
+}
+
+/// Issue #56: while a host reads only a few bytes at a time, the stall warning stays latched: a
+/// partial write of the pending tail or of a new frame does not re-arm it. It re-arms once the
+/// tail has drained, so the next stall warns again.
+#[test]
+fn pending_host_output_warning_stays_latched_until_the_tail_drains() {
+    let frame = [0xC0, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 0xC0];
+    let mut output = PendingHostOutput::default();
+
+    // A stall: the frame is dropped with a warning.
+    output.flush_bytes_with(&frame, trickle(0)).unwrap();
+    assert_eq!(output.dropped_frames_for_tests(), 1);
+    assert_eq!(output.stall_warnings_for_tests(), 1);
+
+    // The host reads 4 bytes: the next frame goes out partly, the one after it is dropped, and
+    // the stall is still the same one.
+    output.flush_bytes_with(&[frame, frame].concat(), trickle(4)).unwrap();
+    assert_eq!(output.len(), 7);
+    assert_eq!(output.dropped_frames_for_tests(), 2);
+    assert_eq!(output.stall_warnings_for_tests(), 1);
+
+    // A few bytes at a time, with nothing new to send: the tail shrinks, the warning stays latched.
+    for left in [4, 1] {
+        output.flush_with(trickle(3)).unwrap();
+        assert_eq!(output.len(), left);
+        assert!(output.has_warned_drop_for_tests(), "{left} bytes left");
+    }
+    output.flush_bytes_with(&frame, trickle(0)).unwrap();
+    assert_eq!(output.dropped_frames_for_tests(), 3);
+    assert_eq!(output.stall_warnings_for_tests(), 1);
+
+    // The last byte of the tail goes out: the PTY is draining again.
+    output.flush_with(trickle(3)).unwrap();
+    assert!(output.is_empty());
+    assert!(!output.has_warned_drop_for_tests());
+    output.flush_bytes_with(&frame, trickle(0)).unwrap();
+    assert_eq!(output.dropped_frames_for_tests(), 4);
+    assert_eq!(output.stall_warnings_for_tests(), 2);
 }
 
 #[test]

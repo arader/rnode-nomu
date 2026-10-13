@@ -238,6 +238,10 @@ fn default_snr_db() -> f32 {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PtyConfig {
+    /// Path at which to publish a symlink to the PTY slave, for a stable device name. A symlink
+    /// already there (for example from an earlier run) is replaced; anything else makes startup
+    /// fail and is left untouched. On exit the symlink is removed if it still points to this
+    /// daemon's PTY.
     #[serde(default)]
     pub symlink: Option<PathBuf>,
     /// Group to hand the PTY slave to, so a host running as another user (e.g. `rnsd`) can open
@@ -291,7 +295,9 @@ fn parse_pty_mode(text: &str) -> Result<u32, ConfigError> {
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     /// File for the radio settings the host saves with `CMD_CONF_SAVE` (the firmware's EEPROM).
-    /// When unset, saved settings last only until the daemon exits.
+    /// They are loaded at startup and after a host's `CMD_RESET`, and bring the radio online
+    /// without a host. When unset, nothing is saved: the radio comes up offline after a restart or
+    /// a `CMD_RESET` until a host configures it, and the daemon warns about this at startup.
     #[serde(default)]
     pub radio_settings: Option<PathBuf>,
 }
@@ -363,8 +369,8 @@ impl Config {
         let mut warnings = Vec::new();
         if self.storage.radio_settings.is_none() {
             warnings.push(
-                "storage.radio_settings is not set: radio settings saved by the host (CMD_CONF_SAVE) \
-                 will not persist across restarts"
+                "storage.radio_settings is not set: radio settings the host saves with CMD_CONF_SAVE \
+                 are not kept, so they are lost on restart and on CMD_RESET"
                     .to_owned(),
             );
         }

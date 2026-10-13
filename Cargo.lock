@@ -759,5 +759,6 @@ dependencies = [
 name = "xtask"
 version = "0.2.0"
 dependencies = [
+ "rnode-core",
  "rnode-linux",
 ]
