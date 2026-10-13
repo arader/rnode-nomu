@@ -2,6 +2,12 @@
 //!
 //! The command order, register values and packet handling mirror RNode_Firmware v1.86
 //! `sx126x.cpp` so the Linux daemon interoperates with real RNodes on the air.
+//!
+//! One deliberate improvement over firmware is TX-done timeout handling: firmware uses the fixed
+//! `LORA_MODEM_TIMEOUT_MS = 20E3` from `sx126x.h`, which can abort valid maximum-size frames at
+//! SF12 and narrow bandwidths. This driver treats [`Config::tx_timeout_ms`] as a floor and scales
+//! the effective wait with the current packet airtime. The wait loop counts 1 ms delay iterations,
+//! so real wall time is somewhat longer than the nominal limit.
 
 use core::convert::Infallible;
 use core::fmt;
@@ -78,7 +84,12 @@ pub struct Config {
     pub ocp: u8,
     /// Maximum number of one-millisecond polls in firmware `waitOnBusy()`.
     pub busy_timeout_ms: u32,
-    /// Blocking TX timeout, matching firmware `LORA_MODEM_TIMEOUT_MS` by default.
+    /// Floor for the blocking TX-done timeout, in milliseconds.
+    ///
+    /// Firmware uses fixed `LORA_MODEM_TIMEOUT_MS = 20E3` (`sx126x.h:17`), which can abort and
+    /// hard-reset on valid SF12 ≤ 62.5 kHz max-size frames. This driver deliberately improves on
+    /// that by waiting for `max(tx_timeout_ms, 2 × airtime + 1000)`; the loop counts 1 ms delay
+    /// iterations, so wall-clock time is somewhat longer than the nominal value.
     pub tx_timeout_ms: u32,
 }
 
@@ -412,6 +423,29 @@ where
         self.ldro = phy::low_data_rate(self.sf, self.bw_hz);
     }
 
+    fn tx_timeout_limit_ms(&self, len: usize) -> u32 {
+        if self.bw_hz == 0 {
+            return self.config.tx_timeout_ms;
+        }
+        let modulation = phy::Modulation {
+            bandwidth_hz: self.bw_hz,
+            spreading_factor: self.sf,
+            coding_rate: self.cr + 4,
+        };
+        let symbol_time_ms = phy::PhyParams::new(modulation).symbol_time_ms;
+        let airtime_ms = phy::airtime_ms(len, modulation, self.ldro, self.preamble_length, symbol_time_ms);
+        if !airtime_ms.is_finite() || airtime_ms < 0.0 {
+            return self.config.tx_timeout_ms;
+        }
+        let scaled = f64::from(airtime_ms) * 2.0 + 1000.0;
+        let scaled = if scaled >= f64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            scaled.ceil() as u32
+        };
+        self.config.tx_timeout_ms.max(scaled)
+    }
+
     /// Firmware `sx126x::optimizeModemSensitivity()`, implementing SX1262 errata 15.1.
     fn optimize_modem_sensitivity(&mut self) -> Result<(), Error<SPI::Error>> {
         let reg = self.read_register(REG_SENSITIVITY)?;
@@ -623,9 +657,12 @@ where
         self.set_packet_params()?;
         self.execute_opcode(OP_TX, &[0x00, 0x00, 0x00])?;
 
+        // RNode_Firmware's airtime estimate omits the final ceil and uses +0.25 rather than
+        // Semtech's +4.25 symbols; doubling it and adding one second keeps a conservative margin.
+        let timeout_ms = self.tx_timeout_limit_ms(len);
         let mut irq = self.get_irq_status()?;
         let mut waited = 0;
-        while (irq[1] & IRQ_TX_DONE_MASK) == 0 && waited < self.config.tx_timeout_ms {
+        while (irq[1] & IRQ_TX_DONE_MASK) == 0 && waited < timeout_ms {
             self.delay.delay_ms(1);
             waited += 1;
             irq = self.get_irq_status()?;
@@ -870,18 +907,24 @@ mod tests {
 
     type Dev = Sx126x<MockSpi, MockInput, MockOutput, MockOutput, MockDelay>;
 
-    fn dev(config: Config) -> (Dev, MockSpi, MockOutput, MockOutput) {
+    fn dev_with_delay(config: Config) -> (Dev, MockSpi, MockOutput, MockOutput, MockDelay) {
         let spi = MockSpi::default();
         let reset = MockOutput::default();
         let rxen = MockOutput::default();
+        let delay = MockDelay::default();
         let radio = Sx126x::new(
             spi.clone(),
             MockInput::low(),
             reset.clone(),
             Some(rxen.clone()),
-            MockDelay::default(),
+            delay.clone(),
             config,
         );
+        (radio, spi, reset, rxen, delay)
+    }
+
+    fn dev(config: Config) -> (Dev, MockSpi, MockOutput, MockOutput) {
+        let (radio, spi, reset, rxen, _) = dev_with_delay(config);
         (radio, spi, reset, rxen)
     }
 
@@ -900,6 +943,14 @@ mod tests {
 
     fn has_seq(spi: &MockSpi, seq: &[u8]) -> bool {
         writes(spi).iter().any(|w| w == seq)
+    }
+
+    fn get_irq_read_count(spi: &MockSpi) -> usize {
+        writes(spi).iter().filter(|w| w == &&[OP_GET_IRQ_STATUS, 0x00]).count()
+    }
+
+    fn delay_ms_count(delay: &MockDelay) -> usize {
+        delay.delays.borrow().iter().filter(|ns| **ns == 1_000_000).count()
     }
 
     #[test]
@@ -1127,6 +1178,62 @@ mod tests {
         spi.push(&[0x00]);
         radio.set_tx_power(-99).unwrap();
         assert!(has_seq(&spi, &[0x8e, (-9i8) as u8, 0x02]));
+    }
+
+    #[test]
+    fn tx_timeout_fast_configuration_uses_configured_floor() {
+        let (mut radio, spi, _, _, delay) = dev_with_delay(Config {
+            tx_timeout_ms: 1_200,
+            ..Config::default()
+        });
+        assert_eq!(radio.transmit(&[0xaa], false).unwrap(), TxOutcome::Timeout);
+        assert_eq!(delay_ms_count(&delay), 1_200);
+        assert_eq!(get_irq_read_count(&spi), 1_201);
+    }
+
+    #[test]
+    fn tx_timeout_slow_configuration_scales_past_configured_floor() {
+        let (mut radio, spi, _, _, delay) = dev_with_delay(Config {
+            tx_timeout_ms: 10,
+            ..Config::default()
+        });
+        radio.set_spreading_factor(12).unwrap();
+        radio.set_coding_rate(8).unwrap();
+        // Independent firmware-estimate arithmetic for SF12/125 kHz/CR8, LDRO on, 18-symbol
+        // preamble and a 10-byte payload: ((76 / 40) * 8 + 18 + 0.25 + 8) * 32.768 ms.
+        let expected = 3_717;
+        assert!(expected > 10);
+        assert_eq!(radio.transmit(&[0x55; 10], false).unwrap(), TxOutcome::Timeout);
+        assert_eq!(delay_ms_count(&delay), expected as usize);
+        assert_eq!(get_irq_read_count(&spi), expected as usize + 1);
+    }
+
+    #[test]
+    fn tx_timeout_scaled_limit_matches_independent_boundary_value() {
+        let (mut radio, _spi, _, _) = dev(Config {
+            tx_timeout_ms: 20_000,
+            ..Config::default()
+        });
+        radio.set_spreading_factor(12).unwrap();
+        radio.set_coding_rate(8).unwrap();
+        // Precomputed from the firmware airtime expression for SF12/125 kHz/CR8, LDRO on,
+        // 18-symbol preamble and a 255-byte payload, then applying 2× + 1000 ms.
+        let firmware_vector_limit = 29_407;
+        assert_eq!(radio.tx_timeout_limit_ms(255), firmware_vector_limit);
+    }
+
+    #[test]
+    fn tx_timeout_defensive_fallbacks_use_configured_floor() {
+        let (mut radio, _spi, _, _) = dev(Config {
+            tx_timeout_ms: 1_234,
+            ..Config::default()
+        });
+        radio.bw_hz = 0;
+        assert_eq!(radio.tx_timeout_limit_ms(255), 1_234);
+
+        radio.bw_hz = 1;
+        radio.sf = u8::MAX;
+        assert_eq!(radio.tx_timeout_limit_ms(255), 1_234);
     }
 
     #[test]
