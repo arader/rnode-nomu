@@ -1,0 +1,15 @@
+[package]
+name = "rnode-sx126x"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable embedded-hal SX1262 driver for RNode"
+
+[lints]
+workspace = true
+
+[dependencies]
+embedded-hal = "1.0"
+rnode-core = { path = "../rnode-core" }
