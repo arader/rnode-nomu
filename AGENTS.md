@@ -38,14 +38,18 @@ we deliberately differ, say so in a doc comment.
 
 - CI's `PR / test` runs `cargo fmt --all --check`, `cargo build --locked --all-targets`,
   `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`, the Python unit
-  tests of `tools/hwtest`, `python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v`, and
-  the SF7 scenario of the Reticulum end-to-end test,
-  `cargo xtask rns-e2e --fetch-reticulum --scenario sf7`; all six must pass (this is the CI
-  gate). Run the four cargo commands locally before every push, the Python unit tests when you
-  change `tools/hwtest`, and the end-to-end test (it needs `uv`) before pushing changes to
-  rnode-core, rnode-linux, rnode-sim or the harness (`crates/xtask`, `tests/e2e`). After each
-  merge, CI on `main` (`.forgejo/workflows/ci.yml`) runs the full suite: the same checks and
-  every end-to-end scenario.
+  tests of `tools/hwtest`, `python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v`, once
+  with the standard library alone and once in a venv with the numpy that
+  `tools/hwtest/requirements-test.txt` pins, the bring-up tool's unit tests,
+  `cargo test --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml --locked`, and the SF7
+  scenario of the Reticulum end-to-end test,
+  `cargo xtask rns-e2e --fetch-reticulum --scenario sf7`; all eight must pass (this is the CI
+  gate). Run the four cargo commands locally before every push, the `tools/hwtest` unit tests
+  when you change `tools/hwtest` (its README shows how; the bring-up tool's build only on Linux),
+  and the end-to-end test (it needs `uv`) before pushing changes to rnode-core, rnode-linux,
+  rnode-sim or the harness (`crates/xtask`, `tests/e2e`). After each merge, CI on `main`
+  (`.forgejo/workflows/ci.yml`) runs the full suite: the same checks and every end-to-end
+  scenario.
 - Commit `Cargo.lock` whenever dependencies change. The CI runner has little memory: prefer small
   dependencies.
 - Every behaviour change comes with tests. Prefer golden values derived from the firmware over

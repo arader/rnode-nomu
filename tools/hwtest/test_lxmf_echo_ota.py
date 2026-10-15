@@ -118,9 +118,18 @@ class FakeDestination:
         return name.encode()[:16].ljust(16, b"\0")
 
 
+class FakeReticulum:
+    """RNS.Reticulum stand-in: shutdown() detaches the RNodeInterface through exit_handler()."""
+
+    @staticmethod
+    def exit_handler():
+        pass
+
+
 class FakeRNS:
     Identity = FakeIdentity
     Destination = FakeDestination
+    Reticulum = FakeReticulum
 
     def __init__(self, transport=None):
         self.Transport = transport
@@ -216,6 +225,23 @@ class SafetyLimits(unittest.TestCase):
 
 
 class Arguments(unittest.TestCase):
+    def test_refuses_no_path_attempts_and_waits_that_are_not_positive(self):
+        # Review 5940: each of these refusals had no test.
+        for extra, message in (
+            (("--path-attempts", "0"), "--path-attempts must be at least 1"),
+            (("--timeout", "0"), "--timeout must be positive"),
+            (("--path-wait", "-1"), "--path-wait must be positive"),
+            (("--online-timeout", "0"), "--online-timeout must be positive"),
+            (("--settle", "-1"), "--settle must not be negative"),
+        ):
+            with self.subTest(extra=extra):
+                self.assertIn(message, refusal(*extra))
+        args = args_with(
+            "--path-attempts", "1", "--timeout", "0.5", "--path-wait", "0.5", "--online-timeout", "0.5", "--settle", "0"
+        )
+        self.assertEqual(
+            (args.path_attempts, args.timeout, args.path_wait, args.online_timeout, args.settle), (1, 0.5, 0.5, 0.5, 0)
+        )
     def test_echo_hash_accepts_plain_and_bracketed_hex(self):
         self.assertEqual(ota.parse_hash(ECHO.hex()), ECHO)
         self.assertEqual(ota.parse_hash(f"<{ECHO.hex()}>"), ECHO)
@@ -344,6 +370,97 @@ class DaemonLogCrossCheck(unittest.TestCase):
         wire = [ota.WirePacket(T0 + 1.0, "tx", 99, ""), ota.WirePacket(T0 + 1.1, "tx", 99, "")]
         self.assertEqual(ota.cross_check(wire, daemon), [])
         self.assertEqual([p.daemon.line for p in wire], ["first", "second"])
+
+
+class DaemonLogVerdict(unittest.TestCase):
+    """With --daemon-log, shutdown() matches the tool's packets to the daemon log and report() fails
+    the run when a packet is missing from it or a transmission failed (review 5939)."""
+
+    LINES = (
+        daemon_line(-60, "TX packet: 51 bytes, 1 frame, header 0x10 (seq 1): ok"),
+        daemon_line(1, "TX packet: 51 bytes, 1 frame, header 0x10 (seq 1): ok"),
+        daemon_line(3, "RX packet: 223 bytes, 1 frame, header 0x20 (seq 2), RSSI -51 dBm, SNR 14.00 dB"),
+        daemon_line(9, "TX packet: 435 bytes, 2 frames, header 0x31 (seq 3, split): ok"),
+        daemon_line(12, "RX packet: 419 bytes, 2 frames, header 0x41 (seq 4, split), RSSI -51 dBm, SNR 13.50 dB"),
+    )
+    WIRE = ((0.5, "tx", 51), (3.4, "rx", 223), (7.9, "tx", 435), (12.2, "rx", 419))
+
+    def setUp(self):
+        self.scratch = tempfile.mkdtemp(prefix=".scratch-", dir=HERE)
+        self.addCleanup(shutil.rmtree, self.scratch)
+        self.log = os.path.join(self.scratch, "rnode-linux.log")
+
+    def shut_down(self, lines):
+        """A session that saw the WIRE packets and shut down with `lines` in the daemon log, or with
+        no daemon log if `lines` is None."""
+        if lines is not None:
+            with open(self.log, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        session = ota.Session(FakeRNS(), None, args_with("--daemon-log", self.log), ".", ota.WireLog(), [])
+        session.started = T0
+        for seconds, direction, length in self.WIRE:
+            session.wire.packets.append(ota.WirePacket(T0 + seconds, direction, length, f"{direction} packet"))
+        _, printed = quietly(session.shutdown)
+        self.assertNotIn("failed", printed)
+        return session
+
+    def verdict(self, session):
+        """report_daemon_log()'s and report()'s results, and what report() printed."""
+        daemon_ok, _ = quietly(session.report_daemon_log)
+        ok, report = quietly(session.report)
+        return daemon_ok, ok, report
+
+    def test_every_packet_in_the_log_passes(self):
+        # A daemon line without a tool packet is listed but does not fail the run; the line from
+        # before the session is not even read.
+        extra = daemon_line(14, "RX packet: 99 bytes, 1 frame, header 0x60 (seq 6), RSSI -50 dBm, SNR 12.75 dB")
+        daemon_ok, ok, report = self.verdict(self.shut_down(self.LINES + (extra,)))
+        self.assertEqual((daemon_ok, ok), (True, True), report)
+        self.assertNotIn("NOT IN DAEMON LOG", report)
+        self.assertNotIn("TX FAILED", report)
+        self.assertIn(
+            "daemon log tx  : 2/2 matched (1 x 1 frame, 1 x 2 frames); 0 daemon TX lines without a tool packet", report
+        )
+        self.assertIn(
+            "daemon log rx  : 2/2 matched (1 x 1 frame, 1 x 2 frames); 1 daemon RX lines without a tool packet", report
+        )
+        self.assertIn(f"    unmatched: {extra}", report)
+        self.assertIn("RESULT: PASS", report)
+
+    def test_a_packet_missing_from_the_log_fails(self):
+        for missing, direction, summary in (
+            (3, "tx", "daemon log tx  : 1/2 matched (1 x 1 frame); 0 daemon TX lines"),
+            (4, "rx", "daemon log rx  : 1/2 matched (1 x 1 frame); 0 daemon RX lines"),
+        ):
+            with self.subTest(direction=direction):
+                lines = self.LINES[:missing] + self.LINES[missing + 1 :]
+                daemon_ok, ok, report = self.verdict(self.shut_down(lines))
+                self.assertEqual((daemon_ok, ok), (False, False), report)
+                flagged = [line for line in report.splitlines() if "NOT IN DAEMON LOG" in line]
+                self.assertEqual(len(flagged), 1, report)
+                self.assertIn(f"{direction} {self.WIRE[missing - 1][2]} B", flagged[0])
+                self.assertIn(summary, report)
+                self.assertIn("RESULT: FAIL", report)
+
+    def test_a_failed_transmission_fails(self):
+        failure = "modem timeout on frame 2/2; sent ERROR_MODEM_TIMEOUT, ERROR_TXFAILED; hard reset"
+        lines = self.LINES[:3] + (self.LINES[3].replace(": ok", f": {failure}"),) + self.LINES[4:]
+        session = self.shut_down(lines)
+        daemon_ok, ok, report = self.verdict(session)
+        self.assertEqual((daemon_ok, ok), (False, False), report)
+        self.assertNotIn("NOT IN DAEMON LOG", report)
+        flagged = [line for line in report.splitlines() if "TX FAILED" in line]
+        self.assertEqual(len(flagged), 1, report)
+        self.assertIn("tx 435 B", flagged[0])
+        self.assertTrue(flagged[0].endswith(f"daemon 2 frames, TX FAILED: {failure}"), flagged[0])
+        self.assertIn("daemon log tx  : 2/2 matched", report)
+        self.assertEqual(quietly(session.exit_status)[0], 1)
+
+    def test_an_unreadable_log_fails(self):
+        ok, report = quietly(self.shut_down(None).report)
+        self.assertFalse(ok, report)
+        self.assertIn(f"daemon log     : could not read {self.log}: ", report)
+        self.assertIn("RESULT: FAIL", report)
 
 
 

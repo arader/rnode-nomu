@@ -3,8 +3,8 @@
 This directory contains repeatable hardware checks for the uConsole CM5 with the
 HackerGadgets AIO V2 board: SX1262 on `/dev/spidev1.0` and the on-board RTL-SDR,
 plus an over-the-air LXMF round trip through the daemon against a real RNode.
-The tests are intentionally outside the main Cargo workspace so they can depend
-on Linux-only GPIO/SPI crates without affecting normal CI.
+The tools are outside the main Cargo workspace; CI runs only their unit tests,
+which need no hardware (see [Unit tests](#unit-tests)).
 
 ## Safety
 
@@ -236,11 +236,7 @@ messages per session, not a stream.
 
 The tool's argument checks, packet decoding, path reporting, echo verdicts,
 identity-file handling and daemon-log matching have unit tests that need neither
-a radio nor Reticulum:
-
-```sh
-python3 -m unittest discover -s tools/hwtest -p 'test_*.py'
-```
+a radio nor Reticulum; see [Unit tests](#unit-tests).
 
 ### Over-the-air echo with a real RNode, 2026-10-13
 
@@ -279,3 +275,40 @@ Notes:
 - The peer is close (-51 dBm), so weak-signal behaviour, other spreading
   factors and long sessions remain untested.  The daemon does not log CSMA
   deferrals or CRC-failed frames, so neither could be observed.
+
+## Unit tests
+
+CI runs the unit tests of these tools, which need neither hardware nor
+Reticulum: the Python tests twice, with the standard library alone and with
+the numpy release that `requirements-test.txt` pins, and the bring-up tool's
+Rust tests.  To run them as CI does, from the repository root:
+
+```sh
+python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+uv venv --python python3 target/hwtest-venv
+uv pip install --python target/hwtest-venv/bin/python --require-hashes \
+  -r tools/hwtest/requirements-test.txt
+HWTEST_REQUIRE_NUMPY=1 target/hwtest-venv/bin/python -m unittest discover \
+  -s tools/hwtest -p 'test_*.py' -v
+cargo test --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml --locked
+```
+
+- `test_lxmf_echo_ota.py` covers `lxmf_echo_ota.py` with stand-ins for Reticulum
+  and LXMF: the safety limits and the other argument checks, packet
+  descriptions, path discovery, the identity file, the echo verdicts, and the
+  daemon-log cross-check, which fails the run when a packet is missing from the
+  log or its transmission failed.
+- `test_lora_capture_analyze.py` checks the Semtech time on air and the
+  low-data-rate rule of `lora_capture_analyze.py` against the bring-up and SDR
+  results above and, for SF5 and SF6, where the SX1262 differs from the SX127x,
+  against Semtech's LoRaMac-node; these need only the standard library.  Its
+  signal-processing tests build synthetic captures of LoRa frames and check
+  burst detection, dechirping, the frequency offset and the analyzer's report.
+  They need numpy and are skipped without it; `HWTEST_REQUIRE_NUMPY=1` makes a
+  numpy that does not import an error instead.  `requirements-test.in` says how
+  to move the numpy pin.
+- `sx126x-bringup/src/linux/tests.rs` checks the bring-up tool's frequency and
+  power limits and its Semtech time on air against the same values, and against
+  rnode-core's port of the firmware's airtime estimate.  Like the tool, they
+  build only on Linux; elsewhere `cargo test` builds the stub `main` and runs no
+  tests.

@@ -68,9 +68,9 @@ pub fn run() -> Result<()> {
     }
 }
 
-impl Args {
-    fn parse() -> Result<Self> {
-        let mut args = Self {
+impl Default for Args {
+    fn default() -> Self {
+        Self {
             mode: Mode::Bringup,
             spi: DEFAULT_SPI.into(),
             gpiochip: DEFAULT_CHIP.into(),
@@ -87,7 +87,13 @@ impl Args {
             start_delay_ms: 0,
             payload_len: 50,
             implicit: false,
-        };
+        }
+    }
+}
+
+impl Args {
+    fn parse() -> Result<Self> {
+        let mut args = Self::default();
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -365,6 +371,9 @@ struct ToaParams {
     crc: bool,
 }
 
+/// Time on air in ms by the SX126x formula, as Semtech's LoRaMac-node computes it
+/// (`RadioGetLoRaTimeOnAirNumerator()` in `src/radio/sx126x/radio.c`). Below SF7 a frame has 2 more
+/// symbols of overhead and no 8 extra bits in its block count, and LDRO does not apply.
 fn semtech_time_on_air_ms(params: ToaParams) -> f64 {
     let sf = f64::from(params.sf);
     let t_sym_ms = (2_f64.powf(sf) / f64::from(params.bw_hz)) * 1000.0;
@@ -372,10 +381,14 @@ fn semtech_time_on_air_ms(params: ToaParams) -> f64 {
     let ih = if params.implicit_header { 1.0 } else { 0.0 };
     let crc = if params.crc { 1.0 } else { 0.0 };
     let cr = f64::from(params.cr_denominator.saturating_sub(4));
-    let numerator = 8.0 * params.payload_len as f64 - 4.0 * sf + 28.0 + 16.0 * crc - 20.0 * ih;
-    let denominator = 4.0 * (sf - 2.0 * de);
+    let bits = 8.0 * params.payload_len as f64 - 4.0 * sf + 16.0 * crc - 20.0 * ih;
+    let (numerator, denominator, overhead) = if params.sf < 7 {
+        (bits + 20.0, 4.0 * sf, 6.25)
+    } else {
+        (bits + 28.0, 4.0 * (sf - 2.0 * de), 4.25)
+    };
     let payload_symbols = 8.0 + (numerator / denominator).ceil().max(0.0) * (cr + 4.0);
-    (f64::from(params.preamble_symbols) + 4.25 + payload_symbols) * t_sym_ms
+    (f64::from(params.preamble_symbols) + overhead + payload_symbols) * t_sym_ms
 }
 
 #[derive(Debug)]
@@ -534,3 +547,6 @@ impl OutputPin for GpioOutput {
         self.set_level(true).map_err(|_err| PinIoError)
     }
 }
+
+#[cfg(test)]
+mod tests;

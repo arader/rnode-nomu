@@ -1164,7 +1164,7 @@ daemon pointed at the same `air_dir` hears the others.
 
 ### Tests
 
-CI runs these six steps on every pull request, in this order:
+CI runs these eight checks on every pull request, in this order:
 
 ```sh
 cargo fmt --all --check
@@ -1172,6 +1172,10 @@ cargo build --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+cargo test --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml --locked
+uv venv --python python3 target/hwtest-venv &&
+  uv pip install --python target/hwtest-venv/bin/python --require-hashes -r tools/hwtest/requirements-test.txt &&
+  target/hwtest-venv/bin/python -m unittest discover -s tools/hwtest -p 'test_*.py' -v
 cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 ```
 
@@ -1194,11 +1198,18 @@ same steps with every scenario of that test, so every commit on `main` is checke
   starts two daemon processes on the simulated radio. It checks that KISS data frames of 1, 254,
   255 and 508 bytes travel between their PTYs in both directions, and that a 509-byte frame is
   dropped. It is part of `cargo test`, so it runs in CI.
-- The Python unit tests in [`tools/hwtest`](tools/hwtest) check the hardware test tools without
+- The unit tests in [`tools/hwtest`](tools/hwtest) check the hardware test tools without
   hardware or Reticulum. For the over-the-air LXMF echo test they cover the frequency and power
-  limits, the arguments, how it describes packets and matches them to the daemon's debug log, and,
-  with stand-ins for Reticulum and LXMF, path discovery, the identity file and the echo verdicts.
-  They need only the Python standard library.
+  limits, the arguments, how it describes packets, matches them to the daemon's debug log and
+  fails the run when one is missing there or failed to transmit, and, with stand-ins for Reticulum
+  and LXMF, path discovery, the identity file and the echo verdicts. For the capture analyzer they
+  check the Semtech time on air and the low-data-rate rule against the recorded hardware results,
+  and, on synthetic captures, burst detection, dechirping, the frequency offset and the report.
+  For the bring-up tool they check the frequency and power limits and the time on air. The Python
+  tests need only the standard library, except the analyzer's signal-processing tests, which need
+  numpy: CI runs the Python tests once without numpy, which skips those, and once with the numpy
+  release that `tools/hwtest/requirements-test.txt` pins. The bring-up tool's tests build only on
+  Linux. [`tools/hwtest/README.md`](tools/hwtest/README.md) says how to run them all.
 
 ### Reticulum end-to-end test
 
@@ -1269,7 +1280,7 @@ The aliases accept further `cargo llvm-cov` options, e.g. `cargo coverage -p rno
 ## Hardware test tools
 
 [`tools/hwtest`](tools/hwtest) holds the checks used to validate the SX1262 driver on the uConsole
-AIO V2, outside the Cargo workspace so that CI does not need Linux GPIO crates:
+AIO V2, outside the Cargo workspace (CI runs only their [unit tests](#tests)):
 
 - `sx126x-bringup` runs the driver directly, without the daemon: it resets and detects the modem,
   configures it, samples RSSI and carrier detect, transmits test frames and times them against the

@@ -1,0 +1,7 @@
+# Python packages for the unit tests of tools/hwtest: numpy, which lora_capture_analyze.py needs and
+# its signal-processing tests use. requirements-test.txt pins it with hashes for CI, whose Python is
+# 3.13; after changing this file, regenerate it from the repository root:
+#
+#   uv pip compile --universal --generate-hashes --python-version 3.13 \
+#     tools/hwtest/requirements-test.in -o tools/hwtest/requirements-test.txt
+numpy

@@ -11,7 +11,12 @@ import argparse
 import math
 from pathlib import Path
 
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    # Only the analysis needs numpy. Without it, the pure helpers (semtech_toa_ms(),
+    # low_data_rate()) still import, so their unit tests run on the standard library alone.
+    np = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -124,15 +129,31 @@ def refine_start(iq: np.ndarray, rough: int, sps: int, fs: float, bw: float) -> 
     return best
 
 
+def low_data_rate(sf: int, bw_hz: float) -> bool:
+    """Whether the transmitter uses low-data-rate optimisation, decided as RNode firmware does in
+    `sx126x::handleLowDataRate()`: `(1 << sf) / (bandwidth / 1000) > 16` in integer arithmetic, so
+    it is off at SF11/125 kHz although the symbol time there is 16.384 ms."""
+    return int((1 << sf) / (int(bw_hz) // 1000)) > 16
+
+
 def semtech_toa_ms(payload_len: int, sf: int, bw: float, cr_den: int, ldro: bool, preamble: int, implicit: bool = False, crc: bool = True) -> float:
+    """Time on air in ms by the SX126x formula, as Semtech's LoRaMac-node computes it
+    (`RadioGetLoRaTimeOnAirNumerator()` in src/radio/sx126x/radio.c). Below SF7 a frame has 2 more
+    symbols of overhead and no 8 extra bits in its block count, and LDRO does not apply."""
     tsym_ms = (2**sf / bw) * 1000.0
     de = 1 if ldro else 0
     ih = 1 if implicit else 0
     crc_i = 1 if crc else 0
-    numerator = 8 * payload_len - 4 * sf + 28 + 16 * crc_i - 20 * ih
-    denominator = 4 * (sf - 2 * de)
+    if sf < 7:
+        numerator = 8 * payload_len - 4 * sf + 20 + 16 * crc_i - 20 * ih
+        denominator = 4 * sf
+        overhead = 6.25
+    else:
+        numerator = 8 * payload_len - 4 * sf + 28 + 16 * crc_i - 20 * ih
+        denominator = 4 * (sf - 2 * de)
+        overhead = 4.25
     payload_symbols = 8 + max(math.ceil(numerator / denominator) * (cr_den - 4 + 4), 0)
-    return (preamble + 4.25 + payload_symbols) * tsym_ms
+    return (preamble + overhead + payload_symbols) * tsym_ms
 
 
 def occupied_bandwidth(iq: np.ndarray, fs: float) -> tuple[float, float]:
@@ -149,6 +170,8 @@ def occupied_bandwidth(iq: np.ndarray, fs: float) -> tuple[float, float]:
 
 
 def main() -> None:
+    if np is None:
+        raise SystemExit("lora_capture_analyze.py needs numpy: run it with `uv run --with numpy python ...`")
     args = parse_args()
     iq = load_cf32(args.capture, args.max_samples)
     expected_offset = args.carrier_hz - args.center_hz
@@ -156,7 +179,7 @@ def main() -> None:
     chips = 1 << args.sf
     sps = int(round(args.sample_rate * chips / args.bw_hz))
     actual_bw = args.sample_rate * chips / sps
-    ldro = int(chips / (int(args.bw_hz) // 1000)) > 16
+    ldro = low_data_rate(args.sf, args.bw_hz)
     expected_ms = semtech_toa_ms(args.payload_len, args.sf, args.bw_hz, args.cr, ldro, args.preamble)
     print(f"CAPTURE samples={iq.size} fs_hz={args.sample_rate:.3f} center_hz={args.center_hz:.0f} carrier_hz={args.carrier_hz:.0f} expected_offset_hz={expected_offset:.1f}")
     print(f"LORA sf={args.sf} bw_hz={args.bw_hz:.0f} samples_per_symbol={sps} actual_bw_from_sps_hz={actual_bw:.3f} ldro={bool(ldro)} expected_toa_ms={expected_ms:.3f}")
