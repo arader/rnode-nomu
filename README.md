@@ -1215,12 +1215,16 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
 cargo test --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml --locked
-uv venv --python python3 target/hwtest-venv &&
-  uv pip install --python target/hwtest-venv/bin/python --require-hashes -r tools/hwtest/requirements-test.txt &&
-  target/hwtest-venv/bin/python -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+uv venv --clear --python python3 target/hwtest-venv &&
+  uv pip install --python target/hwtest-venv/bin/python --require-hashes --no-build \
+    -r tools/hwtest/requirements-test.txt &&
+  HWTEST_REQUIRE_NUMPY=1 target/hwtest-venv/bin/python -m unittest discover -s tools/hwtest -p 'test_*.py' -v
 cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 ```
 
+The three `uv` lines are one check: CI makes the venv in a fresh temporary directory, while
+`--clear` here replaces the one an earlier run left. `--no-build` makes a missing numpy wheel fail
+the install instead of compiling numpy from source.
 The last one is the SF7 scenario of the [Reticulum end-to-end test](#reticulum-end-to-end-test).
 After every merge, CI on `main` ([`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml)) runs the
 same steps with every scenario of that test, so every commit on `main` is checked with all of them.

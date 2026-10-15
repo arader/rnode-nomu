@@ -110,10 +110,28 @@ ssh uconsole.local 'pinctrl set 7 op dl'
 
 `tools/hwtest/lora_capture_analyze.py` accepts SoapySDR CF32 captures and uses
 only numpy.  It detects bursts, mixes the configured carrier to baseband,
-dechirps against an ideal LoRa up-chirp, estimates frequency offset, reports
-99% occupied bandwidth, checks preamble up-chirps, derives the expected sync
-symbol bins from LoRa sync word `0x12` / SX126x registers `0x1424`, and verifies
-the following down-chirps.
+dechirps against ideal LoRa up- and down-chirps, reports 99% occupied
+bandwidth, checks preamble up-chirps, derives the expected sync symbol bins
+from LoRa sync word `0x12` / SX126x registers `0x1424`, and verifies the
+following down-chirps.
+
+It estimates the carrier offset from the preamble's up-chirps and the SFD's
+down-chirps together.  A start `t` samples late raises the dechirped up-chirps
+by `t * bw / sps` Hz and lowers the down-chirps as much, so their mean is the
+offset and half their difference the timing error, which corrects the start
+(`start_correction_samples`).  Up-chirps alone, as before #78, read each 8
+samples of timing error at 1 MS/s and SF7/125 kHz as one more bin (976.6 Hz) of
+offset.  `--preamble` must match the frame: when the down-chirps are not where
+it puts them, the offset is reported as `nan`.
+
+The IQ files behind the results below are gone, so the offsets they quote
+cannot be measured again; they came from up-chirps alone and may be several
+bins off.  A capture of the same setup that survives,
+`~/rnode-hw/run/captures/hw3_50_300.cfile` on the uConsole (2026-10-13, the
+daemon sending 51, 255 and 47-byte frames), shows how much: the old analyzer
+read +976.6, -2929.7 and +976.6 Hz for its three bursts, the fixed one -413.1,
+-416.0 and -413.2 Hz (-0.45 ppm), after correcting starts by -14, +19 and -13
+samples.
 
 ### On-air result, 2026-10-12
 
@@ -123,7 +141,8 @@ Capture: RTL-SDR at 1.000000 MS/s, center 915.075 MHz, gain 0 dB, carrier
 Analyzer output for the clean burst:
 
 - burst duration 114.253 ms vs 113.920 ms Semtech ToA (`+0.333 ms`);
-- frequency offset -2929.7 Hz, -3.202 ppm relative to 914.875 MHz;
+- frequency offset -2929.7 Hz, -3.202 ppm relative to 914.875 MHz, from
+  up-chirps alone: uncertain by several bins of 976.6 Hz (#78, see above);
 - 99% occupied bandwidth 125793 Hz;
 - 24/24 expected preamble up-chirps detected, median dechirp SNR 61.3 dB;
 - sync bins `[8, 16]`, matching LoRa sync word `0x12` at SF7 (`0x1 * 128/16`,
@@ -281,12 +300,15 @@ Notes:
 CI runs the unit tests of these tools, which need neither hardware nor
 Reticulum: the Python tests twice, with the standard library alone and with
 the numpy release that `requirements-test.txt` pins, and the bring-up tool's
-Rust tests.  To run them as CI does, from the repository root:
+Rust tests.  To run them as CI does, from the repository root (`--clear`
+replaces the venv of an earlier run, where CI starts from a fresh directory;
+`--no-build` makes a missing numpy wheel fail the install instead of compiling
+numpy):
 
 ```sh
 python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
-uv venv --python python3 target/hwtest-venv
-uv pip install --python target/hwtest-venv/bin/python --require-hashes \
+uv venv --clear --python python3 target/hwtest-venv
+uv pip install --python target/hwtest-venv/bin/python --require-hashes --no-build \
   -r tools/hwtest/requirements-test.txt
 HWTEST_REQUIRE_NUMPY=1 target/hwtest-venv/bin/python -m unittest discover \
   -s tools/hwtest -p 'test_*.py' -v
@@ -303,7 +325,8 @@ cargo test --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml --locked
   results above and, for SF5 and SF6, where the SX1262 differs from the SX127x,
   against Semtech's LoRaMac-node; these need only the standard library.  Its
   signal-processing tests build synthetic captures of LoRa frames and check
-  burst detection, dechirping, the frequency offset and the analyzer's report.
+  burst detection, dechirping, the carrier offset and timing, also at the SNR
+  of the captures above, and the analyzer's report.
   They need numpy and are skipped without it; `HWTEST_REQUIRE_NUMPY=1` makes a
   numpy that does not import an error instead.  `requirements-test.in` says how
   to move the numpy pin.

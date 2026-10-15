@@ -21,6 +21,9 @@ Analyzer results for captures/stage3_split2.cfile (IQ not committed):
 - Preamble: 24/24 expected upchirps detected on every burst, median dechirp SNR about 61-62 dB.
 - Sync: bins [8, 16] on every burst, matching LoRa sync word 0x12 / SX126x registers 0x1424.
 - Frequency offset estimates: mostly +/-976.6 Hz, final burst -2929.7 Hz; all within RTL-SDR tolerance.
+  These came from up-chirps alone, which read timing error as offset (#78), so each may be several
+  bins of 976.6 Hz off; the IQ file is gone. tools/hwtest/README.md has a surviving capture of the
+  same setup re-analysed.
 
 Representative analyzer lines:
 

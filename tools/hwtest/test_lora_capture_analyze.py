@@ -277,6 +277,46 @@ class FrequencyOffset(unittest.TestCase):
 
 
 @needs_numpy
+class TimingAndOffset(unittest.TestCase):
+    """align_frame() separates the carrier offset from the timing error (#78): up-chirps alone read a
+    start 8 samples late as one bin more offset, down-chirps as one bin less."""
+
+    OFFSET_HZ = -2600.0  # 2.66 bins: off the FFT grid
+
+    def test_fine_peak_resolves_a_fraction_of_a_bin(self):
+        up = analyze.reference_chirp(SPS, BW, FS, up=True)
+        t = np.arange(SPS) / FS
+        for bins in (-2.7, 0.3, 5.5):
+            with self.subTest(bins=bins):
+                tone = chirp(0) * np.exp(2j * np.pi * bins * BIN_HZ * t)
+                peak_hz, snr_db = analyze.fine_peak_freq(tone, up, FS, BW / 2)
+                self.assertLess(abs(peak_hz - bins * BIN_HZ), 0.5)
+                self.assertGreater(snr_db, 60)
+
+    def test_offset_and_start_from_any_start_the_search_finds(self):
+        # Noise 30 dB below the signal gives the README captures' dechirp SNR, where the search's start
+        # was off by -30 to +34 samples; 20 dB below, by up to 196 samples. Whole symbols out too, and
+        # nearly half a symbol, which takes the second pass.
+        for noise_db in (-30.0, -20.0):
+            iq, spans = capture(60_000, frame(), 60_000, shift_hz=self.OFFSET_HZ, noise_db=noise_db)
+            start = spans[0][0]
+            for error in (-SPS - 5, -465, -300, -37, 0, 13, 150, 300, 544, SPS + 9):
+                with self.subTest(noise_db=noise_db, error=error):
+                    aligned, offset_hz, up_hz = analyze.align_frame(iq, start + error, math.nan, SPS, FS, BW, 24)
+                    self.assertEqual(aligned, start)
+                    self.assertLess(abs(offset_hz - self.OFFSET_HZ), 2)
+                    self.assertLess(abs(up_hz - self.OFFSET_HZ), 2)
+
+    def test_without_down_chirps_the_offset_is_unknown(self):
+        # --preamble 18 for 24 preamble symbols: symbols 20 and 21 are up-chirps, not the SFD.
+        iq, spans = capture(60_000, frame(), 60_000, noise_db=-30.0)
+        start = spans[0][0] + 13
+        aligned, offset_hz, up_hz = analyze.align_frame(iq, start, 1234.0, SPS, FS, BW, 18)
+        self.assertEqual((aligned, up_hz), (start, 1234.0))
+        self.assertTrue(math.isnan(offset_hz))
+
+
+@needs_numpy
 class Helpers(unittest.TestCase):
     def test_robust_threshold(self):
         # Median plus the larger of 8 median absolute deviations and 4 medians.
@@ -305,7 +345,7 @@ class AnalyzerOutput(unittest.TestCase):
     """main() on a synthetic capture of two 2-byte frames, recorded as in the README: the SDR
     centred 200 kHz above the carrier."""
 
-    def analyze(self, iq):
+    def analyze(self, iq, *extra):
         scratch = tempfile.mkdtemp(prefix=".scratch-", dir=HERE)
         self.addCleanup(shutil.rmtree, scratch)
         path = os.path.join(scratch, "capture.cfile")
@@ -320,6 +360,7 @@ class AnalyzerOutput(unittest.TestCase):
             "--cr", "5",
             "--payload-len", "2",
             "--preamble", "24",
+            *extra,
         ]
         stdout = io.StringIO()
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(stdout):
@@ -330,6 +371,9 @@ class AnalyzerOutput(unittest.TestCase):
     def fields(line):
         return dict(re.findall(r"(\w+)=(\[[^\]]*\]|\S+)", line))
 
+    def bursts(self, lines):
+        return [self.fields(line) for line in lines if line.startswith("BURST index=")]
+
     def test_reports_each_frame(self):
         iq, spans = capture(60_000, frame(), 50_000, frame(PAYLOAD[::-1]), 70_000, shift_hz=OFFSET_HZ - 200_000)
         lines = self.analyze(iq)
@@ -338,11 +382,11 @@ class AnalyzerOutput(unittest.TestCase):
             (lora["samples_per_symbol"], lora["ldro"], lora["expected_toa_ms"]), ("1024", "False", "47.360")
         )
         self.assertIn("BURSTS detected=2", lines)
-        bursts = [self.fields(line) for line in lines if line.startswith("BURST index=")]
+        bursts = self.bursts(lines)
         self.assertEqual(len(bursts), 2)
         for burst, (start, _end) in zip(bursts, spans):
             with self.subTest(index=burst["index"]):
-                self.assertLess(abs(int(burst["start_sample"]) - start), 8)
+                self.assertEqual(int(burst["start_sample"]), start)
                 # Padding and the moving average lengthen a burst by at most its window.
                 self.assertTrue(0 <= float(burst["toa_delta_ms"]) <= WINDOW / FS * 1000, burst["toa_delta_ms"])
                 self.assertEqual((burst["freq_offset_hz"], burst["freq_offset_ppm"]), ("-2929.7", "-3.202"))
@@ -350,6 +394,33 @@ class AnalyzerOutput(unittest.TestCase):
                 self.assertEqual((burst["sync_bins"], burst["expected_sync_bins"]), ("[8, 16]", "[8, 16]"))
                 self.assertTrue(0.99 * BW <= float(burst["occupied_bw_99pct_hz"]) <= 1.1 * BW, burst)
                 self.assertTrue(all(snr > 40 for snr in json.loads(burst["downchirp_snr_db"])), burst)
+
+    def test_reports_the_offset_at_the_snr_of_the_readme_captures(self):
+        # Noise 30 dB below the signal gives the README captures' dechirp SNR. There the search's
+        # start is tens of samples out, which up-chirps alone read as bins of offset (#78); and
+        # an offset off the FFT grid needs the fine peaks.
+        offset_hz = -2600.0
+        iq, spans = capture(
+            60_000, frame(), 50_000, frame(PAYLOAD[::-1]), 70_000, shift_hz=offset_hz - 200_000, noise_db=-30.0
+        )
+        bursts = self.bursts(self.analyze(iq))
+        self.assertEqual(len(bursts), 2)
+        self.assertTrue(any(int(burst["start_correction_samples"]) != 0 for burst in bursts), bursts)
+        for burst, (start, _end) in zip(bursts, spans):
+            with self.subTest(index=burst["index"]):
+                self.assertEqual(int(burst["start_sample"]), start)
+                self.assertLess(abs(float(burst["freq_offset_hz"]) - offset_hz), 2)
+                self.assertEqual(burst["freq_offset_ppm"], f"{offset_hz / 914_875_000 * 1e6:.3f}")
+                self.assertEqual(burst["preamble_upchirps"], "24/24")
+                self.assertEqual((burst["sync_bins"], burst["expected_sync_bins"]), ("[8, 16]", "[8, 16]"))
+
+    def test_a_wrong_preamble_leaves_the_offset_unknown(self):
+        # With --preamble 18 for 24 preamble symbols, no down-chirps are where the SFD should be.
+        iq, _ = capture(60_000, frame(), 60_000, shift_hz=OFFSET_HZ - 200_000)
+        (burst,) = self.bursts(self.analyze(iq, "--preamble", "18"))
+        self.assertEqual((burst["freq_offset_hz"], burst["freq_offset_ppm"]), ("nan", "nan"))
+        self.assertEqual(burst["start_correction_samples"], "0")
+        self.assertNotEqual(burst["sync_bins"], burst["expected_sync_bins"])
 
 
 if __name__ == "__main__":
