@@ -1,5 +1,5 @@
-//! Lazy formatting for the node's log lines: the per-packet debug and trace logs, and the radio
-//! settings in the online and offline lines.
+//! Lazy formatting for the node's log lines: the per-packet debug and trace logs, durations, and
+//! the radio settings in the online and offline lines.
 //!
 //! These types implement [`fmt::Display`] and are passed to the `log` macros as format arguments,
 //! so nothing is formatted unless a logger has the record's level enabled.
@@ -78,6 +78,20 @@ impl fmt::Display for HexDump<'_> {
             f.write_char('|')?;
         }
         Ok(())
+    }
+}
+
+/// A duration in ms, as `12 ms` below a second and `10.0 s` (rounded to 0.1 s) from there.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Elapsed(pub u64);
+
+impl fmt::Display for Elapsed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 < 1_000 {
+            return write!(f, "{} ms", self.0);
+        }
+        let tenths = self.0.saturating_add(50) / 100;
+        write!(f, "{}.{} s", tenths / 10, tenths % 10)
     }
 }
 

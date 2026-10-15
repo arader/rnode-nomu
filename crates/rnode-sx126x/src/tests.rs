@@ -555,6 +555,106 @@ fn poll_rx_paths_and_single_fifo_read() {
     assert_eq!(fifo_reads, 1);
 }
 
+/// The SPI transactions so far, emptying the log.
+fn take_transactions(spi: &MockSpi) -> Vec<Vec<OpLog>> {
+    std::mem::take(&mut spi.0.borrow_mut().log)
+}
+
+/// Firmware `handleDio0Rise()`: GetIrqStatus, then ClearIrqStatus with the flags read; a frame
+/// whose CrcErr flag (0x40) is set goes no further. The driver counts it for
+/// `take_rx_crc_errors()` and reads its GetPacketStatus, which the firmware's `packetRssi()` and
+/// `packetSnrRaw()` would read for a good frame.
+#[test]
+fn poll_rx_counts_crc_errors_with_their_packet_status() {
+    let (mut radio, spi, _, _) = dev(Config::default());
+    assert_eq!(radio.take_rx_crc_errors(), RxCrcErrors::default());
+
+    spi.push(&[0x00, IRQ_RX_DONE_MASK | IRQ_PAYLOAD_CRC_ERROR_MASK]);
+    spi.push(&[0xc2, 0xf3, 0x00]); // RssiPkt 194 / 2 → -97 dBm, SnrPkt -13 → -3.25 dB.
+    assert_eq!(radio.poll_rx().unwrap(), None);
+    assert_eq!(
+        take_transactions(&spi),
+        [
+            vec![OpLog::Write(vec![0x12, 0x00]), OpLog::Read(2)],
+            vec![OpLog::Write(vec![0x02, 0x00, 0x42])],
+            vec![OpLog::Write(vec![0x14, 0x00]), OpLog::Read(3)],
+        ]
+    );
+    let signal = |rssi_dbm, snr_raw| Some(RxSignal { rssi_dbm, snr_raw });
+    assert_eq!(
+        radio.take_rx_crc_errors(),
+        RxCrcErrors {
+            count: 1,
+            last: signal(-97, 0xf3)
+        }
+    );
+    assert_eq!(radio.take_rx_crc_errors(), RxCrcErrors::default(), "taken");
+
+    // Counted until taken, with the signal of the last one; nothing pending counts nothing.
+    for status in [[0x50, 0x28, 0x00], [0x8d, 0xd0, 0x00]] {
+        spi.push(&[0x00, IRQ_RX_DONE_MASK | IRQ_PAYLOAD_CRC_ERROR_MASK]);
+        spi.push(&status);
+        assert_eq!(radio.poll_rx().unwrap(), None);
+    }
+    spi.push(&[0x00, 0x00]);
+    assert_eq!(radio.poll_rx().unwrap(), None);
+    assert_eq!(
+        radio.take_rx_crc_errors(),
+        RxCrcErrors {
+            count: 2,
+            last: signal(-70, 0xd0)
+        }
+    );
+}
+
+/// A good frame gets the same transactions as before CRC errors were counted, and is not counted.
+#[test]
+fn poll_rx_good_frame_transactions_are_unchanged() {
+    let (mut radio, spi, _, _) = dev(Config::default());
+    spi.push(&[0x00, IRQ_RX_DONE_MASK]);
+    spi.push(&[3, 5]);
+    spi.push(&[0xaa, 0xbb, 0xcc]);
+    spi.push(&[100, 0xfc, 0]);
+    let frame = radio.poll_rx().unwrap().unwrap();
+    assert_eq!(
+        (frame.data, frame.rssi_dbm, frame.snr_raw),
+        (vec![0xaa, 0xbb, 0xcc], -50, 0xfc)
+    );
+    assert_eq!(
+        take_transactions(&spi),
+        [
+            vec![OpLog::Write(vec![0x12, 0x00]), OpLog::Read(2)],
+            vec![OpLog::Write(vec![0x02, 0x00, 0x02])],
+            vec![OpLog::Write(vec![0x13, 0x00]), OpLog::Read(2)],
+            vec![OpLog::Write(vec![0x1e, 5, 0x00]), OpLog::Read(3)],
+            vec![OpLog::Write(vec![0x14, 0x00]), OpLog::Read(3)],
+        ]
+    );
+    assert_eq!(radio.take_rx_crc_errors(), RxCrcErrors::default());
+}
+
+/// A CRC error still counts when its packet status cannot be read; the read's error is returned,
+/// and the signal is unknown rather than that of an earlier frame.
+#[test]
+fn poll_rx_crc_error_with_a_failed_status_read() {
+    let spi = MockSpi::default();
+    let mut radio: Sx126x<_, _, _, NoPin, _> = Sx126x::new(
+        spi.clone(),
+        // BUSY low for GetIrqStatus and ClearIrqStatus, then stuck high.
+        MockInput::busy([false, false, true, true, true]),
+        MockOutput::default(),
+        None,
+        MockDelay::default(),
+        Config {
+            busy_timeout_ms: 2,
+            ..Config::default()
+        },
+    );
+    spi.push(&[0x00, IRQ_RX_DONE_MASK | IRQ_PAYLOAD_CRC_ERROR_MASK]);
+    assert_eq!(radio.poll_rx().unwrap_err(), Error::BusyTimeout);
+    assert_eq!(radio.take_rx_crc_errors(), RxCrcErrors { count: 1, last: None });
+}
+
 #[test]
 fn dcd_expires_stale_preamble_and_reenters_receive() {
     let (mut radio, spi, _, _) = dev(Config::default());

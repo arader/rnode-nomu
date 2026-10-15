@@ -105,6 +105,7 @@ fn run_sim(config: Config, seed: u64, shutdown: &std::sync::atomic::AtomicBool) 
         rssi_dbm: config.radio.sim.rssi_dbm,
         snr_db: config.radio.sim.snr_db,
         loss: config.radio.sim.loss,
+        crc_error: config.radio.sim.crc_error,
         seed,
     };
     let radio = SimRadio::new(sim_config).context("open simulated radio")?;

@@ -24,6 +24,25 @@ pub enum TxOutcome {
     Timeout,
 }
 
+/// The signal of a received frame, in the units of [`RxFrame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RxSignal {
+    /// Packet RSSI in dBm (firmware `packetRssi()`).
+    pub rssi_dbm: i16,
+    /// Raw packet SNR byte: two's complement, in units of 0.25 dB (firmware `packetSnrRaw()`).
+    pub snr_raw: u8,
+}
+
+/// Received frames that [`Radio::poll_rx`] dropped because their payload CRC failed, as
+/// returned by [`Radio::take_rx_crc_errors`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RxCrcErrors {
+    /// How many frames failed their payload CRC.
+    pub count: u32,
+    /// The signal of the last of them, if the driver read the modem's packet status for it.
+    pub last: Option<RxSignal>,
+}
+
 /// A LoRa modem as seen by the RNode logic.
 ///
 /// The methods mirror the subset of the firmware's modem drivers (`sx126x.cpp`, `sx127x.cpp`)
@@ -103,9 +122,19 @@ pub trait Radio {
 
     /// Service the modem's receive interrupt (firmware `handleDio0Rise()`): if a packet has
     /// been received, clear the interrupt flags and return it with its RSSI/SNR. Packets that
-    /// failed the CRC are dropped (`Ok(None)`). Returns `Ok(None)` without side effects when
-    /// nothing was received, so it is safe to call on every poll.
+    /// failed the CRC are dropped (`Ok(None)`) and counted for [`Radio::take_rx_crc_errors`].
+    /// Returns `Ok(None)` without side effects when nothing was received, so it is safe to call
+    /// on every poll.
     fn poll_rx(&mut self) -> Result<Option<RxFrame>, Self::Error>;
+
+    /// Take the count of received frames that [`Radio::poll_rx`] dropped because their payload
+    /// CRC failed, since the last call, with the signal of the last one if the driver read it.
+    /// The firmware's `handleDio0Rise()` drops such frames without a trace; the node logs them at
+    /// debug level. Drivers that cannot tell a CRC failure apart keep this default, which reports
+    /// none.
+    fn take_rx_crc_errors(&mut self) -> RxCrcErrors {
+        RxCrcErrors::default()
+    }
 
     /// Carrier detect (firmware `dcd()`): whether a LoRa preamble or header is currently being
     /// received. `now_ms` is the monotonic clock used to expire stale preamble detections

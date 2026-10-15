@@ -203,6 +203,21 @@ fn config_validation_allows_sim_without_hardware_sections() {
 }
 
 #[test]
+fn sim_crc_error_defaults_to_none_and_is_a_probability() {
+    let sim = |table: &str| Config::from_toml(&format!("[radio]\ndriver = \"sim\"\n[radio.sim]\n{table}\n"));
+    assert_eq!(sim("").unwrap().radio.sim.crc_error, 0.0);
+    assert_eq!(sim("crc_error = 0.25").unwrap().radio.sim.crc_error, 0.25);
+    assert_eq!(sim("crc_error = 1.0").unwrap().radio.sim.crc_error, 1.0);
+    for value in ["-0.1", "1.5", "nan"] {
+        let err = sim(&format!("crc_error = {value}")).unwrap_err().to_string();
+        assert!(
+            err.contains("radio.sim.crc_error must be between 0.0 and 1.0"),
+            "{value}: {err}"
+        );
+    }
+}
+
+#[test]
 fn sx1262_driver_config_inherits_driver_timeouts_when_unset() {
     // Firmware `sx126x::waitOnBusy()` gives up after 100 ms; `LORA_MODEM_TIMEOUT_MS` is 20E3.
     let driver_defaults = rnode_sx126x::Config::default();

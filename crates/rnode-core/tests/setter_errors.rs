@@ -247,3 +247,67 @@ fn a_setter_failing_at_start_up_keeps_what_begin_programmed() {
         [cmd(CMD_BANDWIDTH, &125_000u32.to_be_bytes()), plain(CMD_SF, &[7])].concat()
     );
 }
+
+/// The same for TX power and coding rate (#74 review): `begin()` leaves the simulated modem at
+/// 2 dBm and CR 4/5, and the first packet's airtime is charged at CR 4/5, 121 as in
+/// `a_failed_setter_keeps_the_last_accepted_value`; at CR 4/8 it would be 180 (271 ms of 15 s).
+#[test]
+fn tx_power_and_coding_rate_failing_at_start_up_keep_what_begin_programmed() {
+    let medium = SimMedium::new();
+    let mut n = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
+    n.radio_mut().inject_setter_errors(Setter::TxPower, 1);
+    n.radio_mut().inject_setter_errors(Setter::CodingRate, 1);
+    let cap = capture(LevelFilter::Info);
+    let config = [
+        cmd(CMD_FREQUENCY, &867_200_000u32.to_be_bytes()),
+        cmd(CMD_BANDWIDTH, &125_000u32.to_be_bytes()),
+        plain(CMD_TXPOWER, &[17]),
+        plain(CMD_SF, &[7]),
+        plain(CMD_CR, &[8]),
+    ]
+    .concat();
+    n.handle_host_input(&config, 0);
+    assert_eq!(n.take_host_output(), config, "offline, each request is echoed as sent");
+    assert_eq!(
+        (n.radio().tx_power(), n.radio().coding_rate()),
+        (2, 5),
+        "no setter is called"
+    );
+
+    n.handle_host_input(&plain(CMD_RADIO_STATE, &[RADIO_STATE_ON]), 0);
+    assert_eq!(
+        n.take_host_output(),
+        [
+            cmd(CMD_STAT_PHYPRM, &PHYPRM_125K_SF7),
+            plain(CMD_RADIO_STATE, &[RADIO_STATE_ON]),
+        ]
+        .concat()
+    );
+    assert_eq!(
+        lines(&cap.take()),
+        [
+            (
+                Level::Warn,
+                "radio set_tx_power(17 dBm) failed: simulated set_tx_power error; keeping 2 dBm"
+            ),
+            (
+                Level::Warn,
+                "radio set_coding_rate(CR 4/8) failed: simulated set_coding_rate error; keeping CR 4/5"
+            ),
+            (
+                Level::Info,
+                "radio online (host request): 867.2 MHz, 125 kHz, SF7, CR 4/5, 2 dBm"
+            ),
+        ]
+    );
+    assert_eq!((n.radio().tx_power(), n.radio().coding_rate()), (2, 5));
+    n.handle_host_input(&[plain(CMD_TXPOWER, &[0xFF]), plain(CMD_CR, &[0xFF])].concat(), 0);
+    assert_eq!(
+        n.take_host_output(),
+        [plain(CMD_TXPOWER, &[2]), plain(CMD_CR, &[5])].concat()
+    );
+
+    n.handle_host_input(&data(&[0x5A; 99]), 0);
+    run_until_sent(&mut n, &medium);
+    assert_eq!(last_chtm_airtime(&n.take_host_output()), 121);
+}

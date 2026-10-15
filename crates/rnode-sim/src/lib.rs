@@ -19,7 +19,7 @@
 //! after DCD falls so that a delayed frame-complete datagram still delivers the frame.
 
 use rnode_core::phy::{self, Modulation, PhyParams};
-use rnode_core::{Radio, RxFrame, TxOutcome};
+use rnode_core::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -78,12 +78,18 @@ pub struct SimConfig {
     pub snr_db: f32,
     /// Probability in `0.0..=1.0` that an otherwise valid received frame is dropped.
     pub loss: f32,
-    /// Seed for deterministic receive loss.
+    /// Probability in `0.0..=1.0` that an otherwise valid received frame that was not lost fails
+    /// its payload CRC: like a modem, the radio raises its receive interrupt, drops the frame in
+    /// [`Radio::poll_rx`]'s place and counts it, with its RSSI and SNR, for
+    /// [`Radio::take_rx_crc_errors`].
+    pub crc_error: f32,
+    /// Seed for deterministic receive loss and CRC errors.
     pub seed: u64,
 }
 
 impl SimConfig {
-    /// Build a config with firmware-test-friendly defaults (`RSSI=-60`, `SNR=8`, no loss).
+    /// Build a config with firmware-test-friendly defaults (`RSSI=-60`, `SNR=8`, no loss, no
+    /// CRC errors).
     pub fn new(air_dir: impl Into<PathBuf>, node_name: impl Into<String>) -> Self {
         Self {
             air_dir: air_dir.into(),
@@ -91,6 +97,7 @@ impl SimConfig {
             rssi_dbm: -60,
             snr_db: 8.0,
             loss: 0.0,
+            crc_error: 0.0,
             seed: 0,
         }
     }
@@ -159,6 +166,7 @@ struct Inner {
     carriers: HashMap<String, Carrier>,
     rng: u64,
     current_rssi_dbm: i16,
+    crc_errors: RxCrcErrors,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +307,7 @@ impl Inner {
             carriers: HashMap::new(),
             rng: seed,
             current_rssi_dbm: NOISE_FLOOR_DBM,
+            crc_errors: RxCrcErrors::default(),
         }
     }
 
@@ -355,14 +364,23 @@ impl Inner {
     }
 
     fn loss_drop(&mut self) -> bool {
-        if self.config.loss <= 0.0 {
+        self.chance(self.config.loss)
+    }
+
+    fn crc_error(&mut self) -> bool {
+        self.chance(self.config.crc_error)
+    }
+
+    /// True with probability `p`, drawing from the seeded generator only when `p` is strictly
+    /// between 0 and 1, so that a setting of 0 leaves the other draws as they were.
+    fn chance(&mut self, p: f32) -> bool {
+        if p <= 0.0 {
             return false;
         }
-        if self.config.loss >= 1.0 {
+        if p >= 1.0 {
             return true;
         }
-        let sample = self.next_unit_f32();
-        sample < self.config.loss
+        self.next_unit_f32() < p
     }
 
     fn next_unit_f32(&mut self) -> f32 {
@@ -556,6 +574,13 @@ impl Radio for SimRadio {
         Ok(frame)
     }
 
+    fn take_rx_crc_errors(&mut self) -> RxCrcErrors {
+        self.inner
+            .lock()
+            .map(|mut inner| std::mem::take(&mut inner.crc_errors))
+            .unwrap_or_default()
+    }
+
     fn dcd(&mut self, _now_ms: u64) -> Result<bool, Self::Error> {
         let mut inner = self.inner.lock().map_err(|_| SimError::Poisoned)?;
         Ok(inner.refresh_carrier_sense())
@@ -633,12 +658,19 @@ fn handle_air_packet(inner: &Arc<Mutex<Inner>>, irq: &UnixDatagram, header: AirH
             if !inner.accepts_frame(&header, payload.len()) || inner.loss_drop() {
                 return;
             }
+            let snr_raw = (inner.config.snr_db * 4.0).round() as i8 as u8;
+            let rssi_dbm = inner.config.rssi_dbm;
+            if inner.crc_error() {
+                // A modem raises RX done for a frame that fails its CRC too; its driver drops it.
+                inner.crc_errors.count = inner.crc_errors.count.saturating_add(1);
+                inner.crc_errors.last = Some(RxSignal { rssi_dbm, snr_raw });
+                let _ = irq.send(&[1]);
+                return;
+            }
             if inner.rx_queue.len() >= MAX_RX_QUEUE {
                 log::debug!("sim radio rx queue full; dropping frame from {}", header.sender);
                 return;
             }
-            let snr_raw = (inner.config.snr_db * 4.0).round() as i8 as u8;
-            let rssi_dbm = inner.config.rssi_dbm;
             inner.rx_queue.push_back(RxFrame {
                 data: payload,
                 rssi_dbm,

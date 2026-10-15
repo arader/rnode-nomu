@@ -17,7 +17,7 @@
 
 use core::fmt;
 
-use crate::packet_log::plural;
+use crate::packet_log::{Elapsed, plural};
 
 /// How often a failing call is summarised, and how long it must work before it counts as
 /// recovered.
@@ -97,19 +97,5 @@ impl FaultLog {
             );
         }
         self.episode = None;
-    }
-}
-
-/// A duration in ms, as `12 ms` below a second and `10.0 s` (rounded to 0.1 s) from there.
-#[derive(Debug, Clone, Copy)]
-struct Elapsed(u64);
-
-impl fmt::Display for Elapsed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 < 1_000 {
-            return write!(f, "{} ms", self.0);
-        }
-        let tenths = self.0.saturating_add(50) / 100;
-        write!(f, "{}.{} s", tenths / 10, tenths % 10)
     }
 }

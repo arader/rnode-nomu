@@ -4,7 +4,7 @@
 //! [`SimMedium`]; transmissions are immediately queued at all compatible peer radios and mark the
 //! channel busy for a deterministic airtime window, allowing CSMA wait/error paths to be tested.
 
-use crate::radio::{Radio, RxFrame, TxOutcome};
+use crate::radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -70,6 +70,13 @@ struct MediumState {
     radios: HashMap<usize, Endpoint>,
 }
 
+/// What a radio receives: a frame, or one that fails its payload CRC.
+#[derive(Debug)]
+enum Rx {
+    Frame(RxFrame),
+    CrcError(Option<RxSignal>),
+}
+
 #[derive(Debug)]
 struct Endpoint {
     frequency: u32,
@@ -81,7 +88,7 @@ struct Endpoint {
     crc: bool,
     implicit: Option<u8>,
     online: bool,
-    rx: VecDeque<RxFrame>,
+    rx: VecDeque<Rx>,
 }
 
 impl Default for Endpoint {
@@ -156,6 +163,7 @@ impl SimMedium {
             rssi_failures: 0,
             rx_failures: 0,
             setter_failures: [0; Setter::COUNT],
+            crc_errors: RxCrcErrors::default(),
         }
     }
 }
@@ -177,6 +185,7 @@ pub struct SimRadio {
     rssi_failures: usize,
     rx_failures: usize,
     setter_failures: [usize; Setter::COUNT],
+    crc_errors: RxCrcErrors,
 }
 
 impl SimRadio {
@@ -249,6 +258,8 @@ impl SimRadio {
         self.with_ep(|e| e.online)
     }
 
+    /// Received frames waiting for [`Radio::poll_rx`], including those injected with
+    /// [`SimRadio::inject_rx_crc_error`].
     pub fn queued_rx(&self) -> usize {
         self.medium.0.borrow().radios.get(&self.id).map_or(0, |e| e.rx.len())
     }
@@ -259,12 +270,20 @@ impl SimRadio {
 
     pub fn inject_rx(&self, data: Vec<u8>, rssi_dbm: i16, snr_raw: u8) {
         self.with_ep_mut(|e| {
-            e.rx.push_back(RxFrame {
+            e.rx.push_back(Rx::Frame(RxFrame {
                 data,
                 rssi_dbm,
                 snr_raw,
-            })
+            }))
         });
+    }
+
+    /// Test aid: queue a received frame that fails its payload CRC. Like a hardware driver,
+    /// [`Radio::poll_rx`] drops it with `Ok(None)` in its turn and counts it for
+    /// [`Radio::take_rx_crc_errors`], with `signal` as the signal it read for the frame (`None`
+    /// for a driver that could not read it).
+    pub fn inject_rx_crc_error(&self, signal: Option<RxSignal>) {
+        self.with_ep_mut(|e| e.rx.push_back(Rx::CrcError(signal)));
     }
 
     fn with_ep<T>(&self, f: impl FnOnce(&Endpoint) -> T) -> T {
@@ -410,11 +429,11 @@ impl Radio for SimRadio {
         st.busy_until_ms = st.busy_until_ms.max(now + st.tx_duration_ms);
         for (&id, ep) in st.radios.iter_mut() {
             if id != self.id && ep.online && ep.frequency == freq && ep.bandwidth == bw && ep.sf == sf {
-                ep.rx.push_back(RxFrame {
+                ep.rx.push_back(Rx::Frame(RxFrame {
                     data: frame.to_vec(),
                     rssi_dbm: -42,
                     snr_raw: 0x20,
-                });
+                }));
             }
         }
         Ok(TxOutcome::Done)
@@ -424,7 +443,18 @@ impl Radio for SimRadio {
         if Self::take_failure(&mut self.rx_failures) {
             return Err(SimError::Injected("simulated RX error"));
         }
-        Ok(self.with_ep_mut(|e| e.rx.pop_front()))
+        match self.with_ep_mut(|e| e.rx.pop_front()) {
+            Some(Rx::Frame(frame)) => Ok(Some(frame)),
+            Some(Rx::CrcError(signal)) => {
+                self.crc_errors.count = self.crc_errors.count.saturating_add(1);
+                self.crc_errors.last = signal;
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+    fn take_rx_crc_errors(&mut self) -> RxCrcErrors {
+        std::mem::take(&mut self.crc_errors)
     }
     fn dcd(&mut self, now_ms: u64) -> Result<bool, Self::Error> {
         if Self::take_failure(&mut self.dcd_failures) {

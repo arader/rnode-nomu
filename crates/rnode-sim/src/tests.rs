@@ -695,3 +695,62 @@ fn irq_fd_becomes_readable_when_frame_completes() {
     }
     assert!(ready);
 }
+
+#[test]
+fn crc_errors_are_counted_with_the_receiver_signal_instead_of_delivered() {
+    let dir = AirDir::new("crc");
+    let mut a = radio(&dir, "a");
+    let mut cfg = SimConfig::new(&dir.path, "b");
+    cfg.rssi_dbm = -73;
+    cfg.snr_db = 5.25;
+    cfg.crc_error = 1.0;
+    let mut b = SimRadio::new(cfg).expect("radio");
+    b.begin(915_000_000).expect("begin");
+    b.set_bandwidth(500_000).expect("bw");
+    b.receive(None).expect("rx");
+    let irq = UnixDatagram::from(b.irq_fd().try_clone_to_owned().expect("irq fd"));
+    irq.set_nonblocking(true).expect("nonblocking");
+    assert_eq!(b.take_rx_crc_errors(), RxCrcErrors::default());
+
+    a.transmit(b"bad", false).expect("tx");
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut errors = RxCrcErrors::default();
+    while errors.count == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+        errors = b.take_rx_crc_errors();
+    }
+    assert_eq!(
+        errors,
+        RxCrcErrors {
+            count: 1,
+            last: Some(RxSignal {
+                rssi_dbm: -73,
+                snr_raw: 21
+            })
+        }
+    );
+    // The receive interrupt fired, as a modem's does, but there is no frame to read.
+    assert!(irq.recv(&mut [0u8; 8]).is_ok(), "IRQ raised");
+    assert_eq!(b.poll_rx().expect("poll"), None);
+    assert_eq!(b.take_rx_crc_errors(), RxCrcErrors::default(), "taken");
+}
+
+#[test]
+fn seeded_crc_errors_are_deterministic_and_leave_loss_draws_alone() {
+    let draws = |loss: f32, crc_error: f32| {
+        let mut config = SimConfig::new("target/not-used", "crc");
+        config.loss = loss;
+        config.crc_error = crc_error;
+        config.seed = 1;
+        let mut inner = Inner::new(config);
+        (0..10)
+            .map(|_| (inner.loss_drop(), inner.crc_error()))
+            .collect::<Vec<_>>()
+    };
+    let lost = [true, false, false, true, false, false, false, true, false, true];
+    // The sequence of seeded_partial_loss_is_deterministic: one generator, drawn only for a
+    // probability strictly between 0 and 1.
+    assert_eq!(draws(0.5, 0.0), lost.map(|lost| (lost, false)));
+    assert_eq!(draws(0.0, 0.5), lost.map(|failed| (false, failed)));
+    assert_eq!(draws(0.0, 1.0), [(false, true); 10]);
+}

@@ -188,6 +188,9 @@ pub trait Radio {
     fn receive(&mut self, implicit_len: Option<u8>) -> Result<(), Self::Error>;
     fn transmit(&mut self, frame: &[u8], implicit: bool) -> Result<TxOutcome, Self::Error>;
     fn poll_rx(&mut self) -> Result<Option<RxFrame>, Self::Error>;
+    fn take_rx_crc_errors(&mut self) -> RxCrcErrors {
+        RxCrcErrors::default() // a driver that cannot tell reports none
+    }
 
     fn dcd(&mut self, now_ms: u64) -> Result<bool, Self::Error>;
     fn current_rssi(&mut self) -> Result<i16, Self::Error>;
@@ -203,6 +206,16 @@ pub struct RxFrame {
 pub enum TxOutcome {
     Done,    // the modem reported TX done
     Timeout, // it did not, before the driver's timeout
+}
+
+pub struct RxCrcErrors {
+    pub count: u32,               // frames poll_rx() dropped for a failed payload CRC since the last call
+    pub last: Option<RxSignal>,   // RSSI and SNR of the last of them, if the driver read them
+}
+
+pub struct RxSignal {
+    pub rssi_dbm: i16,
+    pub snr_raw: u8,
 }
 ```
 
@@ -238,7 +251,8 @@ The methods mirror the parts of the firmware's modem classes that `RNode_Firmwar
 | `low_data_rate()` | When charging airtime after each frame | global `lora_low_datarate`, set by `handleLowDataRate()` | Whether low-data-rate optimisation is on. Decide it with `rnode_core::phy::low_data_rate()`, the firmware's integer expression, and program the same value into the chip |
 | `receive(implicit_len)` | Radio start, after every TX burst, `CMD_PROMISC`, `CMD_IMPLICIT` | `receive()` | Enter continuous receive. `None` selects explicit headers; `Some(n)` implicit headers with payload length `n` (only used in promiscuous mode) |
 | `transmit(frame, implicit)` | For each LoRa frame when CSMA/CA allows | `beginPacket()`, `write()`, `endPacket()` | Send one frame of at most 255 bytes, RNode header included, and block until TX done or the driver's timeout. Leave the modem in standby; `Node` calls `receive()` afterwards |
-| `poll_rx()` | After every IRQ, and on every event-loop iteration while the radio is on | `handleDio0Rise()` and the reads in `receive_callback()` | If a packet arrived, read it with its RSSI and SNR, clear the interrupt and return it. Drop CRC failures as `Ok(None)`. With nothing pending, return `Ok(None)` without side effects |
+| `poll_rx()` | After every IRQ, and on every event-loop iteration while the radio is on | `handleDio0Rise()` and the reads in `receive_callback()` | If a packet arrived, read it with its RSSI and SNR, clear the interrupt and return it. Drop CRC failures as `Ok(None)` and count them for `take_rx_crc_errors()`. With nothing pending, return `Ok(None)` without side effects |
+| `take_rx_crc_errors()` | After each `poll_rx()` loop | none: `handleDio0Rise()` drops CRC failures without a trace | Return how many frames `poll_rx()` dropped for a failed CRC since the last call, with the RSSI and SNR of the last one if you read them, and reset the count. `Node` logs them at `debug`. Optional: the default reports none |
 | `dcd(now_ms)` | Every 3 ms while on, and before each TX decision | `dcd()` | Whether a LoRa preamble or header is being received right now |
 | `current_rssi()` | Every 3 ms while on, and before each TX decision | `currentRssi()` | Channel RSSI in dBm |
 | `set_dcd_timing(preamble_ms, header_ms)` | After every bandwidth, SF or CR change | globals `lora_preamble_time_ms`, `lora_header_time_ms` | Timing for expiring stale preamble detections; see [below](#carrier-detect-and-dcd-timing). Ignore it if your carrier detect does not need it |
@@ -299,6 +313,7 @@ sequenceDiagram
     loop until it returns Ok(None)
         N->>R: poll_rx()
     end
+    N->>R: take_rx_crc_errors()
     opt host changes bandwidth, SF or CR
         N->>R: set_…(value), then the getter
         N->>R: set_preamble_length(symbols)
@@ -347,7 +362,8 @@ Guidelines for driver authors:
   `Node` calls it again with the value the modem last accepted. What the getters must get right is
   the value in use after a successful call, and after `begin()` the values it programmed.
 - **A CRC failure is not an error.** Clear the interrupt and return `Ok(None)`, as the firmware
-  drops the packet.
+  drops the packet. Count it for `take_rx_crc_errors()`, so that the operator can tell a frame
+  that arrived corrupted from one that never arrived.
 - **Map HAL errors** into your error type. `rnode-sx126x` wraps SPI errors as `Error::Spi(e)` and
   turns pin errors into `Error::Digital(kind)`, so its error type does not depend on the pin types.
 - **Do not panic** on anything the hardware can do. Assertions are only for programming errors,
@@ -506,6 +522,9 @@ sequenceDiagram
 - `wait_on_busy()` returns `Error::BusyTimeout` where the firmware carries on after 100 ms.
 - `dcd()` forgets a preamble detection once the flag clears, so that a completed short packet
   cannot make the next packet's preamble look stale.
+- `poll_rx()` reads the packet status (`GetPacketStatus`) of a frame that failed its CRC, for
+  `take_rx_crc_errors()`; the firmware reads nothing more for such a frame. Good frames get no
+  extra transaction.
 
 **Tests.** [`crates/rnode-sx126x/src/tests.rs`](crates/rnode-sx126x/src/tests.rs) checks the
 exact bytes of every command against the firmware with a mocked bus; see
@@ -524,19 +543,21 @@ hardware at all, which shows how little of the trait is about SPI:
 - The worker accepts a frame only if the radio was awake and receiving for the whole frame, was not
   transmitting, and uses the sender's frequency, bandwidth, spreading factor and low-data-rate
   setting. Overlapping receivable carriers collide and both frames are lost; `loss` drops frames at
-  random.
-- Accepted frames are queued, and the worker writes a byte to a socket pair. Its other end,
-  `SimRadio::irq_fd()`, is what the daemon wraps in `FdIrqSource`, and `poll_rx()` pops the queue.
+  random, and `crc_error` turns them into CRC failures, counted for `take_rx_crc_errors()`.
+- Accepted frames are queued, and the worker writes a byte to a socket pair, also for a CRC failure.
+  Its other end, `SimRadio::irq_fd()`, is what the daemon wraps in `FdIrqSource`, and `poll_rx()`
+  pops the queue.
 - `dcd()` is true while a receivable carrier is on the air, `current_rssi()` reports the configured
   RSSI during a carrier and −110 dBm otherwise, and `set_dcd_timing()` does nothing.
 
 `rnode-core` has a third, much smaller radio for unit tests: `rnode_core::sim::SimRadio`, behind the
 `sim` feature. It runs on a virtual clock (`SimMedium::advance_ms()`) and can inject failures and
 frames: `inject_begin_failures()`, `inject_next_tx_error()`, `inject_next_timeout()`,
-`inject_dcd_errors()`, `inject_rssi_errors()`, `inject_rx_errors()`, `inject_setter_errors()` and
-`inject_rx()`. A setter failure injected with `inject_setter_errors()` applies the value before it
-fails, the worst case for `Node`. Use it to test how `Node` reacts to driver behaviour without
-writing a mock radio, as the tests in [`crates/rnode-core/tests`](crates/rnode-core/tests) do.
+`inject_dcd_errors()`, `inject_rssi_errors()`, `inject_rx_errors()`, `inject_setter_errors()`,
+`inject_rx()` and `inject_rx_crc_error()`. A setter failure injected with `inject_setter_errors()`
+applies the value before it fails, the worst case for `Node`. Use it to test how `Node` reacts to
+driver behaviour without writing a mock radio, as the tests in
+[`crates/rnode-core/tests`](crates/rnode-core/tests) do.
 
 ## Testing a driver
 
@@ -624,7 +645,8 @@ programs the wrong register.
 - preamble and packet parameter writes;
 - RSSI and SNR conversion from raw register bytes;
 - FIFO writes and reads, frames of 255 bytes, and clearing interrupts;
-- the CRC-error path (`Ok(None)`) and the idle path of `poll_rx()`;
+- the CRC-error path of `poll_rx()` (`Ok(None)`, counted by `take_rx_crc_errors()`) and its idle
+  path;
 - TX done, TX timeout and the timeout limit;
 - error paths: a failing SPI bus, a failing pin, a BUSY line stuck high, a chip that is not
   detected;
@@ -695,7 +717,7 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::{Operation, SpiDevice};
 use rnode_core::phy;
-use rnode_core::radio::{Radio, RxFrame, TxOutcome};
+use rnode_core::radio::{Radio, RxCrcErrors, RxFrame, TxOutcome};
 
 /// Board-specific SX127x options.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -787,6 +809,7 @@ pub struct Sx127x<SPI, RESET, DELAY> {
     ldro: bool,
     implicit: bool,
     preinit_done: bool,
+    crc_errors: RxCrcErrors,
 }
 
 impl<SPI: SpiDevice, RESET: OutputPin, DELAY: DelayNs> Sx127x<SPI, RESET, DELAY> {
@@ -804,6 +827,7 @@ impl<SPI: SpiDevice, RESET: OutputPin, DELAY: DelayNs> Sx127x<SPI, RESET, DELAY>
             ldro: false,
             implicit: false,
             preinit_done: false,
+            crc_errors: RxCrcErrors::default(),
         }
     }
 
@@ -976,6 +1000,8 @@ where
         }
         self.write_register(REG_IRQ_FLAGS, flags)?;
         if (flags & IRQ_PAYLOAD_CRC_ERROR) != 0 {
+            // Counted without its signal; REG_PKT_RSSI_VALUE and REG_PKT_SNR_VALUE could give it.
+            self.crc_errors.count = self.crc_errors.count.saturating_add(1);
             return Ok(None);
         }
         let len_register = if self.implicit { REG_PAYLOAD_LENGTH } else { REG_RX_NB_BYTES };
@@ -996,6 +1022,10 @@ where
         let snr = (f32::from(snr_raw as i8) * 0.25) as i16;
         rssi = if snr < 0 { rssi + snr } else { (1.066 * f64::from(rssi)) as i16 };
         Ok(Some(RxFrame { data, rssi_dbm: rssi, snr_raw }))
+    }
+
+    fn take_rx_crc_errors(&mut self) -> RxCrcErrors {
+        core::mem::take(&mut self.crc_errors)
     }
 
     /// Firmware `sx127x::dcd()`: the live "signal detected" and "signal synchronised" bits.
@@ -1180,7 +1210,8 @@ this for the SX1262; a new driver deserves a similar bring-up tool. Check:
 - **A different low-data-rate rule.** Use `rnode_core::phy::low_data_rate()`. The textbook "symbol
   time of 16 ms or more" rule differs from the firmware at SF9/31.25 kHz, SF10/62.5 kHz,
   SF11/125 kHz and SF12/250 kHz, and RNodes with different settings cannot hear each other.
-- **CRC errors as `Err`.** The firmware drops such packets quietly; return `Ok(None)`.
+- **CRC errors as `Err`.** The firmware drops such packets quietly; return `Ok(None)`, and count
+  them for `take_rx_crc_errors()`.
 - **Unbounded waits.** A modem that hangs must not hang the daemon.
 - **Expensive idle polls.** `poll_rx()` runs every few milliseconds; keep the idle path to one
   status read.

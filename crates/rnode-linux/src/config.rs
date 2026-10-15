@@ -236,6 +236,8 @@ pub struct SimConfig {
     pub snr_db: f32,
     #[serde(default)]
     pub loss: f32,
+    #[serde(default)]
+    pub crc_error: f32,
 }
 
 impl Default for SimConfig {
@@ -246,6 +248,7 @@ impl Default for SimConfig {
             rssi_dbm: default_rssi_dbm(),
             snr_db: default_snr_db(),
             loss: 0.0,
+            crc_error: 0.0,
         }
     }
 }
@@ -446,6 +449,11 @@ impl Config {
                 if !(0.0..=1.0).contains(&self.radio.sim.loss) {
                     return Err(ConfigError::Invalid(
                         "radio.sim.loss must be between 0.0 and 1.0".into(),
+                    ));
+                }
+                if !(0.0..=1.0).contains(&self.radio.sim.crc_error) {
+                    return Err(ConfigError::Invalid(
+                        "radio.sim.crc_error must be between 0.0 and 1.0".into(),
                     ));
                 }
             }

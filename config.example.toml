@@ -43,6 +43,7 @@ node_name = "rnode-linux"
 rssi_dbm = -70
 snr_db = 7.0
 loss = 0.0
+crc_error = 0.0
 
 [pty]
 # Avoid /tmp for managed deployments; choose a persistent runtime directory.

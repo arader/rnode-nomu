@@ -19,7 +19,7 @@ use embedded_hal::digital::{
 };
 use embedded_hal::spi::{Operation, SpiDevice};
 use rnode_core::phy;
-use rnode_core::radio::{Radio, RxFrame, TxOutcome};
+use rnode_core::radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 
 const OP_RF_FREQ: u8 = 0x86;
 const OP_SLEEP: u8 = 0x84;
@@ -235,6 +235,7 @@ pub struct Sx126x<SPI, BUSY, RESET, RXEN, DELAY> {
     dcd_preamble_ms: u32,
     dcd_header_ms: u32,
     current_rx_implicit_len: Option<u8>,
+    crc_errors: RxCrcErrors,
 }
 
 impl<SPI, BUSY, RESET, RXEN, DELAY> Sx126x<SPI, BUSY, RESET, RXEN, DELAY>
@@ -271,6 +272,7 @@ where
             dcd_preamble_ms: 0,
             dcd_header_ms: 0,
             current_rx_implicit_len: None,
+            crc_errors: RxCrcErrors::default(),
         }
     }
 
@@ -480,6 +482,16 @@ where
         self.execute_opcode_read(OP_GET_IRQ_STATUS, &mut out)?;
         Ok(out)
     }
+
+    /// Firmware `sx126x::packetRssi()` and `packetSnrRaw()`, from one `GetPacketStatus` read.
+    fn packet_signal(&mut self) -> Result<RxSignal, Error<SPI::Error>> {
+        let mut status = [0u8; 3];
+        self.execute_opcode_read(OP_PACKET_STATUS, &mut status)?;
+        Ok(RxSignal {
+            rssi_dbm: -(status[0] as i16) / 2,
+            snr_raw: status[1],
+        })
+    }
 }
 
 impl<SPI, BUSY, RESET, RXEN, DELAY> Radio for Sx126x<SPI, BUSY, RESET, RXEN, DELAY>
@@ -676,6 +688,11 @@ where
     }
 
     /// Firmware `sx126x::handleDio0Rise()` plus one FIFO read and packet status capture.
+    ///
+    /// A frame that failed its payload CRC is dropped, as the firmware does, and counted for
+    /// [`Radio::take_rx_crc_errors`]. Unlike the firmware, which reads nothing more for such a
+    /// frame, the driver then reads its packet status (`GetPacketStatus`) for the log. A good
+    /// frame's transactions are the same either way.
     fn poll_rx(&mut self) -> Result<Option<RxFrame>, Self::Error> {
         let irq = self.get_irq_status()?;
         if (irq[1] & IRQ_RX_DONE_MASK) == 0 {
@@ -684,6 +701,15 @@ where
         self.clear_irq_status(irq)?;
         self.preamble_detected_at = None;
         if (irq[1] & IRQ_PAYLOAD_CRC_ERROR_MASK) != 0 {
+            self.crc_errors.count = self.crc_errors.count.saturating_add(1);
+            match self.packet_signal() {
+                Ok(signal) => self.crc_errors.last = Some(signal),
+                Err(e) => {
+                    // Unknown, rather than the signal of an earlier frame.
+                    self.crc_errors.last = None;
+                    return Err(e);
+                }
+            }
             return Ok(None);
         }
         let mut rx = [0u8; 2];
@@ -692,13 +718,16 @@ where
         self.fifo_rx_addr_ptr = rx[1];
         let mut data = vec![0u8; len];
         self.read_buffer(self.fifo_rx_addr_ptr, &mut data)?;
-        let mut status = [0u8; 3];
-        self.execute_opcode_read(OP_PACKET_STATUS, &mut status)?;
+        let RxSignal { rssi_dbm, snr_raw } = self.packet_signal()?;
         Ok(Some(RxFrame {
             data,
-            rssi_dbm: -(status[0] as i16) / 2,
-            snr_raw: status[1],
+            rssi_dbm,
+            snr_raw,
         }))
+    }
+
+    fn take_rx_crc_errors(&mut self) -> RxCrcErrors {
+        core::mem::take(&mut self.crc_errors)
     }
 
     /// Firmware `sx126x::dcd()`, including stale-preamble expiry from `set_dcd_timing()`.

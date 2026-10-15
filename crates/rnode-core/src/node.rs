@@ -63,19 +63,25 @@
 //!   247…254, which would now select the highest power allowed. The firmware has no such case:
 //!   its EEPROM only ever holds the power its host path clamped to 22 dBm.
 //!
-//! Logging (`log` facade): at debug level, one line per packet delivered to the host (after
-//! split reassembly), one per host packet sent to the radio (before splitting, with its outcome)
-//! and one per dropped packet with the reason; at trace level, a hex dump of each delivered or
-//! sent payload. Packet lines come from this module; drops are logged where they are detected (the
-//! KISS decoder, the TX queue, the split reassembler and this module). Radio driver errors and
-//! modem TX timeouts, which hard-reset the node, are also logged at warn level. At info level, one
-//! line reports each time the radio goes online or offline, with why and the settings it runs
-//! with; one reports the new settings when the host retunes the online radio, once per burst of
-//! config commands; and one counts the packets still queued at shutdown. Errors of the radio calls
-//! made every few milliseconds (DCD and RSSI reads, receive polling) are rate-limited: a warning
-//! for the first, then at most one summary per 10 s while the call keeps failing, and an info line
-//! once it has worked for 10 s. Formatting is lazy, so disabled levels cost nothing, and logging
-//! never changes what the node sends to the host or the radio.
+//! Logging (`log` facade): at debug level, one line per packet delivered to the host (after split
+//! reassembly), one per host packet sent to the radio (before splitting, with its outcome) and one
+//! per dropped packet with the reason, received frames that failed their CRC included
+//! ([`Radio::take_rx_crc_errors`]; the firmware drops those without a trace). Each wait for channel
+//! access gets two debug lines, however long it lasts: one when queued packets first have to wait,
+//! with the reason (airtime limit, carrier, interference, contention window, or no channel status
+//! after a failed DCD or RSSI read), and one when access is granted, with how long the wait took
+//! for each reason. The radio going offline, a reset included, ends a wait without the second line;
+//! packets still queued then wait afresh. At trace level, a hex dump of each delivered or sent
+//! payload. Packet lines come from this module; drops are logged where they are detected (the KISS
+//! decoder, the TX queue, the split reassembler and this module). Radio driver errors and modem TX
+//! timeouts, which hard-reset the node, are also logged at warn level. At info level, one line
+//! reports each time the radio goes online or offline, with why and the settings it runs with; one
+//! reports the new settings when the host retunes the online radio, once per burst of config
+//! commands; and one counts the packets still queued at shutdown. Errors of the radio calls made
+//! every few milliseconds (DCD and RSSI reads, receive polling) are rate-limited: a warning for the
+//! first, then at most one summary per 10 s while the call keeps failing, and an info line once it
+//! has worked for 10 s. Formatting is lazy, so disabled levels cost nothing, and logging never
+//! changes what the node sends to the host or the radio.
 
 use core::fmt;
 
@@ -85,10 +91,10 @@ use crate::fault_log::FaultLog;
 use crate::framing::{self, Reassembly, RxReassembler};
 use crate::identity::DeviceIdentity;
 use crate::kiss;
-use crate::packet_log::{HexDump, Hz, PacketSummary, RadioSummary, plural};
+use crate::packet_log::{Elapsed, HexDump, Hz, PacketSummary, RadioSummary, plural};
 use crate::phy::{self, Modulation, PhyParams};
 use crate::queue::TxQueue;
-use crate::radio::{Radio, RxFrame, TxOutcome};
+use crate::radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 use crate::rng::Rng;
 use crate::storage::{RadioSettings, Storage};
 
@@ -223,6 +229,123 @@ impl fmt::Display for Setting {
     }
 }
 
+/// Why the queued packets wait for channel access, for the debug log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxWaitReason {
+    /// The short- or long-term airtime limit is reached (firmware `airtime_lock`).
+    AirtimeLimit,
+    /// The radio's carrier detect or RSSI read failed, so CSMA/CA has no fresh observation.
+    NoChannelStatus,
+    /// A LoRa carrier is detected (`dcd()`).
+    Carrier,
+    /// Interference is detected while interference avoidance is on (firmware `medium_free()`).
+    Interference,
+    /// The channel is free; CSMA/CA waits for DIFS and the contention window.
+    ContentionWindow,
+}
+
+impl TxWaitReason {
+    const ALL: [Self; 5] = [
+        Self::AirtimeLimit,
+        Self::NoChannelStatus,
+        Self::Carrier,
+        Self::Interference,
+        Self::ContentionWindow,
+    ];
+
+    fn text(self) -> &'static str {
+        match self {
+            Self::AirtimeLimit => "airtime limit",
+            Self::NoChannelStatus => "no channel status",
+            Self::Carrier => "carrier detected",
+            Self::Interference => "interference",
+            Self::ContentionWindow => "contention window",
+        }
+    }
+}
+
+/// A wait for channel access while packets are queued. It is logged when it starts and when
+/// access is granted, never in between, so a wait of minutes still gives two lines; the second
+/// says how long the wait took and what for: `carrier detected 1.3 s, contention window 220 ms`.
+#[derive(Debug, Clone)]
+struct TxWait {
+    since_ms: u64,
+    /// When the reason was last observed.
+    last_ms: u64,
+    reason: TxWaitReason,
+    /// Time spent waiting for each reason, indexed like [`TxWaitReason::ALL`].
+    waited_ms: [u64; TxWaitReason::ALL.len()],
+}
+
+impl TxWait {
+    fn new(now_ms: u64, reason: TxWaitReason) -> Self {
+        Self {
+            since_ms: now_ms,
+            last_ms: now_ms,
+            reason,
+            waited_ms: [0; TxWaitReason::ALL.len()],
+        }
+    }
+
+    /// Charge the time since the last observation to the reason seen then, and note `reason`.
+    fn observe(&mut self, now_ms: u64, reason: TxWaitReason) {
+        let waited = &mut self.waited_ms[self.reason as usize];
+        *waited = waited.saturating_add(now_ms.saturating_sub(self.last_ms));
+        self.last_ms = now_ms;
+        self.reason = reason;
+    }
+}
+
+/// The time spent for each reason, in the order of [`TxWaitReason::ALL`]; reasons without time
+/// are left out, unless no reason has any.
+impl fmt::Display for TxWait {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for reason in TxWaitReason::ALL {
+            let waited = self.waited_ms[reason as usize];
+            if waited > 0 {
+                write!(
+                    f,
+                    "{}{} {}",
+                    if first { "" } else { ", " },
+                    reason.text(),
+                    Elapsed(waited)
+                )?;
+                first = false;
+            }
+        }
+        if first {
+            write!(f, "{} {}", self.reason.text(), Elapsed(0))?;
+        }
+        Ok(())
+    }
+}
+
+/// The debug line for frames the radio dropped because their payload CRC failed:
+/// `dropping received LoRa frame: CRC error (RSSI -97 dBm, SNR -3.25 dB)`.
+#[derive(Debug, Clone, Copy)]
+struct CrcErrorsLine(RxCrcErrors);
+
+impl fmt::Display for CrcErrorsLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let RxCrcErrors { count, last } = self.0;
+        if count == 1 {
+            f.write_str("dropping received LoRa frame: CRC error")?;
+        } else {
+            write!(f, "dropping {count} received LoRa frames: CRC error")?;
+        }
+        if let Some(RxSignal { rssi_dbm, snr_raw }) = last {
+            write!(
+                f,
+                " ({}RSSI {rssi_dbm} dBm, SNR {:.2} dB)",
+                if count == 1 { "" } else { "last: " },
+                f32::from(snr_raw as i8) * 0.25
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// An RNode: host protocol, TX queue, framing and channel access around a [`Radio`].
 #[derive(Debug)]
 pub struct Node<R: Radio, S: Storage> {
@@ -258,6 +381,9 @@ pub struct Node<R: Radio, S: Storage> {
     logged_settings: Option<RadioSummary>,
     /// When the host started retuning the online radio, if that is not logged yet.
     retune_pending_since: Option<u64>,
+    /// The queued packets' wait for channel access, while there is one: from the first time they
+    /// have to wait until access is granted or the radio goes offline, a reset included.
+    tx_wait: Option<TxWait>,
 }
 
 impl<R: Radio, S: Storage> Node<R, S> {
@@ -297,6 +423,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
             rx_faults: FaultLog::new("radio RX service"),
             logged_settings: None,
             retune_pending_since: None,
+            tx_wait: None,
         }
     }
 
@@ -356,6 +483,10 @@ impl<R: Radio, S: Storage> Node<R, S> {
                     break;
                 }
             }
+        }
+        let crc_errors = self.radio.take_rx_crc_errors();
+        if crc_errors.count > 0 {
+            log::debug!("{}", CrcErrorsLine(crc_errors));
         }
     }
 
@@ -733,6 +864,8 @@ impl<R: Radio, S: Storage> Node<R, S> {
             self.retune_pending_since = None;
         }
         self.radio_online = false;
+        // Packets still queued start a new wait once the radio is back, with a fresh CSMA/CA.
+        self.tx_wait = None;
     }
 
     /// The settings the radio runs with, for the online and offline lines.
@@ -837,19 +970,22 @@ impl<R: Radio, S: Storage> Node<R, S> {
         let mut sent_any = false;
         let mut radio_attempted = false;
         let mut reset_during_batch = false;
-        if !self.queue.is_empty() && !self.csma.airtime_locked() && self.observe_status(now_ms).is_some() {
-            let access = self.csma.poll_access(now_ms, &mut self.rng);
-            if access != Access::Wait {
-                // Firmware `pop_queue()` sends one packet and `flush_queue()` all of them; unlike
-                // the firmware, either stops before a packet once `should_stop` says so.
-                while !self.queue.is_empty() && !should_stop() {
-                    let Some(pkt) = self.queue.pop() else { break };
-                    let (any_sent, complete, attempted, reset) = self.transmit_packet(&pkt, now_ms);
-                    sent_any |= any_sent;
-                    radio_attempted |= attempted;
-                    reset_during_batch |= reset;
-                    if access == Access::Single || !complete {
-                        break;
+        if !self.queue.is_empty() {
+            match self.channel_access(now_ms) {
+                Err(reason) => self.tx_waiting(now_ms, reason),
+                Ok(access) => {
+                    // Firmware `pop_queue()` sends one packet and `flush_queue()` all of them;
+                    // unlike the firmware, either stops before a packet once `should_stop` says so.
+                    while !self.queue.is_empty() && !should_stop() {
+                        let Some(pkt) = self.queue.pop() else { break };
+                        self.tx_access_granted(now_ms);
+                        let (any_sent, complete, attempted, reset) = self.transmit_packet(&pkt, now_ms);
+                        sent_any |= any_sent;
+                        radio_attempted |= attempted;
+                        reset_during_batch |= reset;
+                        if access == Access::Single || !complete {
+                            break;
+                        }
                     }
                 }
             }
@@ -863,6 +999,52 @@ impl<R: Radio, S: Storage> Node<R, S> {
         }
         if radio_attempted && self.radio_online {
             self.enter_receive();
+        }
+    }
+
+    /// Whether the queued packets may go out now, or why they wait: the airtime lock check in
+    /// the firmware's `loop()`, a fresh channel observation, then `tx_queue_handler()`.
+    fn channel_access(&mut self, now_ms: u64) -> Result<Access, TxWaitReason> {
+        if self.csma.airtime_locked() {
+            return Err(TxWaitReason::AirtimeLimit);
+        }
+        if self.observe_status(now_ms).is_none() {
+            return Err(TxWaitReason::NoChannelStatus);
+        }
+        match self.csma.poll_access(now_ms, &mut self.rng) {
+            // A busy medium is a carrier or, with avoidance on, interference, which by its
+            // definition (`update_modem_status()`) comes without a carrier.
+            Access::Wait if self.csma.medium_free() => Err(TxWaitReason::ContentionWindow),
+            Access::Wait if self.csma.channel_stats().interference => Err(TxWaitReason::Interference),
+            Access::Wait => Err(TxWaitReason::Carrier),
+            access => Ok(access),
+        }
+    }
+
+    /// The queued packets have to wait for `reason`: log it if they were not waiting yet.
+    fn tx_waiting(&mut self, now_ms: u64, reason: TxWaitReason) {
+        match &mut self.tx_wait {
+            Some(wait) => wait.observe(now_ms, reason),
+            None => {
+                let queued = self.queue.len();
+                log::debug!(
+                    "TX waiting for channel access: {}; {queued} packet{} queued",
+                    reason.text(),
+                    plural(queued)
+                );
+                self.tx_wait = Some(TxWait::new(now_ms, reason));
+            }
+        }
+    }
+
+    /// The node is about to transmit: log how long the packets waited for channel access.
+    fn tx_access_granted(&mut self, now_ms: u64) {
+        if let Some(mut wait) = self.tx_wait.take() {
+            wait.observe(now_ms, wait.reason);
+            log::debug!(
+                "TX after waiting {} for channel access: {wait}",
+                Elapsed(now_ms.saturating_sub(wait.since_ms))
+            );
         }
     }
 

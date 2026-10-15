@@ -30,7 +30,7 @@ pub mod storage;
 
 pub use identity::DeviceIdentity;
 pub use node::{Node, NodeConfig};
-pub use radio::{Radio, RxFrame, TxOutcome};
+pub use radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimMedium, SimRadio};
 pub use storage::{MemoryStorage, RadioSettings, Storage};

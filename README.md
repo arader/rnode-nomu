@@ -667,6 +667,7 @@ Options of the simulated radio, used when `driver = "sim"`.
 | `rssi_dbm` | integer | `-70` | RSSI reported for received packets, and as the channel RSSI while a matching transmission is on the air. The idle channel reads −110 dBm |
 | `snr_db` | float | `7.0` | SNR reported for received packets, in 0.25 dB steps |
 | `loss` | float | `0.0` | Probability, from 0.0 to 1.0, that this radio drops an otherwise good frame. Validated when `driver = "sim"` |
+| `crc_error` | float | `0.0` | Probability, from 0.0 to 1.0, that a good frame this radio did not lose fails its CRC instead: like a modem, the radio signals it but drops it, and the daemon logs it at `debug`. Validated when `driver = "sim"` |
 
 The socket path `<air_dir>/<node_name>.sock` must fit in 103 bytes, so keep `air_dir` short; macOS
 in particular limits Unix socket paths.
@@ -954,7 +955,7 @@ so errors in it appear as `fatal:` lines on stderr.
 | --- | --- |
 | `warn` | Problems: radio driver errors (rate-limited), modem TX timeouts, failed settings writes, a host that stopped reading the PTY |
 | `info` (default) | Startup, the radio going online and offline with the reason and the settings, retuning by the host, interference-avoidance changes, packets dropped at shutdown, recovery of a failing radio call |
-| `debug` | One line per packet received, per packet sent and per packet dropped, with the reason |
+| `debug` | One line per packet received, per packet sent and per packet dropped, with the reason, received frames that failed their CRC included; two lines per wait for channel access |
 | `trace` | Everything above, plus a hex dump of every received and sent payload; see the [warning](#trace-logs-contain-your-traffic) below |
 
 ### What `info` shows
@@ -1031,8 +1032,47 @@ Dropped packets are logged where they are dropped:
 | `rnode_core::node` | `dropping N-byte TX packet: radio offline; sent ERROR_TXFAILED` | Data arrived while the radio was off |
 | `rnode_core::node` | `dropping N-byte TX packet: exceeds the 255-byte single-frame MTU in promiscuous mode; sent ERROR_TXFAILED` | Oversized raw frame in promiscuous mode |
 | `rnode_core::node` | `dropping N-byte promiscuous RX frame: exceeds the 255-byte single-frame MTU` | Oversized frame received in promiscuous mode |
+| `rnode_core::node` | `dropping received LoRa frame: CRC error (RSSI R dBm, SNR S dB)` | The modem received a frame whose payload CRC failed: interference, a collision or a weak signal. The firmware drops these without a trace. Several since the last line read `dropping N received LoRa frames: CRC error (last: …)`; without the signal if the driver could not read it |
 | `rnode_core::node` | `dropping N-byte TX packet: queue cleared by reset` | `CMD_RESET` or a modem TX timeout emptied the queue |
 | `rnode_core::node` | `dropping N-byte TX packet: shutting down` | The packet was still queued when the daemon stopped |
+
+### Channel access at `debug`
+
+Before every transmission the node waits as the firmware's CSMA/CA does: while the channel is busy,
+then for DIFS and a random contention window. Each wait gets two lines, however long it lasts: one
+when queued packets first have to wait, with the reason, and one when the node transmits, with how
+long the wait took for each reason. If the radio goes offline first, the wait ends without the
+second line, and packets still queued wait afresh once it is back. These come from two simulated
+daemons on macOS, B with `[radio.sim] crc_error = 0.5`; a test script made A send a 254-byte packet
+every 2.5 s and B a 20-byte packet half a second after each. From daemon A, then B:
+
+```text
+[2026-10-15T08:01:05Z DEBUG rnode_core::node] TX waiting for channel access: contention window; 1 packet queued
+[2026-10-15T08:01:05Z DEBUG rnode_core::node] TX after waiting 360 ms for channel access: contention window 360 ms
+[2026-10-15T08:01:05Z DEBUG rnode_core::node] TX packet: 254 bytes, 1 frame, header 0xC0 (seq 12): ok
+```
+
+```text
+[2026-10-15T08:01:05Z DEBUG rnode_core::node] TX waiting for channel access: carrier detected; 1 packet queued
+[2026-10-15T08:01:05Z DEBUG rnode_core::node] dropping received LoRa frame: CRC error (RSSI -70 dBm, SNR 7.00 dB)
+[2026-10-15T08:01:06Z DEBUG rnode_core::node] TX after waiting 346 ms for channel access: carrier detected 272 ms, contention window 74 ms
+[2026-10-15T08:01:06Z DEBUG rnode_core::node] TX packet: 20 bytes, 1 frame, header 0xE0 (seq 14): ok
+[2026-10-15T08:01:08Z DEBUG rnode_core::node] TX waiting for channel access: carrier detected; 1 packet queued
+[2026-10-15T08:01:08Z DEBUG rnode_core::node] RX packet: 254 bytes, 1 frame, header 0xF0 (seq 15), RSSI -70 dBm, SNR 7.00 dB
+[2026-10-15T08:01:08Z DEBUG rnode_core::node] TX after waiting 451 ms for channel access: carrier detected 161 ms, contention window 290 ms
+[2026-10-15T08:01:08Z DEBUG rnode_core::node] TX packet: 20 bytes, 1 frame, header 0xE0 (seq 14): ok
+```
+
+B's first packet waited for A's frame, which then failed its CRC at B; the second waited for A's
+next frame, which arrived intact. The reasons, in the order the second line lists them:
+
+| Reason | Why the packets wait |
+| --- | --- |
+| `airtime limit` | The host's airtime limit is reached (`CMD_ST_ALOCK`, `CMD_LT_ALOCK`; Reticulum's `airtime_limit_short` and `airtime_limit_long`) |
+| `no channel status` | Reading carrier detect or RSSI failed, so CSMA/CA has nothing to decide on; the warnings say why |
+| `carrier detected` | Another LoRa transmission is on the air |
+| `interference` | A signal well above the noise floor without a LoRa carrier, with `avoid_interference` on. Until the noise floor is measured, about 0.4 s after the radio starts, any signal counts |
+| `contention window` | The channel is free; CSMA/CA waits for DIFS and the random contention window, as before every transmission |
 
 ### Payload dumps at `trace`
 
@@ -1157,7 +1197,9 @@ in that directory as two datagrams: a carrier-start record and, after the LoRa t
 frame itself. A simulated receiver gets the frame only if it was listening for the whole frame, was
 not transmitting, and uses the same frequency, bandwidth, spreading factor and low-data-rate
 optimisation as the sender. Overlapping transmissions collide and are lost. So the simulator
-catches the timing, CSMA/CA and modulation mismatches that a plain loopback would hide.
+catches the timing, CSMA/CA and modulation mismatches that a plain loopback would hide. `loss` and
+`crc_error` in [`[radio.sim]`](#radiosim) make a radio lose good frames, or receive them with a
+failed CRC, at random.
 
 The simulator works without root or radio hardware, on Linux and macOS, and in containers. Every
 daemon pointed at the same `air_dir` hears the others.
@@ -1348,6 +1390,9 @@ behaviour, except for these deliberate differences:
   firmware carries on.
 - Carrier detect forgets a preamble detection once the preamble interrupt clears, so a completed
   short packet cannot make the next packet's preamble look stale.
+- A received frame that fails its CRC is dropped as in the firmware, but the driver then reads its
+  packet status (`GetPacketStatus`), a transaction the firmware does not make, for the
+  [debug log](#packets-at-debug).
 
 Some firmware behaviour that surprises people is the same in rnode-linux: `CMD_STAT_RSSI` before
 the first received packet reports −36 dBm (the firmware's −292 dBm placeholder after the RSSI
@@ -1396,7 +1441,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
 | `rnodeconf`: "Could not download EEPROM from device" | rnode-linux has no EEPROM; see [Using rnodeconf](#using-rnodeconf) |
-| Two RNodes do not hear each other | They must share frequency, bandwidth and spreading factor. With `RUST_LOG=debug`, a `TX packet` line on one side and no `RX packet` line on the other points at RF: antenna, distance or power |
+| Two RNodes do not hear each other | They must share frequency, bandwidth and spreading factor. With `RUST_LOG=debug`, a `TX packet` line on one side and no `RX packet` line on the other points at RF: antenna, distance or power. A `CRC error` line instead means the frame was heard but corrupted: interference, a collision or a weak signal |
 | `WARN … dropping host output because the PTY is not draining` | No host is reading the PTY. Harmless while none is attached |
 | The daemon takes long to stop | It finishes the packet on the air, which takes seconds at high spreading factors and minutes at SF12 with the narrowest bandwidths; see [How long a stop takes](#how-long-a-stop-takes) |
 | systemd: `State 'stop-sigterm' timed out. Killing.` | The unit's `TimeoutStopSec=` is shorter than the packet on the air took. Use the shipped unit's `8min`, or at least the time in [How long a stop takes](#how-long-a-stop-takes) for your settings; [When the daemon is killed](#when-the-daemon-is-killed) says what was skipped |
