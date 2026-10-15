@@ -518,6 +518,45 @@ fn fetch_reticulum_fetches_the_pinned_commit_and_reuses_it() {
     assert!(error.contains("delete"), "{error}");
 }
 
+/// A `.partial` directory that an interrupted fetch left behind, for example one of a cancelled CI
+/// job, is deleted and the fetch starts over, so nothing of it reaches the checkout. Skipped
+/// without `git`.
+#[test]
+fn fetch_reticulum_recovers_from_a_stale_partial_checkout() {
+    let dir = test_dir("fetch-reticulum-partial");
+    let upstream = dir.join("upstream");
+    let Some([pinned, _tip]) = upstream_reticulum(&upstream) else {
+        eprintln!("skipping the Reticulum fetch check: git is not on PATH");
+        return;
+    };
+    let repo = format!("file://{}", upstream.display());
+    let cache = dir.join("rns-e2e");
+    let partial = cache.join(format!("reticulum-{}.partial", &pinned[..12]));
+
+    // What a `git fetch --depth 1` killed part-way leaves: the lock it held, a half-written pack
+    // (git writes packs read-only), and stray files, one where the checkout puts a tracked file.
+    fs::create_dir_all(partial.join("RNS")).unwrap();
+    git_in(&partial, &["init", "--quiet"]).unwrap();
+    fs::write(partial.join(".git/shallow.lock"), "").unwrap();
+    let pack = partial.join(".git/objects/pack/tmp_pack_stale");
+    fs::write(&pack, "half a pack").unwrap();
+    fs::set_permissions(&pack, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::write(partial.join("RNS/__init__.py"), "stale\n").unwrap();
+    fs::write(partial.join("stale.txt"), "stale\n").unwrap();
+
+    let checkout = fetch_reticulum(&cache, &repo, &pinned, &[]).unwrap();
+    assert_eq!(checkout, cache.join(format!("reticulum-{}", &pinned[..12])));
+    assert_eq!(git_in(&checkout, &["rev-parse", "HEAD"]).unwrap(), pinned);
+    assert_eq!(
+        fs::read_to_string(checkout.join("RNS/__init__.py")).unwrap(),
+        "__version__ = '1'\n"
+    );
+    assert!(!checkout.join("stale.txt").exists());
+    assert!(!checkout.join(".git/shallow.lock").exists());
+    assert!(!checkout.join(".git/objects/pack/tmp_pack_stale").exists());
+    assert!(fs::symlink_metadata(&partial).is_err(), "{} is left", partial.display());
+}
+
 /// A checkout that is not at the pin is refused rather than used, and a fetch that keeps failing is
 /// retried once per delay and then reported, leaving no checkout behind.
 #[test]
