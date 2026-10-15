@@ -27,6 +27,36 @@ impl fmt::Display for SimError {
     }
 }
 
+/// A [`Radio`] setter for the PHY settings the host configures, for
+/// [`SimRadio::inject_setter_errors`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setter {
+    /// [`Radio::set_frequency`].
+    Frequency,
+    /// [`Radio::set_bandwidth`].
+    Bandwidth,
+    /// [`Radio::set_spreading_factor`].
+    SpreadingFactor,
+    /// [`Radio::set_coding_rate`].
+    CodingRate,
+    /// [`Radio::set_tx_power`].
+    TxPower,
+}
+
+impl Setter {
+    const COUNT: usize = 5;
+
+    fn error(self) -> SimError {
+        SimError::Injected(match self {
+            Self::Frequency => "simulated set_frequency error",
+            Self::Bandwidth => "simulated set_bandwidth error",
+            Self::SpreadingFactor => "simulated set_spreading_factor error",
+            Self::CodingRate => "simulated set_coding_rate error",
+            Self::TxPower => "simulated set_tx_power error",
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SimMedium(Rc<RefCell<MediumState>>);
 
@@ -125,6 +155,7 @@ impl SimMedium {
             dcd_failures: 0,
             rssi_failures: 0,
             rx_failures: 0,
+            setter_failures: [0; Setter::COUNT],
         }
     }
 }
@@ -145,6 +176,7 @@ pub struct SimRadio {
     dcd_failures: usize,
     rssi_failures: usize,
     rx_failures: usize,
+    setter_failures: [usize; Setter::COUNT],
 }
 
 impl SimRadio {
@@ -179,6 +211,30 @@ impl SimRadio {
     /// Make the next `count` [`Radio::poll_rx`] calls fail.
     pub fn inject_rx_errors(&mut self, count: usize) {
         self.rx_failures = count;
+    }
+
+    /// Test aid: make the next `count` calls of `setter` return [`SimError::Injected`].
+    ///
+    /// A failing call still applies its value before it returns the error. That is the worst case
+    /// for the caller: a driver may update its cached state, or the modem may have taken the
+    /// command, before an error. The SX1262 driver, for one, caches a new bandwidth, spreading
+    /// factor or coding rate before the SPI write that fails, and programs that cache with every
+    /// later modulation change. [`crate::Node`] answers a failure by calling the setter again with
+    /// the value the modem last accepted, which puts this radio back at that value.
+    pub fn inject_setter_errors(&mut self, setter: Setter, count: usize) {
+        self.setter_failures[setter as usize] = count;
+    }
+
+    /// Test aid: the timing last passed to [`Radio::set_dcd_timing`], as
+    /// `(preamble_ms, header_ms)`; `(0, 0)` before the first call.
+    pub fn dcd_timing(&self) -> (u32, u32) {
+        self.dcd_timing
+    }
+
+    /// Test aid: the preamble length in symbols last set with [`Radio::set_preamble_length`]
+    /// (18 before the first call).
+    pub fn preamble_length(&self) -> u16 {
+        self.with_ep(|e| e.preamble)
     }
 
     pub fn receive_calls(&self) -> usize {
@@ -232,6 +288,15 @@ impl SimRadio {
         *remaining = remaining.saturating_sub(1);
         fail
     }
+
+    /// The result of a call of `setter` that has applied its value: an injected error, if any.
+    fn setter_result(&mut self, setter: Setter) -> Result<(), SimError> {
+        if Self::take_failure(&mut self.setter_failures[setter as usize]) {
+            Err(setter.error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Radio for SimRadio {
@@ -257,7 +322,7 @@ impl Radio for SimRadio {
 
     fn set_frequency(&mut self, hz: u32) -> Result<(), Self::Error> {
         self.with_ep_mut(|e| e.frequency = hz);
-        Ok(())
+        self.setter_result(Setter::Frequency)
     }
     fn frequency(&self) -> u32 {
         self.with_ep(|e| e.frequency)
@@ -271,7 +336,7 @@ impl Radio for SimRadio {
         .find(|&bw| bw >= hz)
         .unwrap_or(500_000);
         self.with_ep_mut(|e| e.bandwidth = quantized);
-        Ok(())
+        self.setter_result(Setter::Bandwidth)
     }
     fn bandwidth(&self) -> u32 {
         self.with_ep(|e| e.bandwidth)
@@ -279,21 +344,21 @@ impl Radio for SimRadio {
 
     fn set_spreading_factor(&mut self, sf: u8) -> Result<(), Self::Error> {
         self.with_ep_mut(|e| e.sf = sf.clamp(5, 12));
-        Ok(())
+        self.setter_result(Setter::SpreadingFactor)
     }
     fn spreading_factor(&self) -> u8 {
         self.with_ep(|e| e.sf)
     }
     fn set_coding_rate(&mut self, denominator: u8) -> Result<(), Self::Error> {
         self.with_ep_mut(|e| e.cr = denominator.clamp(5, 8));
-        Ok(())
+        self.setter_result(Setter::CodingRate)
     }
     fn coding_rate(&self) -> u8 {
         self.with_ep(|e| e.cr)
     }
     fn set_tx_power(&mut self, dbm: i8) -> Result<(), Self::Error> {
         self.with_ep_mut(|e| e.tx_power = dbm);
-        Ok(())
+        self.setter_result(Setter::TxPower)
     }
     fn tx_power(&self) -> i8 {
         self.with_ep(|e| e.tx_power)

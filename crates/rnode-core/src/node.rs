@@ -42,7 +42,21 @@
 //!   `dia_conf_save()` writes the setting to EEPROM and reboots; we neither write anything nor
 //!   reset. [`NodeConfig::avoid_interference`] (the daemon's config file) is the persistent source
 //!   of truth, and the value set by the host survives `CMD_RESET` the way the EEPROM byte
-//!   survives the firmware's reboot. Like the firmware, the command sends no reply.
+//!   survives the firmware's reboot. Like the firmware, the command sends no reply;
+//! - a radio setter can fail. The firmware's setters cannot: `setFrequency()`, `setBandwidth()`
+//!   and the others in `Utilities.h` program the modem and read the value in use back, and
+//!   `kiss_indicate_*()` echoes that. Our [`Radio`] setters return a `Result`, and when
+//!   [`Radio::set_frequency`], [`Radio::set_bandwidth`], [`Radio::set_spreading_factor`],
+//!   [`Radio::set_coding_rate`] or [`Radio::set_tx_power`] fails, the node keeps the value the
+//!   modem last accepted, the one it last read back. It calls the setter again with that value,
+//!   leaves the PHY parameters, airtime accounting, CSMA and DCD timing as they were, sends no
+//!   `CMD_STAT_PHYPRM`, logs one warning naming the setter and the error, and echoes the kept
+//!   value. The host thus sees that the radio did not take its setting: Reticulum's
+//!   `RNodeInterface` compares frequency, bandwidth, TX power and spreading factor when it
+//!   configures the radio, and refuses to bring the interface up on a mismatch. While the radio
+//!   is coming online, the value the modem last accepted is what `begin()` programmed, as its
+//!   getter reports; like the firmware's `startRadio()`, the node echoes nothing then. While the
+//!   radio is offline, settings are only stored, so nothing can fail.
 //!
 //! Logging (`log` facade): at debug level, one line per packet delivered to the host (after
 //! split reassembly), one per host packet sent to the radio (before splitting, with its outcome)
@@ -66,7 +80,7 @@ use crate::fault_log::FaultLog;
 use crate::framing::{self, Reassembly, RxReassembler};
 use crate::identity::DeviceIdentity;
 use crate::kiss;
-use crate::packet_log::{HexDump, PacketSummary, RadioSummary, plural};
+use crate::packet_log::{HexDump, Hz, PacketSummary, RadioSummary, plural};
 use crate::phy::{self, Modulation, PhyParams};
 use crate::queue::TxQueue;
 use crate::radio::{Radio, RxFrame, TxOutcome};
@@ -138,6 +152,52 @@ fn log_tx(summary: PacketSummary, payload: &[u8], outcome: fmt::Arguments<'_>) {
 fn clamp_tx_power_byte(raw: u8, max_tx_power: u8) -> u8 {
     let max_dbm = (max_tx_power.min(i8::MAX as u8)) as i8;
     (raw as i8).clamp(MIN_TX_POWER_DBM, max_dbm) as u8
+}
+
+/// A value for one of the radio setters of the PHY settings the host configures
+/// (`CMD_FREQUENCY`, `CMD_BANDWIDTH`, `CMD_SF`, `CMD_CR`, `CMD_TXPOWER`).
+#[derive(Debug, Clone, Copy)]
+enum Setting {
+    Frequency(u32),
+    Bandwidth(u32),
+    SpreadingFactor(u8),
+    CodingRate(u8),
+    TxPower(i8),
+}
+
+impl Setting {
+    /// The name of the [`Radio`] setter, for the log.
+    fn setter(self) -> &'static str {
+        match self {
+            Self::Frequency(_) => "set_frequency",
+            Self::Bandwidth(_) => "set_bandwidth",
+            Self::SpreadingFactor(_) => "set_spreading_factor",
+            Self::CodingRate(_) => "set_coding_rate",
+            Self::TxPower(_) => "set_tx_power",
+        }
+    }
+
+    fn apply<R: Radio>(self, radio: &mut R) -> Result<(), R::Error> {
+        match self {
+            Self::Frequency(hz) => radio.set_frequency(hz),
+            Self::Bandwidth(hz) => radio.set_bandwidth(hz),
+            Self::SpreadingFactor(sf) => radio.set_spreading_factor(sf),
+            Self::CodingRate(cr) => radio.set_coding_rate(cr),
+            Self::TxPower(dbm) => radio.set_tx_power(dbm),
+        }
+    }
+}
+
+/// As in the radio settings lines: `867.2 MHz`, `125 kHz`, `SF7`, `CR 4/5`, `14 dBm`.
+impl fmt::Display for Setting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Frequency(hz) | Self::Bandwidth(hz) => write!(f, "{}", Hz(hz)),
+            Self::SpreadingFactor(sf) => write!(f, "SF{sf}"),
+            Self::CodingRate(cr) => write!(f, "CR 4/{cr}"),
+            Self::TxPower(dbm) => write!(f, "{dbm} dBm"),
+        }
+    }
 }
 
 /// An RNode: host protocol, TX queue, framing and channel access around a [`Radio`].
@@ -388,9 +448,10 @@ impl<R: Radio, S: Storage> Node<R, S> {
             kiss::CMD_FREQUENCY if payload.len() == 4 => {
                 let value = u32::from_be_bytes(payload.try_into().unwrap());
                 if value != 0 {
-                    self.freq = value;
-                    if self.radio_online {
-                        let _ = self.apply_radio(|r| r.set_frequency(value));
+                    if !self.radio_online {
+                        self.freq = value;
+                    } else if let Some(freq) = self.apply_setting(Setting::Frequency, R::frequency, value, self.freq) {
+                        self.freq = freq;
                     }
                 }
                 self.reply_u32_escaped(kiss::CMD_FREQUENCY, self.freq);
@@ -398,9 +459,10 @@ impl<R: Radio, S: Storage> Node<R, S> {
             kiss::CMD_BANDWIDTH if payload.len() == 4 => {
                 let value = u32::from_be_bytes(payload.try_into().unwrap());
                 if value != 0 {
-                    self.bw = value;
-                    if self.radio_online && self.apply_radio(|r| r.set_bandwidth(value)).is_ok() {
-                        self.bw = self.radio.bandwidth();
+                    if !self.radio_online {
+                        self.bw = value;
+                    } else if let Some(bw) = self.apply_setting(Setting::Bandwidth, R::bandwidth, value, self.bw) {
+                        self.bw = bw;
                         self.update_phy();
                     }
                 }
@@ -408,38 +470,39 @@ impl<R: Radio, S: Storage> Node<R, S> {
             }
             kiss::CMD_TXPOWER => {
                 if b0 != 0xFF {
-                    self.txp = clamp_tx_power_byte(b0, self.config.max_tx_power);
-                    if self.radio_online {
-                        let txp = self.txp as i8;
-                        if self.apply_radio(|r| r.set_tx_power(txp)).is_ok() {
-                            self.txp = self.radio.tx_power() as u8;
-                        }
+                    let txp = clamp_tx_power_byte(b0, self.config.max_tx_power);
+                    if !self.radio_online {
+                        self.txp = txp;
+                    } else if let Some(dbm) =
+                        self.apply_setting(Setting::TxPower, R::tx_power, txp as i8, self.txp as i8)
+                    {
+                        self.txp = dbm as u8;
                     }
                 }
                 kiss::frame_plain(kiss::CMD_TXPOWER, &[self.txp], &mut self.host_output);
             }
             kiss::CMD_SF => {
                 if b0 != 0xFF {
-                    self.sf = b0.clamp(5, 12);
-                    if self.radio_online {
-                        let sf = self.sf;
-                        if self.apply_radio(|r| r.set_spreading_factor(sf)).is_ok() {
-                            self.sf = self.radio.spreading_factor();
-                            self.update_phy();
-                        }
+                    let sf = b0.clamp(5, 12);
+                    if !self.radio_online {
+                        self.sf = sf;
+                    } else if let Some(sf) =
+                        self.apply_setting(Setting::SpreadingFactor, R::spreading_factor, sf, self.sf)
+                    {
+                        self.sf = sf;
+                        self.update_phy();
                     }
                 }
                 kiss::frame_plain(kiss::CMD_SF, &[self.sf], &mut self.host_output);
             }
             kiss::CMD_CR => {
                 if b0 != 0xFF {
-                    self.cr = b0.clamp(5, 8);
-                    if self.radio_online {
-                        let cr = self.cr;
-                        if self.apply_radio(|r| r.set_coding_rate(cr)).is_ok() {
-                            self.cr = self.radio.coding_rate();
-                            self.update_phy();
-                        }
+                    let cr = b0.clamp(5, 8);
+                    if !self.radio_online {
+                        self.cr = cr;
+                    } else if let Some(cr) = self.apply_setting(Setting::CodingRate, R::coding_rate, cr, self.cr) {
+                        self.cr = cr;
+                        self.update_phy();
                     }
                 }
                 kiss::frame_plain(kiss::CMD_CR, &[self.cr], &mut self.host_output);
@@ -592,23 +655,26 @@ impl<R: Radio, S: Storage> Node<R, S> {
         self.radio_online = true;
         self.csma.reset();
         self.last_status_ms = None;
-        let txp = clamp_tx_power_byte(self.txp, self.config.max_tx_power);
-        self.txp = txp;
-        if self.apply_radio(|r| r.set_tx_power(txp as i8)).is_ok() {
-            self.txp = self.radio.tx_power() as u8;
-        }
-        let bw = self.bw;
-        if self.apply_radio(|r| r.set_bandwidth(bw)).is_ok() {
-            self.bw = self.radio.bandwidth();
-        }
-        let sf = self.sf;
-        if self.apply_radio(|r| r.set_spreading_factor(sf)).is_ok() {
-            self.sf = self.radio.spreading_factor();
-        }
-        let cr = self.cr;
-        if self.apply_radio(|r| r.set_coding_rate(cr)).is_ok() {
-            self.cr = self.radio.coding_rate();
-        }
+        // Firmware startRadio(): setTXPower(), setBandwidth(), setSpreadingFactor() and
+        // setCodingRate(), each reading back the value in use. Where a setter fails, the modem
+        // keeps what begin() programmed, which the driver reports.
+        let txp = clamp_tx_power_byte(self.txp, self.config.max_tx_power) as i8;
+        let begun = self.radio.tx_power();
+        self.txp = self
+            .apply_setting(Setting::TxPower, R::tx_power, txp, begun)
+            .unwrap_or(begun) as u8;
+        let begun = self.radio.bandwidth();
+        self.bw = self
+            .apply_setting(Setting::Bandwidth, R::bandwidth, self.bw, begun)
+            .unwrap_or(begun);
+        let begun = self.radio.spreading_factor();
+        self.sf = self
+            .apply_setting(Setting::SpreadingFactor, R::spreading_factor, self.sf, begun)
+            .unwrap_or(begun);
+        let begun = self.radio.coding_rate();
+        self.cr = self
+            .apply_setting(Setting::CodingRate, R::coding_rate, self.cr, begun)
+            .unwrap_or(begun);
         let _ = self.apply_radio(|r| r.set_crc(true));
         self.update_phy();
         self.enter_receive();
@@ -943,6 +1009,39 @@ impl<R: Radio, S: Storage> Node<R, S> {
             Err(e) => {
                 log::warn!("radio operation failed: {e}");
                 Err(())
+            }
+        }
+    }
+
+    /// Apply `requested` to the online radio with the setter of `setting`, as firmware
+    /// `setFrequency()`, `setBandwidth()`, `setTXPower()`, `setSpreadingFactor()` and
+    /// `setCodingRate()` do, and return the value in use read back with `get`.
+    ///
+    /// If the setter fails, return `None`: the caller keeps `accepted`, the value the modem last
+    /// accepted (see the module docs). One warning names the setter and the error, and the setter
+    /// is called again with `accepted`, so that the modem and the driver's cached state are back at
+    /// the value the node reports. A driver may have updated its cache, or the modem may have
+    /// taken the command, before the error; the SX1262 driver would otherwise program the rejected
+    /// value with the next modulation change.
+    fn apply_setting<T: Copy>(
+        &mut self,
+        setting: fn(T) -> Setting,
+        get: fn(&R) -> T,
+        requested: T,
+        accepted: T,
+    ) -> Option<T> {
+        let (requested, accepted) = (setting(requested), setting(accepted));
+        match requested.apply(&mut self.radio) {
+            Ok(()) => Some(get(&self.radio)),
+            Err(e) => {
+                log::warn!(
+                    "radio {}({requested}) failed: {e}; keeping {accepted}",
+                    requested.setter()
+                );
+                if let Err(e) = accepted.apply(&mut self.radio) {
+                    log::warn!("radio {}({accepted}) failed while restoring it: {e}", accepted.setter());
+                }
+                None
             }
         }
     }

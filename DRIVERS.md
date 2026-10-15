@@ -215,9 +215,10 @@ The methods mirror the parts of the firmware's modem classes that `RNode_Firmwar
   `transmit()` short.
 - **Setters act immediately.** A setter programs the chip at once and updates the driver's cached
   state. A getter returns the value actually in use, after the driver rounded or clamped the
-  request. After setting the bandwidth, spreading factor, coding rate or TX power, `Node` reads the
-  getter back and reports that value to the host, and Reticulum compares it with its own
-  configuration.
+  request. After a setter of the frequency, bandwidth, spreading factor, coding rate or TX power
+  succeeds, `Node` reads the getter back and reports that value to the host, and Reticulum
+  compares it with its own configuration. If the setter fails, `Node` reports the value the
+  modem last accepted instead; see [Error handling](#error-handling).
 - **Exact on-air behaviour.** Register values, sync word, CRC, IQ, preamble and low-data-rate
   optimisation must match what RNode_Firmware programs for the same chip, or real RNodes will not
   hear you. Cite the firmware function you followed in each method's doc comment.
@@ -320,7 +321,8 @@ error at `WARN`, tells the host where the firmware would, and carries on:
 | Failure | What `Node` does |
 | --- | --- |
 | `begin()` returns `Err` | Logs `radio begin failed: …`, sends `CMD_ERROR` `ERROR_INITRADIO` and reports the radio as off. The host may retry |
-| A setter returns `Err` | Logs `radio operation failed: …` and keeps the requested value. It cannot know what the chip ended up with (issue #46) |
+| `set_frequency()`, `set_bandwidth()`, `set_spreading_factor()`, `set_coding_rate()` or `set_tx_power()` returns `Err` | Keeps the value the modem last accepted, the one it last read back: logs `radio set_bandwidth(250 kHz) failed: …; keeping 125 kHz`, calls the setter again with the kept value, leaves the PHY parameters, airtime, CSMA and DCD timing as they were, sends no `CMD_STAT_PHYPRM` and echoes the kept value, so the host sees that the radio did not take its setting. If the second call fails too, it logs `radio set_bandwidth(125 kHz) failed while restoring it: …`. While the radio comes online, the kept value is what `begin()` programmed, as the getter reports it then |
+| `set_preamble_length()`, `set_crc()` or `receive()` returns `Err` | Logs `radio operation failed: …` and carries on |
 | `transmit()` returns `Err` | Logs `radio transmit failed: …`, sends `ERROR_TXFAILED` and drops the packet, including any frame not yet sent. The rest of the queue waits for the next channel access |
 | `transmit()` returns `Ok(TxOutcome::Timeout)` | Sends `ERROR_MODEM_TIMEOUT` and `ERROR_TXFAILED` and hard-resets like the firmware: `end()`, empties the queue, reloads the saved settings and, if there are any, calls `begin()` again |
 | `poll_rx()` returns `Err` | Logs `radio RX service failed: …` and tries again on the next iteration |
@@ -340,6 +342,10 @@ Guidelines for driver authors:
 - **`Timeout` and `Err` mean different things.** `Timeout` means the modem took the frame but never
   reported TX done; the frame may or may not have gone out, and `Node` resets as the firmware does.
   `Err` means the driver could not talk to the modem; `Node` drops the packet and keeps running.
+- **A failed setter may leave your cache changed.** A setter that fails half-way, after updating
+  the driver's cached value or after the modem took part of the command, need not undo anything:
+  `Node` calls it again with the value the modem last accepted. What the getters must get right is
+  the value in use after a successful call, and after `begin()` the values it programmed.
 - **A CRC failure is not an error.** Clear the interrupt and return `Ok(None)`, as the firmware
   drops the packet.
 - **Map HAL errors** into your error type. `rnode-sx126x` wraps SPI errors as `Error::Spi(e)` and
@@ -527,9 +533,10 @@ hardware at all, which shows how little of the trait is about SPI:
 `rnode-core` has a third, much smaller radio for unit tests: `rnode_core::sim::SimRadio`, behind the
 `sim` feature. It runs on a virtual clock (`SimMedium::advance_ms()`) and can inject failures and
 frames: `inject_begin_failures()`, `inject_next_tx_error()`, `inject_next_timeout()`,
-`inject_dcd_errors()`, `inject_rssi_errors()`, `inject_rx_errors()` and `inject_rx()`. Use it to
-test how `Node` reacts to driver behaviour without writing a mock radio, as the tests in
-[`crates/rnode-core/tests`](crates/rnode-core/tests) do.
+`inject_dcd_errors()`, `inject_rssi_errors()`, `inject_rx_errors()`, `inject_setter_errors()` and
+`inject_rx()`. A setter failure injected with `inject_setter_errors()` applies the value before it
+fails, the worst case for `Node`. Use it to test how `Node` reacts to driver behaviour without
+writing a mock radio, as the tests in [`crates/rnode-core/tests`](crates/rnode-core/tests) do.
 
 ## Testing a driver
 

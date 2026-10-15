@@ -985,6 +985,14 @@ running the daemon in the foreground with its log in a private file that you del
   happen only on a start, a retune or a transmission. The daemon keeps running. When starting the
   radio or a transmission fails, the host also gets a KISS error (`ERROR_INITRADIO` or
   `ERROR_TXFAILED`).
+- `radio set_bandwidth(250 kHz) failed: SX126x BUSY timeout; keeping 125 kHz`: the modem did not
+  take a frequency, bandwidth, spreading factor, coding rate or TX power, named by the driver call
+  (`set_frequency`, `set_bandwidth`, `set_spreading_factor`, `set_coding_rate`, `set_tx_power`).
+  The daemon sets the modem back to the value it last accepted, keeps its timing, and reports that
+  value to the host. The host thus sees the mismatch: Reticulum does not bring the interface up
+  when the frequency, bandwidth, TX power or spreading factor the radio reports differ from its
+  configuration. `radio set_bandwidth(125 kHz) failed while restoring it: …` follows if setting the
+  old value back failed too.
 - `dropping host output because the PTY is not draining`: nobody reads the PTY, which is expected
   while no host is attached. It is logged once per stall, and again only after the PTY has taken a
   whole frame:
@@ -1198,6 +1206,10 @@ behaviour, except for these deliberate differences:
 - `CMD_DIS_IA` changes interference avoidance for the running daemon only and sends no reply. The
   firmware writes the setting to EEPROM and reboots; here the persistent setting is
   `[radio] avoid_interference`.
+- A modem can reject a frequency, bandwidth, spreading factor, coding rate or TX power, which the
+  firmware's setters cannot. The node then keeps the value the modem last accepted and echoes
+  that, as the firmware echoes the value it reads back, so the host sees that its setting did not
+  take; see [Warnings](#warnings).
 - A shutdown request cuts a burst of transmissions short. The firmware's `flush_queue()` sends
   every queued packet once a burst starts. rnode-linux stops between packets, never between the two
   frames of a split packet, and drops the packets still queued; see
@@ -1259,7 +1271,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | `WARN … radio begin failed: SX126x BUSY timeout` | BUSY stays high: wrong `busy` line, no power, or a TCXO the modem cannot start (check `tcxo_voltage`) |
 | `WARN … radio DCD failed: …`, `radio RSSI failed: …`, `radio RX service failed: …` | The modem stopped answering while the radio was on: power, wiring or SPI. Repeats are summarised every 10 s; an `INFO … recovered after …` line follows once the calls work again |
 | `WARN … modem timed out during TX` | The modem never reported TX done. Check `tcxo_voltage`, the power supply and `tx_timeout_ms`. The node resets after each timeout |
-| Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm (see [Running with Reticulum](#running-with-reticulum)) |
+| Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm (see [Running with Reticulum](#running-with-reticulum)). If the daemon logged `radio set_… failed`, the modem rejected the setting; see [Warnings](#warnings) |
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
 | `rnodeconf`: "Could not download EEPROM from device" | rnode-linux has no EEPROM; see [Using rnodeconf](#using-rnodeconf) |
