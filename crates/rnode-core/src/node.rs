@@ -56,7 +56,12 @@
 //!   configures the radio, and refuses to bring the interface up on a mismatch. While the radio
 //!   is coming online, the value the modem last accepted is what `begin()` programmed, as its
 //!   getter reports; like the firmware's `startRadio()`, the node echoes nothing then. While the
-//!   radio is offline, settings are only stored, so nothing can fail.
+//!   radio is offline, settings are only stored, so nothing can fail;
+//! - saved settings with a TX power from 128 to 254 are ignored with a warning, and the radio
+//!   waits for a host as if nothing were saved. `CMD_TXPOWER` is read as unsigned dBm, as in
+//!   firmware `serial_callback()`, but earlier builds read it as signed and saved −9…−2 dBm as
+//!   247…254, which would now select the highest power allowed. The firmware has no such case:
+//!   its EEPROM only ever holds the power its host path clamped to 22 dBm.
 //!
 //! Logging (`log` facade): at debug level, one line per packet delivered to the host (after
 //! split reassembly), one per host packet sent to the radio (before splitting, with its outcome)
@@ -94,7 +99,10 @@ const OFFLINE_WAKEUP_MS: u64 = 1_000;
 /// The config commands of one burst (RNodeInterface sends them back to back) give one line, and
 /// the last line logged is never stale for longer than this.
 const RETUNE_LOG_DELAY_MS: u64 = 100;
-const MIN_TX_POWER_DBM: i8 = -9;
+/// TX power bytes that [`Node::boot`] refuses in saved settings: −128…−2 dBm to earlier builds,
+/// which read `CMD_TXPOWER` as signed. The node clamps every request to
+/// [`NodeConfig::max_tx_power`] before it can be saved, so none of these is saved today.
+const REFUSED_SAVED_TX_POWER: core::ops::RangeInclusive<u8> = 0x80..=0xFE;
 
 /// Static configuration of a [`Node`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +110,8 @@ pub struct NodeConfig {
     /// What the node reports to the host.
     pub identity: DeviceIdentity,
     /// Highest TX power in dBm the host may request; higher requests are clamped
-    /// (firmware: 22 for an SX1262 without external PA).
+    /// (firmware: 22 for an SX1262 without external PA). Keep it below 128: [`Node::boot`]
+    /// refuses saved settings with a power from 128 up.
     pub max_tx_power: u8,
     /// Maximum number of packets in the TX queue (firmware `CONFIG_QUEUE_MAX_LENGTH`).
     pub queue_max_packets: usize,
@@ -149,9 +158,23 @@ fn log_tx(summary: PacketSummary, payload: &[u8], outcome: fmt::Arguments<'_>) {
     }
 }
 
-fn clamp_tx_power_byte(raw: u8, max_tx_power: u8) -> u8 {
-    let max_dbm = (max_tx_power.min(i8::MAX as u8)) as i8;
-    (raw as i8).clamp(MIN_TX_POWER_DBM, max_dbm) as u8
+/// The TX power a host's `CMD_TXPOWER` byte selects. Firmware `serial_callback()` reads the byte
+/// as unsigned dBm (`int txp = sbyte;`) and clamps it to the modem's maximum (`if (txp > 22)
+/// txp = 22;` on an SX1262 without a PA); here the maximum is [`NodeConfig::max_tx_power`].
+fn clamp_tx_power(requested: u8, max_tx_power: u8) -> u8 {
+    requested.min(max_tx_power)
+}
+
+/// `txp` as the signed dBm a [`Radio`] takes, saturating at `i8::MAX`; the driver clamps it to the
+/// modem's range.
+fn radio_dbm(txp: u8) -> i8 {
+    i8::try_from(txp).unwrap_or(i8::MAX)
+}
+
+/// The power a [`Radio`] reports, as the unsigned byte the host protocol carries. The node never
+/// asks for less than 0 dBm, so no driver has a reason to report less; it would read as 0.
+fn txp_byte(dbm: i8) -> u8 {
+    u8::try_from(dbm).unwrap_or(0)
 }
 
 /// A value for one of the radio setters of the PHY settings the host configures
@@ -278,8 +301,20 @@ impl<R: Radio, S: Storage> Node<R, S> {
     }
 
     /// Start-up: load saved radio settings and, if they are complete, bring the radio online.
+    ///
+    /// Settings with a TX power from 128 to 254 are ignored with a warning, and the radio stays off
+    /// until a host configures it, as if nothing were saved. Read as unsigned, such a byte would
+    /// select the highest power allowed, but it can only come from an earlier build, which read
+    /// `CMD_TXPOWER` as signed and saved −9…−2 dBm as 247…254, or from a hand-edited file. The
+    /// firmware's EEPROM never holds one: `eeprom_conf_save()` stores the power after its host
+    /// path clamped it to 22 dBm.
     pub fn boot(&mut self, now_ms: u64) {
         match self.storage.load() {
+            Ok(Some(settings)) if REFUSED_SAVED_TX_POWER.contains(&settings.tx_power) => log::warn!(
+                "ignoring saved radio settings: TX power {} is out of range (earlier builds saved -9 to -2 dBm \
+                 as 247 to 254); the radio stays off until a host configures it",
+                settings.tx_power
+            ),
             Ok(Some(settings)) => {
                 self.apply_settings(settings);
                 if !self.radio_locked() {
@@ -470,13 +505,13 @@ impl<R: Radio, S: Storage> Node<R, S> {
             }
             kiss::CMD_TXPOWER => {
                 if b0 != 0xFF {
-                    let txp = clamp_tx_power_byte(b0, self.config.max_tx_power);
+                    let txp = clamp_tx_power(b0, self.config.max_tx_power);
                     if !self.radio_online {
                         self.txp = txp;
                     } else if let Some(dbm) =
-                        self.apply_setting(Setting::TxPower, R::tx_power, txp as i8, self.txp as i8)
+                        self.apply_setting(Setting::TxPower, R::tx_power, radio_dbm(txp), radio_dbm(self.txp))
                     {
-                        self.txp = dbm as u8;
+                        self.txp = txp_byte(dbm);
                     }
                 }
                 kiss::frame_plain(kiss::CMD_TXPOWER, &[self.txp], &mut self.host_output);
@@ -658,11 +693,12 @@ impl<R: Radio, S: Storage> Node<R, S> {
         // Firmware startRadio(): setTXPower(), setBandwidth(), setSpreadingFactor() and
         // setCodingRate(), each reading back the value in use. Where a setter fails, the modem
         // keeps what begin() programmed, which the driver reports.
-        let txp = clamp_tx_power_byte(self.txp, self.config.max_tx_power) as i8;
+        let txp = radio_dbm(clamp_tx_power(self.txp, self.config.max_tx_power));
         let begun = self.radio.tx_power();
-        self.txp = self
-            .apply_setting(Setting::TxPower, R::tx_power, txp, begun)
-            .unwrap_or(begun) as u8;
+        self.txp = txp_byte(
+            self.apply_setting(Setting::TxPower, R::tx_power, txp, begun)
+                .unwrap_or(begun),
+        );
         let begun = self.radio.bandwidth();
         self.bw = self
             .apply_setting(Setting::Bandwidth, R::bandwidth, self.bw, begun)
@@ -706,7 +742,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
             bandwidth_hz: self.bw,
             spreading_factor: self.sf,
             coding_rate: self.cr,
-            tx_power_dbm: self.txp as i8,
+            tx_power_dbm: self.txp,
         }
     }
 
@@ -751,7 +787,12 @@ impl<R: Radio, S: Storage> Node<R, S> {
         self.bw = settings.bandwidth;
         self.sf = settings.spreading_factor.clamp(5, 12);
         self.cr = settings.coding_rate.clamp(5, 8);
-        self.txp = clamp_tx_power_byte(settings.tx_power, self.config.max_tx_power);
+        // 0xFF means no power was saved; it keeps the radio locked, as in firmware
+        // `update_radio_lock()` after `eeprom_conf_load()`.
+        self.txp = match settings.tx_power {
+            0xFF => 0xFF,
+            txp => clamp_tx_power(txp, self.config.max_tx_power),
+        };
     }
 
     fn conf_save(&mut self) {

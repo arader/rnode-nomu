@@ -79,6 +79,21 @@ pub struct RadioConfig {
     /// applies again after a restart.
     #[serde(default)]
     pub avoid_interference: bool,
+    /// Highest TX power in dBm the host may set (`rnode_core::NodeConfig::max_tx_power`). Higher
+    /// `CMD_TXPOWER` requests and saved settings are clamped to it, and the node reports the
+    /// clamped value back, as firmware `kiss_indicate_txpower()` reports the power it applied.
+    /// Unset, it is the driver's maximum, [`RadioDriver::max_tx_power_dbm`].
+    ///
+    /// [`Config::validate`] accepts 0 up to that maximum:
+    /// - Not below 0: the `CMD_TXPOWER` byte is unsigned dBm, as in firmware `serial_callback()`,
+    ///   and Reticulum's `RNodeInterface` rejects a `txpower` below 0, so no host asks for less;
+    ///   `NodeConfig::max_tx_power` is a `u8` too.
+    /// - Not above the driver's maximum: the modem cannot go higher, and while the radio is off
+    ///   the node echoes a request clamped only to the ceiling. A host asking for, say, 25 dBm
+    ///   would be told 25 dBm and transmit at 22, instead of getting the mismatch that the
+    ///   default ceiling gives it.
+    #[serde(default)]
+    pub max_tx_power_dbm: Option<i64>,
     #[serde(default)]
     pub sx1262: Sx1262Config,
     #[serde(default)]
@@ -90,6 +105,7 @@ impl Default for RadioConfig {
         Self {
             driver: RadioDriver::Sx1262,
             avoid_interference: false,
+            max_tx_power_dbm: None,
             sx1262: Sx1262Config::default(),
             sim: SimConfig::default(),
         }
@@ -100,6 +116,18 @@ impl Default for RadioConfig {
 pub enum RadioDriver {
     Sx1262,
     Sim,
+}
+
+impl RadioDriver {
+    /// The most TX power in dBm the driver's modem can be set to: the default and the upper bound
+    /// of `radio.max_tx_power_dbm`. Both drivers clamp to 22 dBm, the SX1262 without an external
+    /// PA (firmware `sx126x::setTxPower()`, and the `CMD_TXPOWER` handler's `txp > 22` clamp for
+    /// SX1262 boards without `HAS_LORA_PA`); the simulator stands in for an SX1262.
+    pub fn max_tx_power_dbm(self) -> u8 {
+        match self {
+            Self::Sx1262 | Self::Sim => 22,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for RadioDriver {
@@ -358,8 +386,15 @@ impl Config {
 
     /// The `rnode_core::Node` configuration this file selects.
     pub fn node_config(&self) -> rnode_core::NodeConfig {
+        let driver_max = self.radio.driver.max_tx_power_dbm();
         rnode_core::NodeConfig {
             avoid_interference: self.radio.avoid_interference,
+            // `validate()` keeps the setting within 0..=driver_max; clamping keeps a `Config` built
+            // without it within the driver's range too, and makes the cast lossless.
+            max_tx_power: self
+                .radio
+                .max_tx_power_dbm
+                .map_or(driver_max, |dbm| dbm.clamp(0, i64::from(driver_max)) as u8),
             ..rnode_core::NodeConfig::default()
         }
     }
@@ -415,6 +450,7 @@ impl Config {
                 }
             }
         }
+        self.validate_max_tx_power()?;
         self.pty.slave_permissions()?;
         if let Some(spi) = &self.spi {
             if spi.speed_hz == 0 {
@@ -422,6 +458,21 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Check `radio.max_tx_power_dbm` against the range given in [`RadioConfig::max_tx_power_dbm`].
+    fn validate_max_tx_power(&self) -> Result<(), ConfigError> {
+        let Some(dbm) = self.radio.max_tx_power_dbm else {
+            return Ok(());
+        };
+        let max = self.radio.driver.max_tx_power_dbm();
+        if (0..=i64::from(max)).contains(&dbm) {
+            return Ok(());
+        }
+        Err(ConfigError::Invalid(format!(
+            "radio.max_tx_power_dbm = {dbm} is out of range; the {} driver allows 0 to {max} dBm",
+            self.radio.driver
+        )))
     }
 }
 

@@ -67,6 +67,95 @@ fn avoid_interference_sets_the_node_config() {
     }
 }
 
+fn config_with_max_tx_power(driver: RadioDriver, dbm: &str) -> Result<Config, ConfigError> {
+    let hardware = match driver {
+        RadioDriver::Sx1262 => "[spi]\ndevice = \"/dev/spidev0.0\"\n[gpio]\nreset = 1\nbusy = 2\ndio1 = 3\n",
+        RadioDriver::Sim => "",
+    };
+    Config::from_toml(&format!(
+        "{hardware}[radio]\ndriver = \"{driver}\"\nmax_tx_power_dbm = {dbm}\n"
+    ))
+}
+
+#[test]
+fn max_tx_power_dbm_sets_the_node_config_ceiling() {
+    // Firmware `sx126x::setTxPower()` and the CMD_TXPOWER handler stop an SX1262 without an
+    // external PA at 22 dBm; the core's default ceiling is that limit, and both drivers share it.
+    assert_eq!(NodeConfig::default().max_tx_power, 22);
+    assert_eq!(RadioDriver::Sx1262.max_tx_power_dbm(), 22);
+    assert_eq!(RadioDriver::Sim.max_tx_power_dbm(), 22);
+
+    // Unset keeps the behaviour from before the setting existed.
+    let omitted = Config::from_toml("[radio]\ndriver = \"sim\"\n").unwrap();
+    assert_eq!(omitted.radio.max_tx_power_dbm, None);
+    assert_eq!(omitted.node_config(), NodeConfig::default());
+    for example in ["config.example.toml", "config.uconsole-aio-v2.toml"] {
+        let cfg = Config::from_toml(&fs::read_to_string(repo_path(example)).unwrap()).unwrap();
+        assert_eq!(cfg.radio.max_tx_power_dbm, None, "{example}");
+        assert_eq!(cfg.node_config().max_tx_power, 22, "{example}");
+    }
+
+    for driver in [RadioDriver::Sx1262, RadioDriver::Sim] {
+        for dbm in [0_u8, 2, 10, 21, 22] {
+            let cfg = config_with_max_tx_power(driver, &dbm.to_string())
+                .unwrap_or_else(|e| panic!("{driver} with {dbm} dBm rejected: {e}"));
+            assert_eq!(cfg.radio.max_tx_power_dbm, Some(i64::from(dbm)));
+            assert_eq!(
+                cfg.node_config(),
+                NodeConfig {
+                    max_tx_power: dbm,
+                    ..NodeConfig::default()
+                },
+                "{driver} with {dbm} dBm"
+            );
+        }
+    }
+    // Combines with the other node setting; TOML's hex integers work as everywhere in the file.
+    let both =
+        Config::from_toml("[radio]\ndriver = \"sim\"\navoid_interference = true\nmax_tx_power_dbm = 0x0A\n").unwrap();
+    assert_eq!(
+        both.node_config(),
+        NodeConfig {
+            avoid_interference: true,
+            max_tx_power: 10,
+            ..NodeConfig::default()
+        }
+    );
+}
+
+#[test]
+fn max_tx_power_dbm_outside_the_driver_range_is_rejected() {
+    for driver in [RadioDriver::Sx1262, RadioDriver::Sim] {
+        for dbm in [-1, -9, 23, 28, 37, 127, 255, 1000, i64::MIN, i64::MAX] {
+            let err = config_with_max_tx_power(driver, &dbm.to_string()).unwrap_err();
+            assert!(matches!(err, ConfigError::Invalid(_)), "{driver} with {dbm}: {err}");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid config: radio.max_tx_power_dbm = {dbm} is out of range; the {driver} driver allows 0 to 22 dBm"
+                )
+            );
+        }
+        // Not an integer: TOML's type error, before validation.
+        for text in ["10.5", "\"10\"", "true"] {
+            let err = config_with_max_tx_power(driver, text).unwrap_err();
+            assert!(matches!(err, ConfigError::Parse { .. }), "{driver} with {text}: {err}");
+            assert!(err.to_string().contains("max_tx_power_dbm"), "{err}");
+        }
+    }
+}
+
+#[test]
+fn node_config_keeps_an_unvalidated_ceiling_within_the_driver_range() {
+    // `Config`'s fields are public, so a caller can bypass `validate()`; the node still never gets a
+    // ceiling outside what the driver can produce.
+    let mut cfg = Config::from_toml("[radio]\ndriver = \"sim\"\n").unwrap();
+    for (dbm, ceiling) in [(-5, 0), (i64::MIN, 0), (23, 22), (i64::MAX, 22), (7, 7)] {
+        cfg.radio.max_tx_power_dbm = Some(dbm);
+        assert_eq!(cfg.node_config().max_tx_power, ceiling, "{dbm}");
+    }
+}
+
 #[test]
 fn warns_once_when_saved_radio_settings_cannot_persist() {
     let ephemeral = Config::from_toml("[radio]\ndriver = \"sim\"\n").unwrap();

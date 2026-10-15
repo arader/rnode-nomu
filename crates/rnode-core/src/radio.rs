@@ -73,7 +73,9 @@ pub trait Radio {
     /// The coding rate denominator in use (5–8).
     fn coding_rate(&self) -> u8;
 
-    /// Set the TX power in dBm (clamped to the modem's range).
+    /// Set the TX power in dBm (clamped to the modem's range). `Node` passes 0 dBm up to
+    /// `NodeConfig::max_tx_power`, as RNode hosts cannot ask for less; the type is signed because
+    /// modems go below 0 dBm.
     fn set_tx_power(&mut self, dbm: i8) -> Result<(), Self::Error>;
 
     /// The TX power in dBm in use.

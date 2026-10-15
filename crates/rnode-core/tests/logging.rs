@@ -500,7 +500,7 @@ fn radio_online_and_offline_transitions_are_logged_at_info_with_the_settings() {
         bandwidth: 30_000,
         spreading_factor: 10,
         coding_rate: 6,
-        tx_power: (-2_i8) as u8,
+        tx_power: 0,
     };
     let mut n = Node::new(
         medium.radio(),
@@ -519,7 +519,7 @@ fn radio_online_and_offline_transitions_are_logged_at_info_with_the_settings() {
     n.shutdown();
     let records = cap.take();
     assert!(records.iter().all(|r| r.level == Level::Info), "{records:?}");
-    let saved_line = "433.775 MHz, 31.25 kHz, SF10, CR 4/6, -2 dBm";
+    let saved_line = "433.775 MHz, 31.25 kHz, SF10, CR 4/6, 0 dBm";
     let host_line = "867.2 MHz, 125 kHz, SF7, CR 4/5, 14 dBm";
     assert_eq!(
         messages(&records, Level::Info, ""),

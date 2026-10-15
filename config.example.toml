@@ -23,6 +23,10 @@ driver = "sx1262" # "sx1262" or "sim"
 # This can avoid strong interference, but also defers TX during initial floor sampling (~384 ms).
 # Applied at startup; a host can switch it with CMD_DIS_IA until the daemon restarts.
 avoid_interference = false
+# Highest TX power in dBm a host may set: 0 to 22, default 22 (the SX1262 maximum). Higher
+# requests are clamped and the host is told the clamped value, so keep Reticulum's txpower at or
+# below it. For regional limits, bench tests, or a front end that cannot take full power.
+# max_tx_power_dbm = 10
 
 [radio.sx1262]
 # DIO3-driven TCXO supply: one of 1.6V, 1.7V, 1.8V, 2.2V, 2.4V, 2.7V, 3.0V, 3.3V.

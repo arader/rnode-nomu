@@ -157,12 +157,13 @@ is off, the loop waits for at most 50 ms between checks.
   illegal in other regions: Europe, for example, uses 863–870 MHz with duty-cycle limits.
 - **rnode-linux enforces no regional rules.** The host (Reticulum) chooses the frequency,
   bandwidth, spreading factor, coding rate and TX power over KISS, or they come from the saved
-  settings file. The daemon only clamps TX power to the SX1262's −9…22 dBm range. Reticulum's
+  settings file. The daemon only caps TX power at the SX1262's 22 dBm, or at a lower ceiling you
+  set with [`[radio] max_tx_power_dbm`](#radio). Reticulum's
   `airtime_limit_short` and `airtime_limit_long` options can help you stay within a duty cycle.
 - **Attach an antenna or a dummy load before transmitting.** Transmitting into an open RF port can
   damage the power amplifier.
 - **Start with low power** (the examples use 2 dBm) and raise it only as far as you need and are
-  allowed.
+  allowed. `max_tx_power_dbm` keeps any host from going higher.
 
 ## Quick start without hardware
 
@@ -451,6 +452,8 @@ has no RXEN line. The board switches its peripherals on and off with GPIOs on th
    [radio]
    driver = "sx1262"
    avoid_interference = false
+   # Cap the TX power hosts may set (0 to 22 dBm, default 22), e.g. for bench tests:
+   # max_tx_power_dbm = 10
 
    [radio.sx1262]
    tcxo_voltage = "1.8V"
@@ -558,7 +561,8 @@ resent it. Every packet showed up in the daemon's debug log.
 The daemon reads one TOML file. It contains only how the hardware is wired and how the daemon
 behaves. Radio link parameters (frequency, bandwidth, spreading factor, coding rate, TX power) are
 not in it: the host sets them over KISS, as with any RNode, and `CMD_CONF_SAVE` stores them in the
-[saved settings file](#saved-radio-settings).
+[saved settings file](#saved-radio-settings). The config can only cap the TX power, with
+[`max_tx_power_dbm`](#radio).
 
 - Unknown sections and keys are errors, so typos fail at startup instead of being ignored.
 - Relative paths resolve against the daemon's working directory, not the config file's location.
@@ -601,6 +605,7 @@ lines do then depends on the kernel's GPIO driver; use `power_off_on_exit` if th
 | --- | --- | --- | --- |
 | `driver` | string | `"sx1262"` | `"sx1262"` for the hardware driver, `"sim"` for the simulator |
 | `avoid_interference` | bool | `false` | Interference avoidance at startup; see below |
+| `max_tx_power_dbm` | integer | `22` | Highest TX power in dBm a host may set, from 0 to 22; see below |
 
 **`avoid_interference`** decides whether CSMA/CA treats strong non-LoRa signals as a busy channel
 (firmware `avoid_interference`). When it is on, the channel counts as busy while the RSSI is more
@@ -616,6 +621,28 @@ than 11 dB above the measured noise floor and no LoRa carrier is detected (firmw
 - The host can change the running value with `CMD_DIS_IA`. Unlike the firmware, which stores the
   value in EEPROM and reboots, rnode-linux keeps it until the daemon exits (including across
   `CMD_RESET`) and logs it at `INFO`. The config file stays the persistent setting.
+
+**`max_tx_power_dbm`** caps the TX power below the SX1262's 22 dBm, for a regional limit, a bench
+setup, or a module or antenna that cannot take full power:
+
+- A host's `CMD_TXPOWER` above the ceiling sets the ceiling, and the daemon reports the clamped
+  value back, as RNode_Firmware's `kiss_indicate_txpower()` reports the power it applied. Settings
+  saved with `CMD_CONF_SAVE` are clamped too when they are loaded, so a power saved before you
+  lowered the ceiling is capped as well.
+- Reticulum compares the reported power with its `txpower` and refuses the interface if they
+  differ (`TX power mismatch`, then "the reported radio parameters did not match your
+  configuration"). Set `txpower` to at most the ceiling.
+- The range is 0 to 22 dBm. RNode hosts only ask for 0 dBm or more: Reticulum rejects a negative
+  `txpower`, and the power byte is unsigned, as in RNode_Firmware. 22 dBm is the most an SX1262
+  gives without an external amplifier. The `sim` driver has the same range. Values outside it stop
+  the daemon at startup:
+
+  ```text
+  fatal: load /etc/rnode-linux.toml: invalid config: radio.max_tx_power_dbm = 30 is out of range; the sx1262 driver allows 0 to 22 dBm
+  ```
+
+- The ceiling limits the power the modem is set to. Antenna gain comes on top of it, so check the
+  radiated power against your limit.
 
 ### `[radio.sx1262]`
 
@@ -699,6 +726,7 @@ The radio then stays off after a restart or a `CMD_RESET` until a host configure
 - `radio.driver = "sx1262"` and `[spi]` or `[gpio]` is missing, or `tcxo_voltage` is not one of the
   listed voltages;
 - `radio.driver = "sim"` and `loss` is outside 0.0–1.0;
+- `radio.max_tx_power_dbm` is outside 0–22;
 - `spi.speed_hz` is 0;
 - `pty.mode` is not an octal permission string, sets setuid, setgid or sticky, or takes read or
   write access away from the owner;
@@ -731,6 +759,20 @@ When the file holds a complete set, the radio comes up without a host at startup
 `CMD_CONF_DELETE` removes the file. The daemon writes a temporary file next to
 it and renames it into place, with mode `0600`, and creates missing parent directories. A missing
 file means nothing is saved; a corrupt one is ignored with a `WARN` line.
+
+`tx_power` is in dBm, 0 or more. A value above 22 dBm, or above [`max_tx_power_dbm`](#radio), is
+lowered to that limit when the file is loaded. Builds before the fix for issue #75 read the host's
+power as signed, and saved −9…−2 dBm as 247…254; read as unsigned, those would mean the highest
+power allowed. So the daemon ignores a file whose `tx_power` is 128 to 254, logs a `WARN` line, and
+leaves the radio off until a host configures it:
+
+```text
+[2026-10-15T08:12:30Z WARN  rnode_core::node] ignoring saved radio settings: TX power 247 is out of range (earlier builds saved -9 to -2 dBm as 247 to 254); the radio stays off until a host configures it
+```
+
+Set `tx_power` to the power you want, delete the file, or have a host save new settings with
+`CMD_CONF_SAVE`. RNode_Firmware never meets such a value: its EEPROM only ever holds the power its
+host path clamped to 22 dBm.
 
 `rnodeconf --tnc` cannot configure rnode-linux (see [Using rnodeconf](#using-rnodeconf)). To
 provision TNC mode, write this file yourself, or have a host configure the radio and send
@@ -774,8 +816,8 @@ spreading factor.
 - `bandwidth` must be one the SX1262 supports: 7800, 10400, 15600, 20800, 31250, 41700, 62500,
   125000, 250000 or 500000 Hz. The modem rounds other values up, Reticulum sees a different value
   and aborts with "the reported radio parameters did not match your configuration".
-- `txpower` may be at most 22 dBm, the SX1262 limit. Higher values are clamped and abort the same
-  way.
+- `txpower` may be at most 22 dBm, the SX1262 limit, or the daemon's
+  [`max_tx_power_dbm`](#radio) if that is lower. Higher values are clamped and abort the same way.
 - `airtime_limit_short` and `airtime_limit_long` work as with any RNode.
 - Start the daemon before Reticulum, or let Reticulum retry: it tries to reopen the port every
   5 seconds.
@@ -1063,6 +1105,10 @@ running the daemon in the foreground with its log in a private file that you del
 - `failed to save radio settings: …` and `failed to delete radio settings: …`: the settings file or
   its directory is not writable. `ignoring corrupt radio settings file …` means the file could not
   be parsed and the daemon started without saved settings.
+- `ignoring saved radio settings: TX power N is out of range …`: the file holds a `tx_power` from
+  128 to 254, probably a negative power saved by an earlier build; see
+  [Saved radio settings](#saved-radio-settings). It is logged on every start and `CMD_RESET` until
+  the file is fixed.
 
 Logging never changes what the daemon sends to the host or the radio. Below `debug` the per-packet
 code costs only a level check.
@@ -1275,6 +1321,9 @@ behaviour, except for these deliberate differences:
   [Stopping the daemon](#stopping-the-daemon).
 - `CMD_RESET` resets the node's state and reloads the saved settings without restarting the
   process, so the PTY stays open.
+- Saved settings with a TX power from 128 to 254 are ignored with a warning, and the radio waits
+  for a host. Earlier builds saved negative powers that way; see
+  [Saved radio settings](#saved-radio-settings). The firmware's EEPROM never holds such a value.
 - The node identifies as a Linux platform: platform `0x60`, MCU `0x61` and board `0x60`, values
   that no firmware build uses, with firmware version 1.86.
 
@@ -1303,8 +1352,9 @@ never answered on request; and data frames over 508 bytes are dropped without an
 - **SX1262 only.** Other modems need a driver; see [DRIVERS.md](DRIVERS.md).
 - **One modem per daemon.** For several modems, run one daemon per modem, each with its own config,
   PTY and settings file.
-- **TX power tops out at 22 dBm**, the SX1262 without an external amplifier. A configurable ceiling
-  and amplifier support are tracked in issue #48.
+- **TX power tops out at 22 dBm**, the SX1262 without an external amplifier;
+  [`max_tx_power_dbm`](#radio) sets a lower ceiling. Boards with an external amplifier, which need
+  the firmware's per-amplifier gain tables, are not supported yet (issue #73).
 - **One GPIO chip.** All of a modem's GPIO lines must be on the chip named by `[gpio] chip`.
 - **No TXEN line.** The RF switch is driven by DIO2, optionally with an RX-enable GPIO.
 - **Hardware support needs Linux;** other systems can only run the simulator.
@@ -1315,7 +1365,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | Symptom | Cause and fix |
 | --- | --- |
 | `fatal: load config.toml: failed to read config.toml: No such file or directory (os error 2)` | No config in the working directory. Pass `--config /etc/rnode-linux.toml` |
-| ``fatal: load …: … unknown field `frequency`, expected one of `driver`, `avoid_interference`, `sx1262`, `sim` `` | Link parameters do not belong in the config; the host sets them. Other unknown fields are usually typos |
+| ``fatal: load …: … unknown field `frequency`, expected one of `driver`, `avoid_interference`, `max_tx_power_dbm`, `sx1262`, `sim` `` | Link parameters do not belong in the config; the host sets them. Other unknown fields are usually typos |
 | `fatal: load …: invalid config: [spi] is required when radio.driver = "sx1262"` | `driver` defaults to `"sx1262"`. Add `[spi]` and `[gpio]`, or set `driver = "sim"` |
 | `fatal: load …: invalid config: pty.group "…" is not a known group` | Create the group, or fix the name |
 | `fatal: sx1262 hardware daemon runs only on Linux` | Use the `sim` driver on other systems |
@@ -1330,7 +1380,8 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | `WARN … radio begin failed: SX126x BUSY timeout` | BUSY stays high: wrong `busy` line, no power, or a TCXO the modem cannot start (check `tcxo_voltage`) |
 | `WARN … radio DCD failed: …`, `radio RSSI failed: …`, `radio RX service failed: …` | The modem stopped answering while the radio was on: power, wiring or SPI. Repeats are summarised every 10 s; an `INFO … recovered after …` line follows once the calls work again |
 | `WARN … modem timed out during TX` | The modem never reported TX done. Check `tcxo_voltage`, the power supply and `tx_timeout_ms`. The node resets after each timeout |
-| Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm (see [Running with Reticulum](#running-with-reticulum)). If the daemon logged `radio set_… failed`, the modem rejected the setting; see [Warnings](#warnings) |
+| `WARN … ignoring saved radio settings: TX power 247 is out of range …` | An earlier build saved a negative power. Set `tx_power` in the settings file to the power you want, or delete the file (see [Saved radio settings](#saved-radio-settings)) |
+| Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm, or at most `max_tx_power_dbm` if you set it (see [Running with Reticulum](#running-with-reticulum)). If the daemon logged `radio set_… failed`, the modem rejected the setting; see [Warnings](#warnings) |
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
 | `rnodeconf`: "Could not download EEPROM from device" | rnode-linux has no EEPROM; see [Using rnodeconf](#using-rnodeconf) |

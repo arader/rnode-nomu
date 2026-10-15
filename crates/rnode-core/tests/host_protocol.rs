@@ -124,18 +124,43 @@ fn oversize_kiss_frame_is_ignored_with_queue_capacity_available() {
     assert_eq!(n.queued_bytes(), 0);
 }
 
+/// Firmware `serial_callback()` reads the `CMD_TXPOWER` byte as unsigned (`int txp = sbyte;`) and
+/// clamps it to 22 dBm on an SX1262 without a PA; `kiss_indicate_txpower()` then reports
+/// `lora_txp`. These are the replies of an RNode, with the radio off and on (#75).
 #[test]
-fn txpower_clamps_in_signed_dbm_space() {
+fn txpower_reads_the_byte_unsigned_and_clamps_like_the_firmware() {
+    let golden = [(0x00, 0), (0x16, 22), (0x17, 22), (0x80, 22), (0xFE, 22)];
+    let mut off = node(1);
+    let mut on = node(1);
+    init(&mut on);
+    for (request, reply) in golden {
+        off.handle_host_input(&plain(CMD_TXPOWER, &[request]), 0);
+        assert_eq!(off.take_host_output(), plain(CMD_TXPOWER, &[reply]), "{request:#04X}");
+        on.handle_host_input(&plain(CMD_TXPOWER, &[request]), 0);
+        assert_eq!(on.take_host_output(), plain(CMD_TXPOWER, &[reply]), "{request:#04X}");
+        assert_eq!(on.radio().tx_power(), reply as i8, "{request:#04X}");
+    }
+    // 0xFF asks for the power in use.
+    on.handle_host_input(&plain(CMD_TXPOWER, &[0xFF]), 0);
+    assert_eq!(on.take_host_output(), plain(CMD_TXPOWER, &[22]));
+
+    // A lower ceiling takes the place of 22.
     let medium = SimMedium::new();
-    let mut n = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
-    init(&mut n);
-    n.take_host_output();
-    n.handle_host_input(&plain(CMD_TXPOWER, &[0x80]), 0);
-    assert_eq!(n.take_host_output(), plain(CMD_TXPOWER, &[0xF7]));
-    assert_eq!(n.radio().tx_power(), -9);
-    n.handle_host_input(&plain(CMD_TXPOWER, &[0xF7]), 0);
-    assert_eq!(n.take_host_output(), plain(CMD_TXPOWER, &[0xF7]));
-    assert_eq!(n.radio().tx_power(), -9);
+    let config = NodeConfig {
+        max_tx_power: 10,
+        ..NodeConfig::default()
+    };
+    let mut capped = Node::new(medium.radio(), MemoryStorage::default(), config, 1);
+    init(&mut capped);
+    for (request, reply) in [(0x00, 0), (0x0A, 10), (0x0B, 10), (0x16, 10), (0x80, 10), (0xFE, 10)] {
+        capped.handle_host_input(&plain(CMD_TXPOWER, &[request]), 0);
+        assert_eq!(
+            capped.take_host_output(),
+            plain(CMD_TXPOWER, &[reply]),
+            "{request:#04X}"
+        );
+        assert_eq!(capped.radio().tx_power(), reply as i8, "{request:#04X}");
+    }
 }
 
 #[test]

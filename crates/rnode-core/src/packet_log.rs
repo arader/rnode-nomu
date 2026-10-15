@@ -115,7 +115,7 @@ pub(crate) struct RadioSummary {
     pub bandwidth_hz: u32,
     pub spreading_factor: u8,
     pub coding_rate: u8,
-    pub tx_power_dbm: i8,
+    pub tx_power_dbm: u8,
 }
 
 impl fmt::Display for RadioSummary {

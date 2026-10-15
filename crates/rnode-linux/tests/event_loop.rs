@@ -1,6 +1,8 @@
 //! Event-loop tests: the poll timeout derived from `Node::next_wakeup_ms()`, shutdown (also in the
 //! middle of a long TX burst), IRQ draining, a received frame travelling from a simulated radio's
 //! IRQ to the host's PTY, and host packets travelling from the PTY to a peer on the simulated air.
+//! Also the node settings the config file selects (interference avoidance, the TX power ceiling),
+//! as a host sees them through the real `Node`, and a settings file it refuses.
 
 mod common;
 
@@ -14,10 +16,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use rnode_core::phy::{Modulation, PhyParams, airtime_ms, low_data_rate};
-use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, RadioSettings, RxFrame, TxOutcome};
+use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, RadioSettings, RxFrame, Storage, TxOutcome};
 use rnode_linux::config::Config;
 use rnode_linux::event_loop::{FdIrqSource, NoIrq, POLL_TIMEOUT_CAP_MS, cap_timeout_ms, compute_timeout_ms, run};
 use rnode_linux::pty::PtyPair;
+use rnode_linux::storage::TomlStorage;
 use rnode_sim::{SimConfig, SimRadio};
 use serial_test::serial;
 
@@ -237,6 +240,115 @@ fn avoid_interference_starts_from_config_and_host_can_switch_it() {
     assert!(!node.avoid_interference());
     node.handle_host_input(&[0xC0, 0x69, 0x00, 0xC0], 1);
     assert!(node.avoid_interference());
+}
+
+/// `CMD_TXPOWER` with one byte, as `RNodeInterface.setTXPower()` sends it and firmware
+/// `kiss_indicate_txpower()` answers; `0xFF` asks for the current power.
+fn txpower_frame(dbm: u8) -> [u8; 4] {
+    [0xC0, 0x03, dbm, 0xC0]
+}
+
+/// The TX power ceiling a config selects, as a host sees it through the real `Node`. The test radio
+/// applies any power it is given, so every clamp here is the node's.
+#[test]
+fn tx_power_ceiling_from_config_clamps_and_echoes_host_requests() {
+    let cfg = Config::from_toml("[radio]\ndriver = \"sim\"\nmax_tx_power_dbm = 10\n").unwrap();
+    let mut node = Node::new(TestRadio::default(), MemoryStorage::default(), cfg.node_config(), 1);
+
+    // RNodeInterface asks for 14 dBm while the radio is off. Like firmware `kiss_indicate_txpower()`
+    // after its clamp, the node answers with the power it will use, so Reticulum reports a TX power
+    // mismatch, as with an RNode asked for more than its hardware can do.
+    node.handle_host_input(RNODEINTERFACE_INIT_RADIO, 0);
+    let replies = node.take_host_output();
+    assert!(
+        replies.windows(4).any(|frame| frame == txpower_frame(10)),
+        "{replies:02X?}"
+    );
+    assert!(
+        !replies.windows(4).any(|frame| frame == txpower_frame(14)),
+        "{replies:02X?}"
+    );
+    assert!(replies.ends_with(RADIO_STATE_ON_REPLY), "{replies:02X?}");
+    assert_eq!(node.radio().tx_power(), 10, "the radio started above the ceiling");
+
+    // With the radio on, requests above the ceiling set the ceiling.
+    for dbm in [11, 14, 22, 23, 0x7F] {
+        node.handle_host_input(&txpower_frame(dbm), 1);
+        assert_eq!(node.take_host_output(), txpower_frame(10), "{dbm} dBm");
+        assert_eq!(node.radio().tx_power(), 10, "{dbm} dBm");
+    }
+    // Requests up to the ceiling are applied unchanged, and a query reports the power in use.
+    for dbm in [10, 2, 0] {
+        node.handle_host_input(&txpower_frame(dbm), 2);
+        assert_eq!(node.take_host_output(), txpower_frame(dbm), "{dbm} dBm");
+        assert_eq!(node.radio().tx_power(), dbm as i8, "{dbm} dBm");
+    }
+    node.handle_host_input(&txpower_frame(0xFF), 3);
+    assert_eq!(node.take_host_output(), txpower_frame(0));
+}
+
+#[test]
+fn tx_power_ceiling_from_config_applies_to_saved_settings() {
+    let cfg = Config::from_toml("[radio]\ndriver = \"sim\"\nmax_tx_power_dbm = 10\n").unwrap();
+    let saved = RadioSettings {
+        tx_power: 22,
+        ..SAVED_SETTINGS
+    };
+    let mut node = Node::new(
+        TestRadio::default(),
+        MemoryStorage::with_settings(saved),
+        cfg.node_config(),
+        1,
+    );
+    // Settings saved before the ceiling was lowered bring the radio up at the ceiling.
+    node.boot(0);
+    assert!(node.is_radio_online());
+    assert_eq!(node.radio().tx_power(), 10);
+    node.take_host_output();
+    node.handle_host_input(&txpower_frame(0xFF), 1);
+    assert_eq!(node.take_host_output(), txpower_frame(10));
+}
+
+/// #75: a settings file that an earlier build saved for −9 dBm holds `tx_power = 247`. Read as
+/// unsigned that would be the most power allowed, so the node ignores the file and waits for a
+/// host; the host's next `CMD_CONF_SAVE` replaces it.
+#[test]
+fn settings_file_with_a_negative_power_from_an_earlier_build_is_ignored() {
+    let dir = test_dir("negative-saved-power");
+    let path = dir.join("radio_settings.toml");
+    // TomlStorage is unchanged: this is the file an earlier build saved after a host set -9 dBm.
+    let negative = RadioSettings {
+        tx_power: (-9_i8) as u8,
+        ..SAVED_SETTINGS
+    };
+    TomlStorage::new(Some(path.clone())).save(&negative).unwrap();
+    let earlier_build =
+        "frequency = 867200000\nbandwidth = 125000\nspreading_factor = 7\ncoding_rate = 5\ntx_power = 247\n";
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), earlier_build);
+    let cfg = Config::from_toml("[radio]\ndriver = \"sim\"\n").unwrap();
+
+    let mut node = Node::new(
+        TestRadio::default(),
+        TomlStorage::new(Some(path.clone())),
+        cfg.node_config(),
+        1,
+    );
+    node.boot(0);
+    assert!(!node.is_radio_online());
+    assert_eq!((node.radio().frequency(), node.radio().tx_power()), (0, 0));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), earlier_build);
+
+    node.handle_host_input(RNODEINTERFACE_INIT_RADIO, 1);
+    assert!(node.is_radio_online());
+    node.handle_host_input(&[0xC0, 0x53, 0x00, 0xC0], 2); // CMD_CONF_SAVE
+    assert_eq!(
+        TomlStorage::new(Some(path.clone())).load().unwrap(),
+        Some(SAVED_SETTINGS)
+    );
+    let mut restarted = Node::new(TestRadio::default(), TomlStorage::new(Some(path)), cfg.node_config(), 2);
+    restarted.boot(0);
+    assert!(restarted.is_radio_online());
+    assert_eq!(restarted.radio().tx_power(), 14);
 }
 
 #[test]
