@@ -288,10 +288,63 @@ was on the air at SF11, and the daemon exited 1.1 s later:
 RNode_Firmware sends every queued packet once a burst starts; stopping between packets is one of
 the [deliberate differences](#differences-from-rnode_firmware).
 
-The packet on the air can take minutes at the slowest settings: a 255-byte frame at SF12 and
-7.8 kHz is on the air for about 147 s, longer than systemd's default 90 s stop timeout, after which
-systemd kills the daemon in the middle of the transmission (issue #59). If you use such settings,
-raise `TimeoutStopSec=` in the systemd unit.
+#### How long a stop takes
+
+A stop waits for at most one packet on the air, up to two 255-byte LoRa frames, and then takes a
+few milliseconds. The worst case is a 508-byte packet, whose time on air depends on the modulation
+the host chose (Semtech's formula, with the firmware's preamble and low-data-rate rules):
+
+| Modulation | 508-byte packet, CR 4/5 | 508-byte packet, CR 4/8 |
+| --- | --- | --- |
+| SF7, 125 kHz | 0.8 s | 1.3 s |
+| SF9, 125 kHz | 2.6 s | 4.0 s |
+| SF11, 125 kHz | 8.7 s | 13 s |
+| SF12, 125 kHz | 19 s | 29 s |
+| SF12, 31.25 kHz | 75 s | 115 s |
+| SF12, 15.6 kHz | 150 s | 230 s |
+| SF12, 7.8 kHz | 300 s | 460 s (7 min 40 s) |
+
+A packet of up to 254 bytes is one frame and takes half as long. The
+[systemd unit](#installing-the-unit) allows 8 minutes, enough for every row. Other supervisors
+must allow as long for the slowest settings your hosts use, or they kill the daemon in the middle
+of a packet:
+
+- Docker waits 10 s by default: stop the container with `docker stop -t 480 <container>`, or
+  start it with `docker run --stop-timeout 480` to make that its default.
+- Docker Compose: set `stop_grace_period: 8m` on the service.
+- Other supervisors have an equivalent, for example `stopwaitsecs` in supervisord or
+  `terminationGracePeriodSeconds` in Kubernetes.
+
+#### When the daemon is killed
+
+If a supervisor sends SIGKILL during a transmission, after a stop timeout that was too short:
+
+- The frame on the air is still sent to the end. The driver starts each frame with the SX1262's
+  `SetTx` in single mode (timeout 0), so the modem sends the frame from its buffer on its own and
+  then falls back to standby (`STDBY_RC`; SX1261/2 datasheet, `SetTx` and
+  `SetRxTxFallbackMode`). It does not keep transmitting.
+- A split packet killed during its first frame loses its second frame: receivers get a lone first
+  half, which a normal stop never leaves behind.
+- The modem then idles in standby, neither receiving nor transmitting, until the daemon starts
+  again and resets it.
+- The daemon's cleanup does not run: the queued packets are dropped without log lines, the radio is
+  not put to sleep, `power_off_on_exit` is not applied and the PTY symlink stays behind, pointing
+  to a PTY that no longer exists. The next start replaces it; under the systemd unit, systemd
+  removes `/run/rnode`, symlink included, when the unit stops.
+- The kernel releases the GPIO lines, as on any exit. Raspberry Pi kernels keep released outputs
+  as they were (the `persist_gpio_outputs` option of their RP1 and BCM2835 GPIO drivers, on by
+  default), so on the uConsole the modem keeps power and is not reset. A GPIO driver that switches
+  released lines back to inputs can instead cut the modem's power or hold it in reset, which ends
+  the frame early.
+- systemd logs `State 'stop-sigterm' timed out. Killing.` and marks the unit failed, with result
+  `timeout`.
+
+The daemon could end a frame early instead, by putting the modem in standby. It deliberately does
+not. A frame cut short is lost to every receiver, and cutting a split packet's second frame leaves
+the same lone first half, so aborting would only trade a slow stop for a lost packet; it would also
+need a change to the `Radio` trait for every driver. RNode_Firmware has no abort either: an RNode
+that loses power simply stops. The cost is a stop that can take minutes at the slowest settings,
+which the stop timeout has to allow for.
 
 ## Setting up the LoRa hardware
 
@@ -834,10 +887,14 @@ journalctl -u rnode-linux -f
 To start Reticulum after the daemon, add `After=rnode-linux.service` and
 `Wants=rnode-linux.service` to the `rnsd` unit.
 
-On stop, systemd waits 90 s by default before it kills the daemon. The daemon exits within one
-packet's airtime of SIGTERM (see [Stopping the daemon](#stopping-the-daemon)), which is enough
-unless you use the slowest modulations: at SF12 and 7.8 kHz one 255-byte frame takes about 147 s.
-For such settings add a longer `TimeoutStopSec=` to the unit (issue #59).
+The unit sets `TimeoutStopSec=8min` instead of systemd's default 90 s. On stop, the daemon first
+finishes the packet on the air, which takes up to 7 min 40 s at SF12, 7.8 kHz and CR 4/8; 90 s
+would kill it in the middle of such a packet (see [How long a stop takes](#how-long-a-stop-takes)
+and [When the daemon is killed](#when-the-daemon-is-killed)). At common settings the daemon still
+stops within seconds: the timeout only limits how long a daemon that does not exit can hold up a
+stop or a reboot. If your hosts never use such slow settings, you can lower it in a drop-in
+(`sudo systemctl edit rnode-linux`) to a little more than the table's time for the slowest
+modulation they do use.
 
 The unit's file system is read-only apart from `/run/rnode` and `/var/lib/rnode`, so keep the
 symlink, the settings file and any `--spilog` file in those directories, for example
@@ -1081,7 +1138,9 @@ same steps with every scenario of that test, so every commit on `main` is checke
 - `rnode-sx126x` checks the exact SPI bytes the driver sends against a mocked bus.
 - `rnode-sim` runs simulated radios against each other.
 - `rnode-linux` covers config parsing, storage, the PTY and its symlink, the GPIO chip lookup, the
-  SPI recorder, the command line and the event loop, including shutdown during a TX burst. Its
+  SPI recorder, the command line and the event loop, including shutdown during a TX burst, and
+  checks that the systemd unit's `TimeoutStopSec=` covers the slowest packet, computed with
+  rnode-core's airtime. Its
   `docs_examples` test parses every daemon config in this README and in [DRIVERS.md](DRIVERS.md)
   with the real config loader, checks the option names of the Reticulum example and the relative
   links in both, so the documentation cannot drift from the code.
@@ -1277,7 +1336,8 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | `rnodeconf`: "Could not download EEPROM from device" | rnode-linux has no EEPROM; see [Using rnodeconf](#using-rnodeconf) |
 | Two RNodes do not hear each other | They must share frequency, bandwidth and spreading factor. With `RUST_LOG=debug`, a `TX packet` line on one side and no `RX packet` line on the other points at RF: antenna, distance or power |
 | `WARN … dropping host output because the PTY is not draining` | No host is reading the PTY. Harmless while none is attached |
-| The daemon takes long to stop | It finishes the packet on the air, which takes seconds at high spreading factors and minutes at SF12 with the narrowest bandwidths; see [Stopping the daemon](#stopping-the-daemon) |
+| The daemon takes long to stop | It finishes the packet on the air, which takes seconds at high spreading factors and minutes at SF12 with the narrowest bandwidths; see [How long a stop takes](#how-long-a-stop-takes) |
+| systemd: `State 'stop-sigterm' timed out. Killing.` | The unit's `TimeoutStopSec=` is shorter than the packet on the air took. Use the shipped unit's `8min`, or at least the time in [How long a stop takes](#how-long-a-stop-takes) for your settings; [When the daemon is killed](#when-the-daemon-is-killed) says what was skipped |
 
 For a closer look, run the daemon in the foreground with `RUST_LOG=trace` and `--spilog`, and
 compare the SPI log with the sequence `begin()` sends in

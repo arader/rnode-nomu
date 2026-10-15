@@ -13,6 +13,14 @@ Group=rnode
 # /etc/rnode-linux.toml, and add the host's user to dialout.
 # SupplementaryGroups=dialout
 ExecStart=/usr/local/bin/rnode-linux --config /etc/rnode-linux.toml
+# A stop finishes the packet on the air, both frames of a split packet, then puts the radio to
+# sleep and exits. The slowest packet, 508 bytes as two 255-byte LoRa frames at SF12, 7.8 kHz and
+# CR 4/8, is on the air for about 7 min 40 s. After systemd's default 90 s, SIGKILL would end the
+# daemon in the middle of it: the SX1262 still finishes the frame it is sending, but a split packet
+# can lose its second frame, and the radio sleep and power_off_on_exit are skipped. 8 min covers
+# the slowest packet with margin; crates/rnode-linux/tests/service_unit.rs checks it against
+# rnode-core's airtime. At common settings the daemon stops within a few seconds.
+TimeoutStopSec=8min
 Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=rnode
