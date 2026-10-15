@@ -163,6 +163,9 @@ impl SimMedium {
             rssi_failures: 0,
             rx_failures: 0,
             setter_failures: [0; Setter::COUNT],
+            preamble_failures: 0,
+            preamble_calls: 0,
+            tx_preambles: Vec::new(),
             crc_errors: RxCrcErrors::default(),
         }
     }
@@ -185,6 +188,9 @@ pub struct SimRadio {
     rssi_failures: usize,
     rx_failures: usize,
     setter_failures: [usize; Setter::COUNT],
+    preamble_failures: usize,
+    preamble_calls: usize,
+    tx_preambles: Vec<u16>,
     crc_errors: RxCrcErrors,
 }
 
@@ -232,6 +238,25 @@ impl SimRadio {
     /// the value the modem last accepted, which puts this radio back at that value.
     pub fn inject_setter_errors(&mut self, setter: Setter, count: usize) {
         self.setter_failures[setter as usize] = count;
+    }
+
+    /// Test aid: make the next `count` [`Radio::set_preamble_length`] calls return
+    /// [`SimError::Injected`] and leave the preamble length as it was, as a command that never
+    /// reached the modem. Unlike [`SimRadio::inject_setter_errors`], whose failing calls apply
+    /// their value, this is the worst case here: [`crate::Node`] must call it again until the
+    /// modem takes the preamble length.
+    pub fn inject_preamble_length_errors(&mut self, count: usize) {
+        self.preamble_failures = count;
+    }
+
+    /// Test aid: the preamble length in symbols of each frame transmitted so far.
+    pub fn tx_preamble_lengths(&self) -> &[u16] {
+        &self.tx_preambles
+    }
+
+    /// Test aid: how many times [`Radio::set_preamble_length`] was called, failed calls included.
+    pub fn preamble_length_calls(&self) -> usize {
+        self.preamble_calls
     }
 
     /// Test aid: the timing last passed to [`Radio::set_dcd_timing`], as
@@ -383,6 +408,10 @@ impl Radio for SimRadio {
         self.with_ep(|e| e.tx_power)
     }
     fn set_preamble_length(&mut self, symbols: u16) -> Result<(), Self::Error> {
+        self.preamble_calls += 1;
+        if Self::take_failure(&mut self.preamble_failures) {
+            return Err(SimError::Injected("simulated set_preamble_length error"));
+        }
         self.with_ep_mut(|e| e.preamble = symbols);
         Ok(())
     }
@@ -425,6 +454,7 @@ impl Radio for SimRadio {
         let freq = src.frequency;
         let bw = src.bandwidth;
         let sf = src.sf;
+        self.tx_preambles.push(src.preamble);
         let now = st.now_ms;
         st.busy_until_ms = st.busy_until_ms.max(now + st.tx_duration_ms);
         for (&id, ep) in st.radios.iter_mut() {

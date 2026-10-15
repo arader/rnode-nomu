@@ -6,8 +6,12 @@
 
 pub mod log_capture;
 
+use log::Level;
+
 use rnode_core::kiss::*;
-use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, SimMedium};
+use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, SimMedium, SimRadio};
+
+use log_capture::Captured;
 
 pub(crate) fn cmd(cmd: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![FEND, cmd];
@@ -104,4 +108,40 @@ pub(crate) fn listener(medium: &SimMedium) -> rnode_core::SimRadio {
     let mut radio = medium.radio();
     radio.begin(867_200_000).unwrap();
     radio
+}
+
+/// A node with seed 1 brought online by `init()`, and a radio listening on its channel.
+pub(crate) fn online_node() -> (SimMedium, SimRadio, Node<SimRadio, MemoryStorage>) {
+    let medium = SimMedium::new();
+    let air = listener(&medium);
+    let mut n = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
+    init(&mut n);
+    n.take_host_output();
+    (medium, air, n)
+}
+
+/// The level and message of every record in `records`.
+pub(crate) fn lines(records: &[Captured]) -> Vec<(Level, &str)> {
+    records.iter().map(|r| (r.level, r.message.as_str())).collect()
+}
+
+/// Tick `n` every millisecond until its TX queue is empty; returns the medium time it emptied.
+pub(crate) fn run_until_sent(n: &mut Node<SimRadio, MemoryStorage>, medium: &SimMedium) -> u64 {
+    loop {
+        n.tick(medium.now_ms());
+        if n.queued_packets() == 0 {
+            return medium.now_ms();
+        }
+        assert!(medium.now_ms() < 10_000, "the packet was never sent");
+        medium.advance_ms(1);
+    }
+}
+
+/// The short-term airtime of the last `CMD_STAT_CHTM` in `out`, in 0.01 % units.
+pub(crate) fn last_chtm_airtime(out: &[u8]) -> u16 {
+    let (_, payload) = split_frames(out)
+        .into_iter()
+        .rfind(|(cmd, _)| *cmd == CMD_STAT_CHTM)
+        .expect("CMD_STAT_CHTM after the TX burst");
+    u16::from_be_bytes([payload[0], payload[1]])
 }

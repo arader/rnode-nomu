@@ -10,8 +10,8 @@ mod common;
 
 use log::{Level, LevelFilter};
 
-use common::log_capture::{Captured, capture};
-use common::{cmd, data, init, listener, plain, split_frames};
+use common::log_capture::capture;
+use common::{cmd, data, last_chtm_airtime, lines, online_node, plain, run_until_sent, split_frames};
 use rnode_core::kiss::*;
 use rnode_core::sim::Setter;
 use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, SimMedium, SimRadio};
@@ -19,21 +19,6 @@ use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, SimMedium, SimRadio};
 /// `CMD_STAT_PHYPRM` for 125 kHz, SF7 and CR 4/5 or 4/6 (firmware `kiss_indicate_phy_stats()`):
 /// symbol time 1024 µs, 976 symbols/s, 24 preamble symbols, 25 ms preamble, 24 ms slot, 48 ms DIFS.
 const PHYPRM_125K_SF7: [u8; 12] = [0x04, 0x00, 0x03, 0xD0, 0x00, 0x18, 0x00, 0x19, 0x00, 0x18, 0x00, 0x30];
-
-/// The level and message of every record in `records`.
-fn lines(records: &[Captured]) -> Vec<(Level, &str)> {
-    records.iter().map(|r| (r.level, r.message.as_str())).collect()
-}
-
-/// A node with seed 1 brought online by `init()`, and a radio listening on its channel.
-fn online() -> (SimMedium, SimRadio, Node<SimRadio, MemoryStorage>) {
-    let medium = SimMedium::new();
-    let air = listener(&medium);
-    let mut n = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
-    init(&mut n);
-    n.take_host_output();
-    (medium, air, n)
-}
 
 /// Assert that `radio` runs the settings and timing `init()` gave it.
 fn assert_init_settings(radio: &SimRadio, what: &str) {
@@ -44,27 +29,6 @@ fn assert_init_settings(radio: &SimRadio, what: &str) {
     assert_eq!(radio.coding_rate(), 5, "{what}");
     assert_eq!(radio.preamble_length(), 24, "{what}");
     assert_eq!(radio.dcd_timing(), (25, 21), "{what}");
-}
-
-/// Tick `n` every millisecond until its TX queue is empty; returns the medium time it emptied.
-fn run_until_sent(n: &mut Node<SimRadio, MemoryStorage>, medium: &SimMedium) -> u64 {
-    loop {
-        n.tick(medium.now_ms());
-        if n.queued_packets() == 0 {
-            return medium.now_ms();
-        }
-        assert!(medium.now_ms() < 10_000, "the packet was never sent");
-        medium.advance_ms(1);
-    }
-}
-
-/// The short-term airtime of the last `CMD_STAT_CHTM` in `out`, in 0.01 % units.
-fn last_chtm_airtime(out: &[u8]) -> u16 {
-    let (_, payload) = split_frames(out)
-        .into_iter()
-        .rfind(|(cmd, _)| *cmd == CMD_STAT_CHTM)
-        .expect("CMD_STAT_CHTM after the TX burst");
-    u16::from_be_bytes([payload[0], payload[1]])
 }
 
 #[test]
@@ -106,8 +70,8 @@ fn a_failed_setter_keeps_the_last_accepted_value() {
     ];
     for (setter, request, echo, warning) in cases {
         let what = format!("{setter:?}");
-        let (medium, air, mut n) = online();
-        let (control_medium, _control_air, mut control) = online();
+        let (medium, air, mut n) = online_node();
+        let (control_medium, _control_air, mut control) = online_node();
         n.radio_mut().inject_setter_errors(setter, 1);
         let cap = capture(LevelFilter::Info);
         n.handle_host_input(&request, 0);
@@ -141,7 +105,7 @@ fn a_failed_setter_keeps_the_last_accepted_value() {
 /// program it with the next modulation change, while the node reported the old one.
 #[test]
 fn the_next_modulation_change_keeps_the_restored_value() {
-    let (medium, mut air, mut n) = online();
+    let (medium, mut air, mut n) = online_node();
     air.set_spreading_factor(8).unwrap();
     n.radio_mut().inject_setter_errors(Setter::Bandwidth, 1);
     n.handle_host_input(&cmd(CMD_BANDWIDTH, &31_250u32.to_be_bytes()), 0);
@@ -164,7 +128,7 @@ fn the_next_modulation_change_keeps_the_restored_value() {
 
 #[test]
 fn a_failed_restore_is_logged_as_well() {
-    let (_medium, _air, mut n) = online();
+    let (_medium, _air, mut n) = online_node();
     n.radio_mut().inject_setter_errors(Setter::Bandwidth, 2);
     let cap = capture(LevelFilter::Info);
     n.handle_host_input(&cmd(CMD_BANDWIDTH, &250_000u32.to_be_bytes()), 0);

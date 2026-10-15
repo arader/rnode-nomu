@@ -6,7 +6,7 @@ mod common;
 use log::{Level, LevelFilter};
 
 use common::log_capture::{Captured, capture};
-use common::{cmd, data, init, listener, node, plain, split_frames, tick_until};
+use common::{cmd, data, init, lines, node, online_node, plain, split_frames, tick_until};
 use rnode_core::kiss::*;
 use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, RadioSettings, RxSignal, SimMedium, SimRadio};
 
@@ -17,16 +17,6 @@ fn messages(records: &[Captured], level: Level, prefix: &str) -> Vec<String> {
         .filter(|r| r.level == level && r.message.starts_with(prefix))
         .map(|r| r.message.clone())
         .collect()
-}
-
-/// An online node with seed 1, and a radio that hears what it sends.
-fn online_node() -> (SimMedium, SimRadio, Node<SimRadio, MemoryStorage>) {
-    let medium = SimMedium::new();
-    let air = listener(&medium);
-    let mut n = Node::new(medium.radio(), MemoryStorage::default(), NodeConfig::default(), 1);
-    init(&mut n);
-    n.take_host_output();
-    (medium, air, n)
 }
 
 /// The header bytes of the frames `air` has received.
@@ -389,11 +379,6 @@ fn rx_drops_are_logged_with_their_reason() {
             "RX packet: 1 byte, 1 frame, header 0x40 (seq 4), RSSI -42 dBm, SNR 8.00 dB",
         ]
     );
-}
-
-/// The level and message of every record in `records`.
-fn lines(records: &[Captured]) -> Vec<(Level, &str)> {
-    records.iter().map(|r| (r.level, r.message.as_str())).collect()
 }
 
 /// Run `n` as the daemon's event loop does while idle: service the radio and tick every

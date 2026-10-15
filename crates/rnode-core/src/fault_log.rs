@@ -14,6 +14,9 @@
 //!
 //! A call that fails intermittently thus stays in one episode and is summarised, instead of
 //! logging a warning and a recovery for every failure. Logging never changes what the node does.
+//!
+//! The node also retries `set_preamble_length()` until the modem takes it (#81). That call is
+//! repeated only while it fails, so its first success ends the episode: [`FaultLog::resolved`].
 
 use core::fmt;
 
@@ -86,6 +89,19 @@ impl FaultLog {
         if now_ms.saturating_sub(episode.last_ms) < FAULT_LOG_INTERVAL_MS {
             return;
         }
+        self.recovered(episode);
+    }
+
+    /// A call that is repeated only while it fails succeeded: end its episode now, with the
+    /// recovery line. [`FaultLog::succeeded`] waits for a success after [`FAULT_LOG_INTERVAL_MS`]
+    /// without failures, which such a call never makes.
+    pub(crate) fn resolved(&mut self) {
+        if let Some(episode) = self.episode {
+            self.recovered(episode);
+        }
+    }
+
+    fn recovered(&mut self, episode: Episode) {
         if episode.failures == 1 {
             log::info!("{} recovered after 1 failure", self.what);
         } else {

@@ -1115,7 +1115,10 @@ running the daemon in the foreground with its log in a private file that you del
 
   These lines come from rnode-core's logging tests, which inject the errors: the simulated radio
   never fails these calls, and on hardware it takes a faulty module. The three calls are logged as
-  `radio DCD`, `radio RSSI` and `radio RX service`.
+  `radio DCD`, `radio RSSI` and `radio RX service`. A preamble length the modem did not take after
+  a retune is logged the same way, as `radio set_preamble_length`: the node keeps the new
+  modulation's timing and tries again before each transmission and each return to receive, and
+  logs `INFO … recovered` as soon as one works.
 - `modem timed out during TX; hard-resetting the node and dropping N queued TX packets`: the modem
   never reported TX done. Like the firmware, the node resets, which clears the queue and reloads
   the saved settings.

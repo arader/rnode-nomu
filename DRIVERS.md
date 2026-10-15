@@ -246,7 +246,7 @@ The methods mirror the parts of the firmware's modem classes that `RNode_Firmwar
 | `set_spreading_factor(sf)` / `spreading_factor()` | Radio start, `CMD_SF` while on | `setSpreadingFactor()` | Clamp to the chip's range (`Node` already limits it to 5–12); update the low-data-rate bit |
 | `set_coding_rate(den)` / `coding_rate()` | Radio start, `CMD_CR` while on | `setCodingRate4()` | Coding rate 4/`den`, `den` from 5 to 8 |
 | `set_tx_power(dbm)` / `tx_power()` | Radio start, `CMD_TXPOWER` while on | `setTxPower()` | Clamp to the chip's or board's range. `Node` passes 0 dBm up to `NodeConfig::max_tx_power` (22 by default), since the host's power byte is unsigned as in the firmware; the parameter stays signed for modems that go lower. The getter returns the power in use |
-| `set_preamble_length(symbols)` | After every bandwidth, SF or CR change | `setPreambleLength()` | Program the preamble length that `rnode_core::phy::PhyParams` computed from the modulation (firmware `updateBitrate()`) |
+| `set_preamble_length(symbols)` | After every bandwidth, SF or CR change; after a failure, again before each transmission and each `receive()` until it succeeds | `setPreambleLength()` | Program the preamble length that `rnode_core::phy::PhyParams` computed from the modulation (firmware `updateBitrate()`) |
 | `set_crc(enabled)` | Radio start, always with `true` | `enableCrc()` / `disableCrc()` | Payload CRC on or off |
 | `low_data_rate()` | When charging airtime after each frame | global `lora_low_datarate`, set by `handleLowDataRate()` | Whether low-data-rate optimisation is on. Decide it with `rnode_core::phy::low_data_rate()`, the firmware's integer expression, and program the same value into the chip |
 | `receive(implicit_len)` | Radio start, after every TX burst, `CMD_PROMISC`, `CMD_IMPLICIT` | `receive()` | Enter continuous receive. `None` selects explicit headers; `Some(n)` implicit headers with payload length `n` (only used in promiscuous mode) |
@@ -337,7 +337,8 @@ error at `WARN`, tells the host where the firmware would, and carries on:
 | --- | --- |
 | `begin()` returns `Err` | Logs `radio begin failed: …`, sends `CMD_ERROR` `ERROR_INITRADIO` and reports the radio as off. The host may retry |
 | `set_frequency()`, `set_bandwidth()`, `set_spreading_factor()`, `set_coding_rate()` or `set_tx_power()` returns `Err` | Keeps the value the modem last accepted, the one it last read back: logs `radio set_bandwidth(250 kHz) failed: …; keeping 125 kHz`, calls the setter again with the kept value, leaves the PHY parameters, airtime, CSMA and DCD timing as they were, sends no `CMD_STAT_PHYPRM` and echoes the kept value, so the host sees that the radio did not take its setting. If the second call fails too, it logs `radio set_bandwidth(125 kHz) failed while restoring it: …`. While the radio comes online, the kept value is what `begin()` programmed, as the getter reports it then |
-| `set_preamble_length()`, `set_crc()` or `receive()` returns `Err` | Logs `radio operation failed: …` and carries on |
+| `set_preamble_length()` returns `Err` | Keeps the PHY parameters of the new modulation, which the modem now uses: `CMD_STAT_PHYPRM`, DCD timing, CSMA and airtime follow it. Calls `set_preamble_length()` again before each transmission and each time it re-enters receive, until a call succeeds; until then the modem may send the previous preamble length. Logs `radio set_preamble_length failed: …`, rate-limited, and `radio set_preamble_length recovered after …` once a call works |
+| `set_crc()` or `receive()` returns `Err` | Logs `radio operation failed: …` and carries on |
 | `transmit()` returns `Err` | Logs `radio transmit failed: …`, sends `ERROR_TXFAILED` and drops the packet, including any frame not yet sent. The rest of the queue waits for the next channel access |
 | `transmit()` returns `Ok(TxOutcome::Timeout)` | Sends `ERROR_MODEM_TIMEOUT` and `ERROR_TXFAILED` and hard-resets like the firmware: `end()`, empties the queue, reloads the saved settings and, if there are any, calls `begin()` again |
 | `poll_rx()` returns `Err` | Logs `radio RX service failed: …` and tries again on the next iteration |
@@ -346,8 +347,10 @@ error at `WARN`, tells the host where the firmware would, and carries on:
 
 `dcd()`, `current_rssi()` and `poll_rx()` run every few milliseconds, so their errors are
 rate-limited: the first failure is logged at `WARN`, then at most one summary every 10 s with the
-count and the latest error, and an `INFO` line once the call has worked for 10 s. The other calls
-are rare and log every failure.
+count and the latest error, and an `INFO` line once the call has worked for 10 s. A failing
+`set_preamble_length()` is retried before every transmission and receive, and is logged the same
+way, except that its `INFO` line comes with the first call that works. The other calls are rare
+and log every failure.
 
 Guidelines for driver authors:
 
@@ -554,10 +557,12 @@ hardware at all, which shows how little of the trait is about SPI:
 `sim` feature. It runs on a virtual clock (`SimMedium::advance_ms()`) and can inject failures and
 frames: `inject_begin_failures()`, `inject_next_tx_error()`, `inject_next_timeout()`,
 `inject_dcd_errors()`, `inject_rssi_errors()`, `inject_rx_errors()`, `inject_setter_errors()`,
-`inject_rx()` and `inject_rx_crc_error()`. A setter failure injected with `inject_setter_errors()`
-applies the value before it fails, the worst case for `Node`. Use it to test how `Node` reacts to
-driver behaviour without writing a mock radio, as the tests in
-[`crates/rnode-core/tests`](crates/rnode-core/tests) do.
+`inject_preamble_length_errors()`, `inject_rx()` and `inject_rx_crc_error()`. Each injected failure
+is the worst case for `Node`: a setter failure from `inject_setter_errors()` applies the value
+before it fails, so `Node` has to put the old one back, while a preamble-length failure leaves the
+old length, so `Node` has to try again. Use it to test how `Node` reacts to driver behaviour
+without writing a mock radio, as the tests in [`crates/rnode-core/tests`](crates/rnode-core/tests)
+do.
 
 ## Testing a driver
 

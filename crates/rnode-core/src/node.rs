@@ -57,6 +57,12 @@
 //!   is coming online, the value the modem last accepted is what `begin()` programmed, as its
 //!   getter reports; like the firmware's `startRadio()`, the node echoes nothing then. While the
 //!   radio is offline, settings are only stored, so nothing can fail;
+//! - a failed [`Radio::set_preamble_length`] is retried until the modem takes it. The firmware's
+//!   `setPreamble()` cannot fail. The preamble length follows from the modulation the modem now
+//!   uses, so the node keeps the new PHY parameters: `CMD_STAT_PHYPRM`, DCD timing, CSMA and
+//!   airtime accounting follow the new modulation, and the node calls `set_preamble_length()`
+//!   again before each transmission and each time it re-enters receive, until a call succeeds.
+//!   Until then the modem may send a preamble of the previous length;
 //! - saved settings with a TX power from 128 to 254 are ignored with a warning, and the radio
 //!   waits for a host as if nothing were saved. `CMD_TXPOWER` is read as unsigned dBm, as in
 //!   firmware `serial_callback()`, but earlier builds read it as signed and saved −9…−2 dBm as
@@ -80,8 +86,9 @@
 //! commands; and one counts the packets still queued at shutdown. Errors of the radio calls made
 //! every few milliseconds (DCD and RSSI reads, receive polling) are rate-limited: a warning for the
 //! first, then at most one summary per 10 s while the call keeps failing, and an info line once it
-//! has worked for 10 s. Formatting is lazy, so disabled levels cost nothing, and logging never
-//! changes what the node sends to the host or the radio.
+//! has worked for 10 s. A preamble length the node retries is logged the same way, except that its
+//! info line comes with the first call that works. Formatting is lazy, so disabled levels cost
+//! nothing, and logging never changes what the node sends to the host or the radio.
 
 use core::fmt;
 
@@ -377,6 +384,11 @@ pub struct Node<R: Radio, S: Storage> {
     dcd_faults: FaultLog,
     rssi_faults: FaultLog,
     rx_faults: FaultLog,
+    /// Failures of `set_preamble_length()`, retried until the modem takes the preamble length.
+    preamble_faults: FaultLog,
+    /// Whether the modem has yet to take the preamble length of `phy`: the last
+    /// `set_preamble_length()` failed, and `retry_preamble()` calls it again.
+    preamble_pending: bool,
     /// The settings in the last online or settings-changed line.
     logged_settings: Option<RadioSummary>,
     /// When the host started retuning the online radio, if that is not logged yet.
@@ -421,6 +433,8 @@ impl<R: Radio, S: Storage> Node<R, S> {
             dcd_faults: FaultLog::new("radio DCD"),
             rssi_faults: FaultLog::new("radio RSSI"),
             rx_faults: FaultLog::new("radio RX service"),
+            preamble_faults: FaultLog::new("radio set_preamble_length"),
+            preamble_pending: false,
             logged_settings: None,
             retune_pending_since: None,
             tx_wait: None,
@@ -629,7 +643,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
                         self.bw = value;
                     } else if let Some(bw) = self.apply_setting(Setting::Bandwidth, R::bandwidth, value, self.bw) {
                         self.bw = bw;
-                        self.update_phy();
+                        self.update_phy(now_ms);
                     }
                 }
                 self.reply_u32_escaped(kiss::CMD_BANDWIDTH, self.bw);
@@ -656,7 +670,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
                         self.apply_setting(Setting::SpreadingFactor, R::spreading_factor, sf, self.sf)
                     {
                         self.sf = sf;
-                        self.update_phy();
+                        self.update_phy(now_ms);
                     }
                 }
                 kiss::frame_plain(kiss::CMD_SF, &[self.sf], &mut self.host_output);
@@ -668,7 +682,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
                         self.cr = cr;
                     } else if let Some(cr) = self.apply_setting(Setting::CodingRate, R::coding_rate, cr, self.cr) {
                         self.cr = cr;
-                        self.update_phy();
+                        self.update_phy(now_ms);
                     }
                 }
                 kiss::frame_plain(kiss::CMD_CR, &[self.cr], &mut self.host_output);
@@ -676,7 +690,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
             kiss::CMD_IMPLICIT => {
                 self.implicit_len = b0;
                 if self.radio_online {
-                    self.enter_receive();
+                    self.enter_receive(now_ms);
                 }
                 kiss::frame_escaped(kiss::CMD_IMPLICIT, &[self.implicit_len], &mut self.host_output);
             }
@@ -724,13 +738,13 @@ impl<R: Radio, S: Storage> Node<R, S> {
                 if b0 == 0x01 {
                     self.promisc = true;
                     if self.radio_online {
-                        self.enter_receive();
+                        self.enter_receive(now_ms);
                     }
                 }
                 if b0 == 0x00 {
                     self.promisc = false;
                     if self.radio_online {
-                        self.enter_receive();
+                        self.enter_receive(now_ms);
                     }
                 }
                 kiss::frame_plain(kiss::CMD_PROMISC, &[u8::from(self.promisc)], &mut self.host_output);
@@ -801,7 +815,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
     }
 
     /// Bring the radio online (firmware `startRadio()`); `cause` is for the log.
-    fn start_radio(&mut self, _now_ms: u64, cause: &str) -> bool {
+    fn start_radio(&mut self, now_ms: u64, cause: &str) -> bool {
         if self.radio_online {
             self.reply_radio_state();
             return true;
@@ -843,8 +857,8 @@ impl<R: Radio, S: Storage> Node<R, S> {
             .apply_setting(Setting::CodingRate, R::coding_rate, self.cr, begun)
             .unwrap_or(begun);
         let _ = self.apply_radio(|r| r.set_crc(true));
-        self.update_phy();
-        self.enter_receive();
+        self.update_phy(now_ms);
+        self.enter_receive(now_ms);
         let settings = self.radio_summary();
         log::info!("radio online ({cause}): {settings}");
         self.logged_settings = Some(settings);
@@ -943,7 +957,10 @@ impl<R: Radio, S: Storage> Node<R, S> {
         }
     }
 
-    fn update_phy(&mut self) {
+    /// Firmware `updateBitrate()` and `setPreamble()`. The parameters follow from the modulation
+    /// the modem now uses, so they stand even when `set_preamble_length()` fails: the node retries
+    /// it until the modem takes it (see `retry_preamble()` and the module docs).
+    fn update_phy(&mut self, now_ms: u64) {
         if !self.radio_online || self.bw == 0 || self.sf == 0 {
             return;
         }
@@ -953,15 +970,38 @@ impl<R: Radio, S: Storage> Node<R, S> {
             coding_rate: self.cr,
         });
         self.phy = Some(phy);
-        let _ = self.apply_radio(|r| r.set_preamble_length(phy.preamble_symbols));
+        self.apply_preamble(now_ms, phy.preamble_symbols);
         self.radio.set_dcd_timing(phy.preamble_time_ms, phy.header_time_ms);
         self.csma.set_phy(&phy);
         kiss::frame_escaped(kiss::CMD_STAT_PHYPRM, &phy.stats_payload(), &mut self.host_output);
     }
 
+    /// Program the preamble length; a failure is logged, rate-limited, and leaves it pending.
+    fn apply_preamble(&mut self, now_ms: u64, symbols: u16) {
+        match self.radio.set_preamble_length(symbols) {
+            Ok(()) => {
+                self.preamble_pending = false;
+                self.preamble_faults.resolved();
+            }
+            Err(e) => {
+                self.preamble_pending = true;
+                self.preamble_faults.failed(now_ms, &e);
+            }
+        }
+    }
+
+    /// Call `set_preamble_length()` again if the modem has not taken the current preamble length:
+    /// before each transmission, and each time the node re-enters receive.
+    fn retry_preamble(&mut self, now_ms: u64) {
+        if let (true, Some(phy)) = (self.preamble_pending, self.phy) {
+            self.apply_preamble(now_ms, phy.preamble_symbols);
+        }
+    }
+
     /// Enter RX. Deliberately unlike firmware `lora_receive()`, implicit headers are used only
     /// in promiscuous/raw mode; normal RNode split framing remains explicit-header LoRa.
-    fn enter_receive(&mut self) {
+    fn enter_receive(&mut self, now_ms: u64) {
+        self.retry_preamble(now_ms);
         let implicit = (self.promisc && self.implicit_len != 0).then_some(self.implicit_len);
         let _ = self.apply_radio(|r| r.receive(implicit));
     }
@@ -998,7 +1038,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
             self.emit_status_update(update);
         }
         if radio_attempted && self.radio_online {
-            self.enter_receive();
+            self.enter_receive(now_ms);
         }
     }
 
@@ -1077,6 +1117,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
             frames: frames.len(),
             header: if self.promisc { None } else { Some(frames[0][0]) },
         };
+        self.retry_preamble(now_ms);
         let mut ok_any = false;
         for (index, frame) in frames.iter().enumerate() {
             let frame_len = frame.len();
