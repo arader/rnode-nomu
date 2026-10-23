@@ -879,6 +879,7 @@ If another program replaces the symlink while the daemon runs, the daemon leaves
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `radio_settings` | path | unset | File for the settings the host saves with `CMD_CONF_SAVE` (the firmware's EEPROM) |
+| `eeprom` | path | unset | File for the EEPROM info block that [`rnodeconf --rom`](#signing-with-your-own-key) writes and signs with your own key. While the file does not exist, the EEPROM is unprovisioned. Unset, the daemon reports its built-in, unsigned info block |
 
 Without `radio_settings`, `CMD_CONF_SAVE` stores nothing, and the daemon says so at startup:
 
@@ -894,7 +895,7 @@ What the EEPROM image that [`rnodeconf`](#using-rnodeconf) reads reports.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `serial_number` | integer | derived | Serial number, from 0 to 4294967295 (`0xFFFFFFFF`). Unset, the daemon derives one from the machine ID and [`[pty] symlink`](#pty) |
+| `serial_number` | integer | derived | Serial number of the built-in info block, from 0 to 4294967295 (`0xFFFFFFFF`). Unset, the daemon derives one from the machine ID and [`[pty] symlink`](#pty). With [`[storage] eeprom`](#storage), the serial number is the one `rnodeconf --rom` writes, and this key has no effect |
 
 ```toml
 [eeprom]
@@ -931,6 +932,7 @@ Devices, GPIO lines and directories are only opened afterwards; failures there a
 logs a `WARN` line when:
 
 - `storage.radio_settings` is not set, so saved settings are lost on restart and on `CMD_RESET`;
+- `eeprom.serial_number` is set together with `storage.eeprom`, which replaces it;
 - `pty.mode` gives other users read or write access (prefer `group` with `"0660"`);
 - `pty.group` is set without `pty.mode`, since the PTY's default mode, usually `0620`, gives the
   group no read access.
@@ -1037,7 +1039,8 @@ in the firmware's layout (`ROM.h`), built from what the daemon keeps:
   for homebrew boards, hardware revision 1, a serial number, and 2026-10-22 00:00 UTC as the
   manufacturing time, the same on every installation;
 - the MD5 checksum of that information, an empty signature (128 bytes of `0xFF`) and the lock byte
-  of a provisioned device;
+  of a provisioned device; or, once you have [signed it](#signing-with-your-own-key), the info block
+  that rnodeconf wrote, with its own serial number, time and signature;
 - the [saved settings](#saved-radio-settings) as TNC settings, if the file holds settings the radio
   starts with;
 - interference avoidance as the daemon runs it;
@@ -1102,9 +1105,10 @@ manufacturing time in local time.
 | `--normal` (`-N`) | Deletes the saved settings (`CMD_CONF_DELETE`). The radio stays on until the daemon restarts or a host sends `CMD_RESET`, then waits for a host |
 | `--ia-enable` (`-x`), `--ia-disable` (`-X`) | Interference avoidance with `CMD_DIS_IA`, until the daemon exits; [`[radio] avoid_interference`](#radio) applies again after a restart |
 | `--eeprom-dump`, `--eeprom-backup` | Print the image, or save it under `~/.config/rnodeconf/` |
-| `--eeprom-wipe` | Refused. rnodeconf prints `hardware error (code 03)` and sends `CMD_RESET` 13 s later, which resets the node; the saved settings stay. Use `--normal` to delete them |
+| `--eeprom-wipe` | Refused. rnodeconf prints `hardware error (code 03)` and sends `CMD_RESET` 13 s later, which resets the node; the saved settings and a signed info block stay. Use `--normal` to delete the settings |
 | `--update` (`-u`) | Fetches the firmware release list, finds no firmware for model `0xFE` and stops without flashing anything. Update rnode-linux by installing a new build |
-| `--rom` (`-r`), `--sign` (`-S`), `--firmware-hash` (`-H`) | Change nothing: `--rom` refuses because the EEPROM is provisioned already, `--sign` finds no device hash to sign, and the daemon ignores the hash `--firmware-hash` sends, with a `WARN` line, although rnodeconf prints "Firmware hash set" |
+| `--rom` (`-r`) | Signs the device with your own key, if [`[storage] eeprom`](#storage) is set and the EEPROM is unprovisioned; see [Signing with your own key](#signing-with-your-own-key). Otherwise rnodeconf refuses: "a valid EEPROM was already present" |
+| `--sign` (`-S`), `--firmware-hash` (`-H`) | Change nothing: `--sign` finds no device hash to sign, and the daemon ignores the hash `--firmware-hash` sends, with a `WARN` line, although rnodeconf prints "Firmware hash set" |
 | `--get-target-firmware-hash` (`-K`), `--get-firmware-hash` (`-L`) | rnodeconf stops with an `AttributeError`: it does not handle a device without firmware hashes |
 | Bluetooth, display, NeoPixel and Wi-Fi options | Ignored |
 
@@ -1118,11 +1122,61 @@ flasher: rnode-linux reports its own platform, `0x60`, for which rnodeconf has n
 **The "NOT verifiable" warning.** rnodeconf checks the signature in the EEPROM against the RNode
 vendor's keys and the user's own, and prints the warning above on every run when none verifies. An
 image rnode-linux makes up can never carry the vendor's signature. rnodeconf refuses nothing because
-of it: every option above works the same. The `--autoinstall` it suggests does not apply.
+of it: every option above works the same. The `--autoinstall` it suggests does not apply; signing
+the device with your own key, as homebrew RNodes are, removes the warning.
 
 Reticulum's `RNodeInterface` (also the Android one) and `RNodeMultiInterface` never read the EEPROM,
 so none of this affects using the radio. rnodeconf could recognise platform `0x60` and skip its
 firmware and flashing steps for it; that would be a change to Reticulum.
+
+#### Signing with your own key
+
+With [`[storage] eeprom`](#storage) set, the daemon keeps an EEPROM info block in that file, which
+`rnodeconf --rom` writes and signs with a key of yours. Until the file exists, the EEPROM is
+unprovisioned: rnodeconf says "EEPROM is invalid, no further information available" for `--info`,
+and refuses `--tnc` and `--normal` until you have signed it. To sign it:
+
+1. Add the file to `/etc/rnode-linux.toml`, in `/var/lib/rnode`, which the
+   [systemd unit](#running-as-a-systemd-service) lets the daemon write, and restart the daemon:
+
+   ```toml
+   [storage]
+   radio_settings = "/var/lib/rnode/radio_settings.toml"
+   eeprom = "/var/lib/rnode/eeprom.bin"
+   ```
+
+2. Make a signing key, unless you have one: `rnodeconf --key`. rnodeconf keeps it in
+   `~/.config/rnodeconf/firmware/signing.key` of the user who runs it.
+3. Stop Reticulum, then write and sign the info block, with the product, model and hardware revision
+   the daemon accepts:
+
+   ```sh
+   rnodeconf /run/rnode/rnode0 --rom --product f0 --model fe --hwrev 1
+   ```
+
+   rnodeconf takes the serial number from its own counter, writes the 156 bytes of the info block
+   and the lock byte with `CMD_ROM_WRITE`, resets the device and reads the EEPROM back. It ends with
+   "EEPROM Bootstrapping successful!", and the daemon logs
+   `host provisioned the EEPROM: product 0xF0, model 0xFE, hardware revision 1, serial number 0x00000001`.
+   The daemon writes the file as it writes the settings, with mode `0600`, to a temporary file it
+   renames into place.
+4. `rnodeconf /run/rnode/rnode0 --info` now shows `Device signature   : Validated - Local signature`
+   and no warning.
+
+On other machines, rnodeconf verifies the device only with your public key: print it with
+`rnodeconf --public` and add it there with `rnodeconf --trust-key <hex>`.
+
+The daemon locks only an info block it would load: product `0xF0` with model `0xFE`, which name no
+firmware in rnodeconf's tables, a hardware revision other than 0 and 255, and a correct checksum.
+For any other, it refuses the lock byte with `ERROR_EEPROM_LOCKED` and logs why; rnodeconf then
+reports "EEPROM was written, but validation failed", and you can run `--rom` again with the right
+values. Writes to the settings beyond the info block are refused, since they come from the
+settings file and the config.
+
+To sign the device again, with another key or serial number, delete the file and run `--rom`
+again; the daemon reads the file for each `CMD_ROM_READ`, so it needs no restart. `--eeprom-wipe`
+is refused here too. A file that is not a valid info block, for example one cut short, is ignored
+with a `WARN` line, and the EEPROM reads as unprovisioned.
 
 ## Running as a systemd service
 
@@ -1198,7 +1252,7 @@ stop or a reboot. If your hosts never use such slow settings, you can lower it i
 modulation they do use.
 
 The unit's file system is read-only apart from `/run/rnode` and `/var/lib/rnode`, so keep the
-symlink, the settings file and any `--spilog` file in those directories, for example
+symlink, the settings file, the EEPROM file and any `--spilog` file in those directories, for example
 `ExecStart=/usr/local/bin/rnode-linux --config /etc/rnode-linux.toml --spilog /var/lib/rnode/spi.csv`.
 
 ## Logging
@@ -1212,7 +1266,7 @@ so errors in it appear as `fatal:` lines on stderr.
 | Level | What you get |
 | --- | --- |
 | `warn` | Problems: radio driver errors (rate-limited), modem TX timeouts, failed settings writes, a host that stopped reading the PTY, EEPROM writes and wipes the daemon refuses, firmware-update and signing commands it ignores |
-| `info` (default) | Startup, the radio going online and offline with the reason and the settings, retuning by the host, interference-avoidance changes, packets dropped at shutdown, recovery of a failing radio call |
+| `info` (default) | Startup, the radio going online and offline with the reason and the settings, retuning by the host, interference-avoidance changes, a host signing the EEPROM, packets dropped at shutdown, recovery of a failing radio call |
 | `debug` | One line per packet received, per packet sent and per packet dropped, with the reason, received frames that failed their CRC included; two lines per wait for channel access |
 | `trace` | Everything above, plus a hex dump of every received and sent payload; see the [warning](#trace-logs-contain-your-traffic) below |
 
@@ -1429,6 +1483,15 @@ running the daemon in the foreground with its log in a private file that you del
   [Using rnodeconf](#using-rnodeconf).
 - `ignoring CMD_FW_UPD: …`, `ignoring CMD_FW_HASH: …` and `ignoring CMD_DEV_SIG: …`: a host tried to
   update the firmware or sign the device, which do not apply to rnode-linux.
+- `refusing to lock the EEPROM: …; it stays unprovisioned` and `refusing CMD_ROM_WRITE to EEPROM
+  address 0x9C: only the info block, 0x00 to 0x9B, can be written`: `rnodeconf --rom` wrote an info
+  block the daemon would not load, such as another product or model, or wrote beyond the info block;
+  see [Signing with your own key](#signing-with-your-own-key).
+- `ignoring EEPROM file …: …; the EEPROM reads as unprovisioned`: the file in
+  [`[storage] eeprom`](#storage) is not a valid info block, for example cut short. It is logged at
+  every start, `CMD_RESET` and `CMD_ROM_READ` until you delete the file or sign the device again.
+- `failed to save the EEPROM info block: …` and `failed to load the EEPROM info block: …`: the file
+  or its directory is not writable or readable. The EEPROM stays, or reads as, unprovisioned.
 
 Logging never changes what the daemon sends to the host or the radio. Below `debug` the per-packet
 code costs only a level check.
@@ -1511,7 +1574,8 @@ same steps with every scenario of that test, so every commit on `main` is checke
 
 - `rnode-core` checks the KISS protocol, framing, CSMA/CA, PHY timing and logging against values
   derived from the firmware, and the EEPROM image `rnodeconf` reads against Python's MD5. It also
-  replays the bytes recorded from `rnodeconf` 1.5.5 sessions and checks the replies.
+  replays the bytes recorded from `rnodeconf` 1.5.5 sessions, `--rom` signing an unprovisioned
+  EEPROM included, and checks the replies.
 - `rnode-sx126x` checks the exact SPI bytes the driver sends against a mocked bus.
 - `rnode-sim` runs simulated radios against each other.
 - `rnode-linux` covers config parsing, storage, the PTY and its symlink, the GPIO chip lookup, the
@@ -1541,8 +1605,8 @@ same steps with every scenario of that test, so every commit on `main` is checke
 
 ### Reticulum end-to-end test
 
-`cargo xtask rns-e2e` runs real Reticulum against two simulated daemons. CI runs it: every pull
-request runs its SF7 scenario, about a minute, and `main` runs every scenario, about five minutes,
+`cargo xtask rns-e2e` runs real Reticulum against simulated daemons. CI runs it: every pull
+request runs its SF7 scenario, about a minute, and `main` runs every scenario, about six minutes,
 after each merge. It needs [uv](https://docs.astral.sh/uv/) and git. To run what a pull request
 runs:
 
@@ -1563,8 +1627,14 @@ cargo xtask rns-e2e --fetch-reticulum --scenario sf7
   one disagree, it first probes the KISS boundary sizes (1, 254, 255, 508 and 509 bytes) in both
   directions. Then two Reticulum processes discover each other, establish a link, exchange packets
   and transfer a 4 KiB resource.
-- When a scenario fails, it prints the last 100 lines of each daemon and Reticulum log, so a CI log
-  shows the cause. The logs stay in `target/rns-e2e`, and with `--keep-logs` also after a pass.
+- The `rnodeconf` scenario, about 40 s, runs Reticulum's [`rnodeconf`](#using-rnodeconf) against
+  the daemons, with its `HOME` in the run directory, so your own `~/.config/rnodeconf` is never
+  read or changed: `--info`, `--tnc`, which must save the settings file, and `--normal`, which must
+  delete it, against the built-in EEPROM image; then `--key` and `--rom` against a daemon with
+  `[storage] eeprom`, after which `--info` must show "Validated - Local signature".
+- When a scenario fails, it prints the last 100 lines of each daemon, Reticulum and rnodeconf log,
+  so a CI log shows the cause. The logs stay in `target/rns-e2e`, and with `--keep-logs` also after
+  a pass.
 
 [`crates/xtask/README.md`](crates/xtask/README.md) has the details, typical timings, and how to
 move the pinned Reticulum, Python packages and uv.
@@ -1661,11 +1731,13 @@ behaviour, except for these deliberate differences:
 - `CMD_RESET` resets the node's state and reloads the saved settings without restarting the
   process, so the PTY stays open.
 - There is no EEPROM. `CMD_ROM_READ` gets an image in the firmware's layout, built from the serial
-  number, the saved settings and interference avoidance, with an empty signature; see
-  [Using rnodeconf](#using-rnodeconf). The image is locked, so `CMD_ROM_WRITE` gets
-  `ERROR_EEPROM_LOCKED`, as on a provisioned RNode. `CMD_UNLOCK_ROM`, with which the firmware erases
-  its EEPROM, saved settings included, and reboots, gets `ERROR_EEPROM_LOCKED` too and changes
-  nothing.
+  number, the saved settings and interference avoidance, with an empty signature, or from the info
+  block `rnodeconf --rom` signed; see [Using rnodeconf](#using-rnodeconf). A locked image gets
+  `ERROR_EEPROM_LOCKED` for `CMD_ROM_WRITE`, as on a provisioned RNode. An unprovisioned one, with
+  [`[storage] eeprom`](#storage) set and no file, takes writes to the info block only, where the
+  firmware takes them up to address 199, and its lock byte only locks an info block the daemon would
+  load. `CMD_UNLOCK_ROM`, with which the firmware erases its EEPROM, saved settings included, and
+  reboots, gets `ERROR_EEPROM_LOCKED` and changes nothing.
 - `CMD_FW_UPD`, `CMD_FW_HASH` and `CMD_DEV_SIG` are ignored with a `WARN` line each. As firmware
   without device hashes or Wi-Fi does, the node answers `CMD_DEV_HASH` and `CMD_HASHES` with
   nothing and `CMD_CFG_READ` with an empty config sector.
@@ -1704,8 +1776,10 @@ never answered on request; and data frames over 508 bytes are dropped without an
 
 ## Limitations
 
-- **`rnodeconf` calls the device not verifiable:** the EEPROM image rnode-linux makes up carries no
-  signature. rnodeconf works anyway; [Using rnodeconf](#using-rnodeconf) lists what it can do.
+- **`rnodeconf` calls the device not verifiable,** unless you
+  [sign it with your own key](#signing-with-your-own-key): the EEPROM image rnode-linux makes up
+  carries no signature. rnodeconf works anyway; [Using rnodeconf](#using-rnodeconf) lists what it
+  can do.
 - **Commands for microcontroller boards are ignored:** display, framebuffer, Bluetooth, Wi-Fi, LEDs,
   device signatures, firmware hashes and firmware updates.
 - **SX1262 only.** Other modems need a driver; see [DRIVERS.md](DRIVERS.md).
@@ -1746,7 +1820,10 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
 | `rnodeconf`: "Could not download EEPROM from device" | Another program, such as `rnsd`, has the PTY open and took the reply: stop it first. rnode-linux builds without EEPROM emulation never reply; update. See [Using rnodeconf](#using-rnodeconf) |
-| `rnodeconf`: "WARNING! This device is NOT verifiable" | Expected: the EEPROM image carries no signature. rnodeconf works anyway; see [Using rnodeconf](#using-rnodeconf) |
+| `rnodeconf`: "WARNING! This device is NOT verifiable" | Expected: the EEPROM image carries no signature. rnodeconf works anyway; [sign the device with your own key](#signing-with-your-own-key) to remove the warning |
+| `rnodeconf`: "EEPROM is invalid, no further information available", or "This device contains a valid firmware, but EEPROM is invalid" | [`[storage] eeprom`](#storage) is set and the file does not exist, or is not a valid info block: sign the device with `rnodeconf --rom` (see [Signing with your own key](#signing-with-your-own-key)), or unset `eeprom` |
+| `rnodeconf --rom`: "a valid EEPROM was already present" | The device is signed already, or `[storage] eeprom` is unset. To sign it again, delete the EEPROM file |
+| `rnodeconf --rom`: "EEPROM was written, but validation failed" | The daemon refused the info block; its `WARN` line says why. Use `--product f0 --model fe --hwrev 1` |
 | `rnodeconf --eeprom-wipe`: "hardware error (code 03)" | rnode-linux refuses the wipe and keeps the saved settings. `rnodeconf --normal` deletes them |
 | Two RNodes do not hear each other | They must share frequency, bandwidth and spreading factor. With `RUST_LOG=debug`, a `TX packet` line on one side and no `RX packet` line on the other points at RF: antenna, distance or power. A `CRC error` line instead means the frame was heard but corrupted: interference, a collision or a weak signal |
 | `WARN … dropping host output because the PTY is not draining` | No host is reading the PTY. Harmless while none is attached |

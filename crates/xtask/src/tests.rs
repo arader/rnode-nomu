@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use rnode_linux::config::{Config, RadioDriver};
 
 use super::{
-    CLIENT_PY, Children, KISS_BOUNDARY_PY, Options, RETICULUM_COMMIT, RETICULUM_REPO, SCENARIOS, SERVER_PY, Scenario,
-    Task, create_private_dir, daemon_config, dispatch, exit_status, fetch_reticulum, fnv1a64, parse_args,
-    requirements_fingerprint, reticulum_pin_warning, scenario_outcome, usage, write_log_tails,
+    CLIENT_PY, Check, Children, KISS_BOUNDARY_PY, Options, RETICULUM_COMMIT, RETICULUM_REPO, SCENARIOS, SERVER_PY,
+    Scenario, Task, create_private_dir, daemon_config, dispatch, exit_status, expect_output, fetch_reticulum, fnv1a64,
+    parse_args, requirements_fingerprint, reticulum_pin_warning, scenario_outcome, usage, write_log_tails,
 };
 
 fn args(args: &[&str]) -> Vec<String> {
@@ -40,7 +40,7 @@ fn rns_e2e_runs_every_scenario_against_a_local_reticulum_by_default() {
             help: false,
         }
     );
-    assert_eq!(scenarios(&[]), ["sf7", "sf11"]);
+    assert_eq!(scenarios(&[]), ["sf7", "sf11", "rnodeconf"]);
 }
 
 /// `--scenario` picks scenarios by name. They run once each, in the harness's order, however often
@@ -51,6 +51,11 @@ fn scenario_selects_the_named_scenarios() {
     assert_eq!(scenarios(&["--scenario", "sf11"]), ["sf11"]);
     assert_eq!(scenarios(&["--scenario", "sf11", "--scenario", "sf7"]), ["sf7", "sf11"]);
     assert_eq!(scenarios(&["--scenario", "sf7", "--scenario", "sf7"]), ["sf7"]);
+    assert_eq!(scenarios(&["--scenario", "rnodeconf"]), ["rnodeconf"]);
+    assert_eq!(
+        scenarios(&["--scenario", "rnodeconf", "--scenario", "sf7"]),
+        ["sf7", "rnodeconf"]
+    );
     assert_eq!(
         scenarios(&["--keep-logs", "--scenario", "sf11", "--keep-logs"]),
         ["sf11"]
@@ -61,21 +66,21 @@ fn scenario_selects_the_named_scenarios() {
 fn an_unknown_scenario_is_an_error_that_lists_the_valid_ones() {
     assert_eq!(
         parse_args(&args(&["--scenario", "sf9"])).unwrap_err(),
-        "unknown scenario \"sf9\"; valid scenarios: sf7, sf11"
+        "unknown scenario \"sf9\"; valid scenarios: sf7, sf11, rnodeconf"
     );
     assert_eq!(
         parse_args(&args(&["--scenario", "SF7"])).unwrap_err(),
-        "unknown scenario \"SF7\"; valid scenarios: sf7, sf11"
+        "unknown scenario \"SF7\"; valid scenarios: sf7, sf11, rnodeconf"
     );
     assert_eq!(
         parse_args(&args(&["--scenario", "sf7", "--scenario", ""])).unwrap_err(),
-        "unknown scenario \"\"; valid scenarios: sf7, sf11"
+        "unknown scenario \"\"; valid scenarios: sf7, sf11, rnodeconf"
     );
     assert_eq!(
         parse_args(&args(&["--scenario"])).unwrap_err(),
         "--scenario requires a name"
     );
-    assert!(usage().contains("(sf7, sf11)"), "{}", usage());
+    assert!(usage().contains("(sf7, sf11, rnodeconf)"), "{}", usage());
 }
 
 #[test]
@@ -423,7 +428,11 @@ fn pr_and_ci_workflows_install_the_same_uv() {
 fn workflows_run_the_e2e_test_against_the_pinned_reticulum() {
     for (workflow, step, expected) in [
         (PR_WORKFLOW, "RNS end-to-end (SF7)", &["sf7"][..]),
-        (CI_WORKFLOW, "RNS end-to-end (all scenarios)", &["sf7", "sf11"]),
+        (
+            CI_WORKFLOW,
+            "RNS end-to-end (all scenarios)",
+            &["sf7", "sf11", "rnodeconf"],
+        ),
     ] {
         let step = workflow_step(workflow, step);
         let command = step
@@ -660,7 +669,7 @@ fn daemon_config_loads_with_the_rnode_linux_parser() {
     let air = Path::new("target/rns-e2e/runs/r1-2/sf7/air");
     let pty = Path::new("target/rns-e2e/runs/r1-2/sf7/b/pty");
     let settings = Path::new("target/rns-e2e/runs/r1-2/sf7/b/radio-settings.toml");
-    let config = Config::from_toml(&daemon_config(air, "b", pty, settings, -64, 6.5)).unwrap();
+    let config = Config::from_toml(&daemon_config(air, "b", pty, settings, None, -64, 6.5)).unwrap();
 
     assert_eq!(config.radio.driver, RadioDriver::Sim);
     assert!(!config.radio.avoid_interference);
@@ -671,19 +680,45 @@ fn daemon_config_loads_with_the_rnode_linux_parser() {
     assert_eq!(config.radio.sim.loss, 0.0);
     assert_eq!(config.pty.symlink.as_deref(), Some(pty));
     assert_eq!(config.storage.radio_settings.as_deref(), Some(settings));
+    assert_eq!(config.storage.eeprom, None);
     assert_eq!(config.logging.log_level, "debug");
+    assert_eq!(config.warnings(), Vec::<String>::new());
+
+    // The rnodeconf scenario's second daemon keeps an EEPROM info block.
+    let eeprom = Path::new("target/rns-e2e/runs/r1-2/rnodeconf/signed/eeprom.bin");
+    let config = Config::from_toml(&daemon_config(air, "signed", pty, settings, Some(eeprom), -64, 6.5)).unwrap();
+    assert_eq!(config.storage.radio_settings.as_deref(), Some(settings));
+    assert_eq!(config.storage.eeprom.as_deref(), Some(eeprom));
     assert_eq!(config.warnings(), Vec::<String>::new());
 }
 
 #[test]
 fn daemon_config_quotes_awkward_paths_and_whole_snr_values() {
     let awkward = Path::new("runs/\"quoted\" \\ back\tslash\u{1}/air");
-    let config = Config::from_toml(&daemon_config(awkward, "a", awkward, awkward, -58, 9.0)).unwrap();
+    let config = Config::from_toml(&daemon_config(awkward, "a", awkward, awkward, Some(awkward), -58, 9.0)).unwrap();
 
     assert_eq!(config.radio.sim.air_dir, awkward);
     assert_eq!(config.pty.symlink.as_deref(), Some(awkward));
     assert_eq!(config.storage.radio_settings.as_deref(), Some(awkward));
+    assert_eq!(config.storage.eeprom.as_deref(), Some(awkward));
     assert_eq!(config.radio.sim.snr_db, 9.0);
+}
+
+/// The rnodeconf scenario checks rnodeconf's output for each text it expects, and a failure names
+/// the first one missing and shows the output.
+#[test]
+fn expect_output_names_the_missing_text() {
+    let output = "[12:00:00] EEPROM checksum correct\n[12:00:00] \tDevice mode        : TNC\n";
+    assert_eq!(
+        expect_output(output, &["EEPROM checksum correct", "Device mode        : TNC"]),
+        Ok(())
+    );
+    assert_eq!(
+        expect_output(output, &["EEPROM checksum correct", "Validated - Local signature"]),
+        Err(format!(
+            "rnodeconf did not print \"Validated - Local signature\"; it printed:\n{output}"
+        ))
+    );
 }
 
 /// Once a daemon has exited, the PTY its symlink pointed at is gone, so a symlink it left behind
@@ -732,7 +767,12 @@ fn terminate_exited_daemon(name: &str, leave_link: impl FnOnce(&Path)) -> Result
 #[test]
 fn sigterm_wait_outlasts_the_longest_packet_on_the_simulated_air() {
     for (sf, frame_ms) in [(7, 416.0), (11, 4_345.856)] {
-        let wait_ms = Scenario { name: "test", sf }.sigterm_wait().as_secs_f64() * 1000.0;
+        let scenario = Scenario {
+            name: "test",
+            sf,
+            check: Check::Reticulum,
+        };
+        let wait_ms = scenario.sigterm_wait().as_secs_f64() * 1000.0;
         assert!(wait_ms >= 2.0 * frame_ms + 3000.0, "SF{sf}: {wait_ms} ms");
         assert!(
             wait_ms <= 2.0 * (2.0 * frame_ms) + 3000.0,

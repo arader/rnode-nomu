@@ -50,6 +50,6 @@ fn help_and_rns_e2e_exit_0_and_a_bad_rns_e2e_argument_exits_1() {
     assert_eq!(bad.status.code(), Some(1), "{bad:?}");
     assert_eq!(
         text(&bad.stderr),
-        "xtask: unknown scenario \"sf9\"; valid scenarios: sf7, sf11\n"
+        "xtask: unknown scenario \"sf9\"; valid scenarios: sf7, sf11, rnodeconf\n"
     );
 }

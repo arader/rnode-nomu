@@ -12,6 +12,11 @@
 //! RNode ([`PRODUCT_HMBRW`], [`MODEL_FE`]). Both codes are in rnodeconf's tables, and neither names
 //! a firmware file, so `rnodeconf --update` stops before it would flash anything. Its signature is
 //! all `0xFF`, which no key verifies, so rnodeconf reports the device as unverified.
+//!
+//! A [`crate::Storage`] can keep an info block instead ([`crate::storage::StoredInfo`]). Until it
+//! holds one, the EEPROM is unprovisioned ([`InfoBlock::erased`]) and takes the info block that
+//! `rnodeconf --rom` writes with `CMD_ROM_WRITE`, signed with the user's own key. Writing the info
+//! lock byte locks it, if [`InfoBlock::validate`] accepts it, and the storage keeps it from then on.
 
 use core::fmt;
 
@@ -132,6 +137,43 @@ impl DeviceInfo {
     }
 }
 
+/// Why an info block is not one the node locks or loads (see [`InfoBlock::validate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoError {
+    /// The block is this many bytes long, not [`INFO_LEN`].
+    Length(usize),
+    /// The info lock byte is this, not [`INFO_LOCK_BYTE`]: the block is not provisioned.
+    NotLocked(u8),
+    /// The product and model are not the homebrew RNode, [`PRODUCT_HMBRW`] and [`MODEL_FE`].
+    Device {
+        /// The product code in the block.
+        product: u8,
+        /// The model code in the block.
+        model: u8,
+    },
+    /// The hardware revision is `0x00` or `0xFF`, which the firmware rejects
+    /// (`eeprom_hwrev_valid()`).
+    HwRev(u8),
+    /// The checksum is not the MD5 of the device information.
+    Checksum,
+}
+
+impl fmt::Display for InfoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Length(len) => write!(f, "it is {len} bytes long, not {INFO_LEN}"),
+            Self::NotLocked(byte) => write!(f, "its info lock byte is {byte:#04X}, not {INFO_LOCK_BYTE:#04X}"),
+            Self::Device { product, model } => write!(
+                f,
+                "product {product:#04X} and model {model:#04X} are not the homebrew RNode \
+                 ({PRODUCT_HMBRW:#04X}, {MODEL_FE:#04X}) that rnode-linux is"
+            ),
+            Self::HwRev(rev) => write!(f, "hardware revision {rev:#04X} is not valid"),
+            Self::Checksum => f.write_str("its checksum is not the MD5 of its device information"),
+        }
+    }
+}
+
 /// The info block: the EEPROM from [`ADDR_PRODUCT`] to [`ADDR_INFO_LOCK`], with the device
 /// information, its checksum and signature, and the info lock byte.
 #[derive(Clone, PartialEq, Eq)]
@@ -148,9 +190,69 @@ impl InfoBlock {
         Self(bytes)
     }
 
+    /// The info block of an unprovisioned EEPROM: erased, every byte `0xFF`. rnodeconf finds no
+    /// info lock byte in it, so it reports the EEPROM as invalid and lets `--rom` write one.
+    pub fn erased() -> Self {
+        Self([ERASED; INFO_LEN])
+    }
+
+    /// The info block in `bytes`, if they are one that [`InfoBlock::validate`] accepts: how a
+    /// stored info block is read back.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, InfoError> {
+        let bytes: [u8; INFO_LEN] = bytes.try_into().map_err(|_| InfoError::Length(bytes.len()))?;
+        let block = Self(bytes);
+        block.validate()?;
+        Ok(block)
+    }
+
     /// The bytes of the block, [`ADDR_PRODUCT`] first.
     pub fn as_bytes(&self) -> &[u8; INFO_LEN] {
         &self.0
+    }
+
+    /// Set the byte at `addr`, which must be below [`INFO_LEN`], as `CMD_ROM_WRITE` does.
+    pub(crate) fn set(&mut self, addr: usize, byte: u8) {
+        self.0[addr] = byte;
+    }
+
+    /// The device information at the start of the block.
+    pub fn device_info(&self) -> DeviceInfo {
+        let word = |at: usize| u32::from_be_bytes([self.0[at], self.0[at + 1], self.0[at + 2], self.0[at + 3]]);
+        DeviceInfo {
+            product: self.0[ADDR_PRODUCT],
+            model: self.0[ADDR_MODEL],
+            hw_rev: self.0[ADDR_HW_REV],
+            serial: word(ADDR_SERIAL),
+            made: word(ADDR_MADE),
+        }
+    }
+
+    /// Whether the block is provisioned and one rnode-linux reports: locked with
+    /// [`INFO_LOCK_BYTE`], for the homebrew RNode ([`PRODUCT_HMBRW`], [`MODEL_FE`]), with a hardware
+    /// revision the firmware accepts and a correct checksum, as firmware `validate_status()` checks
+    /// at boot (`eeprom_lock_set()`, `eeprom_product_valid()`, `eeprom_model_valid()`,
+    /// `eeprom_hwrev_valid()`, `eeprom_checksum_valid()`). The product and model are those of the
+    /// built-in block: rnodeconf's tables name firmware for most others, and `rnodeconf --update`
+    /// would then download it. The signature is rnodeconf's to check.
+    pub fn validate(&self) -> Result<DeviceInfo, InfoError> {
+        let lock = self.0[ADDR_INFO_LOCK];
+        if lock != INFO_LOCK_BYTE {
+            return Err(InfoError::NotLocked(lock));
+        }
+        let info = self.device_info();
+        if (info.product, info.model) != (PRODUCT_HMBRW, MODEL_FE) {
+            return Err(InfoError::Device {
+                product: info.product,
+                model: info.model,
+            });
+        }
+        if info.hw_rev == 0x00 || info.hw_rev == ERASED {
+            return Err(InfoError::HwRev(info.hw_rev));
+        }
+        if self.0[ADDR_CHKSUM..ADDR_SIGNATURE] != info.checksum() {
+            return Err(InfoError::Checksum);
+        }
+        Ok(info)
     }
 }
 

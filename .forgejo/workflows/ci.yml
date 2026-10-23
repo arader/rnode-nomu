@@ -19,8 +19,9 @@ concurrency:
 jobs:
   test:
     runs-on: builder-node24
-    # About six minutes, most of it SF11 airtime. The end-to-end test's own timeouts and retries
-    # end it within about half an hour even when downloads stall and every scenario hangs.
+    # About seven minutes, most of it SF11 airtime. The end-to-end test's own timeouts and retries
+    # end it within about three quarters of an hour even when downloads stall and every scenario
+    # hangs.
     timeout-minutes: 60
     env:
       # The runner has little memory and runs one job at a time (see infra/forgejo-runners), so keep
@@ -100,8 +101,9 @@ jobs:
           uv pip install --python "$venv/bin/python" --require-hashes --no-build \
             -r tools/hwtest/requirements-test.txt
           "$venv/bin/python" -m unittest discover -s tools/hwtest -p 'test_*.py' -v
-      # Every scenario (SF7, SF11) of Reticulum's RNodeInterface against two simulated daemons,
-      # with the pinned Reticulum and Python packages.
+      # Every scenario of the Reticulum end-to-end test, with the pinned Reticulum and Python
+      # packages: SF7 and SF11 run Reticulum's RNodeInterface against two simulated daemons, and
+      # rnodeconf runs Reticulum's rnodeconf against them, signing with a throwaway local key.
       - name: RNS end-to-end (all scenarios)
         env:
           # The image's Python, never a downloaded one.

@@ -9,7 +9,8 @@
 //!
 //! The crate talks to the outside world through two traits:
 //! - [`Radio`], implemented by modem drivers (e.g. `rnode-sx126x`) and by simulated radios;
-//! - [`Storage`], which persists the radio settings saved with `CMD_CONF_SAVE`.
+//! - [`Storage`], which persists the radio settings saved with `CMD_CONF_SAVE`, and the EEPROM
+//!   info block that `rnodeconf --rom` writes.
 //!
 //! The behaviour follows RNode_Firmware (v1.86) wherever it is observable by the host or on the
 //! air; deliberate differences are documented where they occur.
@@ -37,7 +38,7 @@ pub use pa::ExternalPa;
 pub use radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimMedium, SimRadio};
-pub use storage::{MemoryStorage, RadioSettings, Storage};
+pub use storage::{MemoryStorage, RadioSettings, Storage, StoredInfo};
 
 /// Offset added to RSSI values in dBm before they are sent to the host as a byte (firmware and
 /// Reticulum `RSSI_OFFSET`).

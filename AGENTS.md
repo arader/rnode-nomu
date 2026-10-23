@@ -19,8 +19,9 @@ with real RNodes.
 - Modem drivers implement `rnode_core::Radio` in their own crates: `crates/rnode-sx126x` for the
   SX1262, `crates/rnode-sim` for the simulated radio. DRIVERS.md explains the contract.
 - `crates/xtask` — repository tasks: `cargo xtask rns-e2e` runs Reticulum against two simulated
-  daemons, with the Reticulum commit, uv release and Python packages pinned (crates/xtask/README.md
-  says where); `tests/e2e/kiss_probe.py` is its KISS probe.
+  daemons, and Reticulum's `rnodeconf` against simulated daemons, with the Reticulum commit, uv
+  release and Python packages pinned (crates/xtask/README.md says where);
+  `tests/e2e/kiss_probe.py` is its KISS probe.
 - `tools/hwtest` — hardware bring-up, SDR analysis and an over-the-air LXMF echo test against a
   real RNode (`lxmf_echo_ota.py`) for the reference board, outside the workspace.
 

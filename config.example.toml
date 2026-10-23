@@ -78,10 +78,14 @@ symlink = "target/rnode0"
 
 [storage]
 radio_settings = "target/rnode-radio-settings.toml"
+# Keep an EEPROM info block that rnodeconf --rom writes and signs with your own key, so that
+# rnodeconf validates the device. Until the file exists, the EEPROM is unprovisioned.
+# eeprom = "target/rnode-eeprom.bin"
 
 [eeprom]
 # Serial number that rnodeconf --info shows. Unset, it is derived from the machine ID
-# (/etc/machine-id) and the [pty] symlink path, and stays the same across restarts.
+# (/etc/machine-id) and the [pty] symlink path, and stays the same across restarts. No effect
+# with storage.eeprom, whose info block has the serial number rnodeconf --rom wrote.
 # serial_number = 0x0000002A
 
 [logging]

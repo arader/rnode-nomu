@@ -1225,7 +1225,7 @@ places:
        let pty = open_pty(&config)?;
        let _power = gpio.power;
        let radio = Sx127x::new(spi, gpio.reset, StdDelay, config.radio.sx127x.driver_config()?);
-       let storage = TomlStorage::new(config.storage.radio_settings.clone());
+       let storage = TomlStorage::new(config.storage.radio_settings.clone()).with_eeprom(config.storage.eeprom.clone());
        let node = Node::new(radio, storage, node_config(&config), seed);
        run(node, gpio.dio1, pty, shutdown).map_err(Into::into)
    }

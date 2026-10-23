@@ -11,13 +11,14 @@ cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 Without `--scenario` it runs every scenario, as CI does on main. The harness builds `rnode-linux`,
 creates an isolated run directory under `target/rns-e2e`, starts two daemon instances with
 `radio.driver = "sim"` on a shared simulated air directory and distinct PTYs, and runs two separate
-Reticulum Python processes using `RNodeInterface`.
+Reticulum Python processes using `RNodeInterface`, or, in the `rnodeconf` scenario, Reticulum's
+`rnodeconf`.
 
 Options:
 
-- `--scenario NAME` runs only the named scenario, `sf7` or `sf11`; repeat it to run several. They run
-  in that order whatever order they are named in. An unknown name is an error that lists the valid
-  ones.
+- `--scenario NAME` runs only the named scenario, `sf7`, `sf11` or `rnodeconf`; repeat it to run
+  several. They run in that order whatever order they are named in. An unknown name is an error that
+  lists the valid ones.
 - `--fetch-reticulum` tests the Reticulum commit CI tests (see [Pins](#pins)). It fetches that
   commit into `target/rns-e2e/reticulum-e40191b3d193` with a shallow `git fetch`, retried three
   times with backoff when it fails, and checks that the checkout's `HEAD` is the pinned commit.
@@ -49,12 +50,30 @@ and 255-byte and exactly 508-byte split payloads in both directions, and a silen
 link packets in both directions, a 4 KiB `Resource` transfer, Reticulum's RSSI/SNR metadata and the
 CHTM/PHYPRM stats the interface exposes.
 
-When a scenario fails, the harness prints the last 100 lines of each of its logs to stderr: both
-daemons' logs, the Reticulum server's and client's output, and any error file the Python scripts
-left. A CI log therefore shows the cause without any artifacts. The logs stay in
-`target/rns-e2e/runs`; `--keep-logs` keeps them after a pass too.
+The `rnodeconf` scenario runs `python -m RNS.Utilities.rnodeconf` from the same checkout and venv
+against two daemons, with `HOME` set to a directory in the run directory: rnodeconf keeps its keys,
+caches and device records in `~/.config/rnodeconf`, so a run never reads or changes the user's own.
+Each run must succeed and print what the scenario expects:
 
-A run takes about five minutes, almost all of it SF11 airtime and CSMA backoff; SF7 alone takes
+1. Against a daemon with the built-in EEPROM image: `--info` ("EEPROM checksum correct", an
+   unverified signature, normal mode); `--tnc --freq 914875000 --bw 125000 --txp 2 --sf 8 --cr 5`,
+   after which the daemon's settings file must hold those settings; `--info` again, in TNC mode;
+   `--normal`, after which the settings file must be gone.
+2. `--key`, which makes a throwaway signing key in that `HOME`.
+3. Against a daemon with `[storage] eeprom` and no file yet: `--rom --product f0 --model fe
+   --hwrev 1`, after which the daemon must have stored the 156-byte info block with mode 0600, and
+   `--info`, which must show "Validated - Local signature" and no "NOT verifiable" warning.
+
+It never runs an option that flashes (`--flash`, `--update`, `--autoinstall`), and talks only to the
+simulated daemons. It takes about 40 s, almost all of it rnodeconf's own waits, so pull requests do
+not run it; each rnodeconf run may take up to 90 s.
+
+When a scenario fails, the harness prints the last 100 lines of each of its logs to stderr: the
+daemons' logs, the Reticulum server's and client's output, each rnodeconf run's output, and any
+error file the Python scripts left. A CI log therefore shows the cause without any artifacts. The
+logs stay in `target/rns-e2e/runs`; `--keep-logs` keeps them after a pass too.
+
+A run takes about six minutes, almost all of it SF11 airtime and CSMA backoff; SF7 alone takes
 about a minute. Typical timings (914.875 MHz, 2 dBm, CR 4/5):
 
 | Scenario | Path      | Link      | Echo RTT (1, 64, 240, 152 B) | 4 KiB resource |
@@ -75,7 +94,8 @@ Prerequisites:
   installing `uv`, it adds about a minute to the job.
 - **main:** `.forgejo/workflows/ci.yml` runs on every push to main, and on any branch from
   Actions → CI → Run workflow. It runs the same checks as `PR / test`, then every scenario with
-  `cargo xtask rns-e2e --fetch-reticulum`. Runs on main queue up rather than cancel each other.
+  `cargo xtask rns-e2e --fetch-reticulum`, `rnodeconf` included. Runs on main queue up rather than
+  cancel each other.
 
 The CI image has Python 3.13 but no pip or `uv`. Both workflows install `uv` with the same
 "Install uv" step: a pinned release, checked against its sha256 before use. They set

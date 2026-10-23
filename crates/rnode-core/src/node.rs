@@ -75,12 +75,21 @@
 //!   or clamps it at a bound beyond which the gain table holds no further entry: the mapping back
 //!   clamps to the table first. That holds for the SX1262, which clamps to −9…22 dBm, with any
 //!   table of up to 23 entries, the firmware's 22-entry tables included;
-//! - there is no EEPROM. `CMD_ROM_READ` gets an image built from the device information in
-//!   [`NodeConfig::serial_number`], the saved settings and the interference-avoidance setting
-//!   (see [`crate::eeprom`]), which is locked: like the firmware's `eeprom_write()` on a locked
-//!   EEPROM, the node refuses `CMD_ROM_WRITE` with `ERROR_EEPROM_LOCKED`. It also refuses
-//!   `CMD_UNLOCK_ROM`, which makes the firmware's `unlock_rom()` erase the EEPROM, saved settings
-//!   included, and reboot: the node replies `ERROR_EEPROM_LOCKED` and keeps the saved settings.
+//! - there is no EEPROM. `CMD_ROM_READ` gets an image built from an info block, the saved settings
+//!   and the interference-avoidance setting (see [`crate::eeprom`]). The info block is the
+//!   built-in one, with [`NodeConfig::serial_number`], unless the storage keeps one
+//!   ([`Storage::load_info`]); the node loads that at boot, at `CMD_RESET` and for each
+//!   `CMD_ROM_READ`. A locked info block takes no `CMD_ROM_WRITE`: like the firmware's
+//!   `eeprom_write()` on a locked EEPROM, the node replies `ERROR_EEPROM_LOCKED`. While the storage
+//!   holds none, the EEPROM is unprovisioned and takes writes to the info block, `0x00` to `0x9B`,
+//!   which the node keeps in memory, across `CMD_RESET` too. Writing the info lock byte locks it,
+//!   but only if [`crate::eeprom::InfoBlock::validate`] accepts it, as firmware `validate_status()`
+//!   would at the next boot, and the storage saved it; otherwise the node replies
+//!   `ERROR_EEPROM_LOCKED` and the EEPROM stays unprovisioned. Writes beyond the info block, which
+//!   the firmware takes up to address 199, get `ERROR_EEPROM_LOCKED`: the settings there come from
+//!   the saved settings and the node's configuration. The node also refuses `CMD_UNLOCK_ROM`,
+//!   which makes the firmware's `unlock_rom()` erase the EEPROM, saved settings included, and
+//!   reboot: it replies `ERROR_EEPROM_LOCKED` and keeps both the saved settings and the info block.
 //!   Each refusal logs one warning, and so do `CMD_FW_UPD`, `CMD_FW_HASH` and `CMD_DEV_SIG`, which
 //!   the node ignores because firmware updates and device signing do not apply to it. Like the
 //!   firmware on platforms without device hashes or Wi-Fi, it does not answer `CMD_DEV_HASH` or
@@ -120,7 +129,7 @@ use core::fmt;
 
 use crate::RSSI_OFFSET;
 use crate::csma::{Access, Csma, StatusUpdate};
-use crate::eeprom::{self, DeviceInfo, InfoBlock};
+use crate::eeprom::{self, ADDR_INFO_LOCK, DeviceInfo, INFO_LOCK_BYTE, InfoBlock};
 use crate::fault_log::FaultLog;
 use crate::framing::{self, Reassembly, RxReassembler};
 use crate::identity::DeviceIdentity;
@@ -131,7 +140,7 @@ use crate::phy::{self, Modulation, PhyParams};
 use crate::queue::TxQueue;
 use crate::radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 use crate::rng::Rng;
-use crate::storage::{RadioSettings, Storage};
+use crate::storage::{RadioSettings, Storage, StoredInfo};
 
 /// Firmware `STATUS_INTERVAL_MS`: how often the modem status (DCD, RSSI) is sampled.
 pub const STATUS_INTERVAL_MS: u64 = 3;
@@ -187,9 +196,10 @@ pub struct NodeConfig {
     /// [`crate::csma::LORA_LNA_GVT`] dB below the noise floor out of it, as firmware
     /// `update_noise_floor()` does, because the LNA's gain varies while it re-calibrates.
     pub external_lna: bool,
-    /// The serial number in the EEPROM image the node sends for `CMD_ROM_READ` (`ADDR_SERIAL`),
-    /// which `rnodeconf --info` shows. The rest of the device information is the homebrew RNode of
-    /// [`DeviceInfo::homebrew`].
+    /// The serial number in the built-in info block of the EEPROM image the node sends for
+    /// `CMD_ROM_READ` (`ADDR_SERIAL`), which `rnodeconf --info` shows. The rest of the device
+    /// information is the homebrew RNode of [`DeviceInfo::homebrew`]. An info block the storage
+    /// keeps has its own ([`Storage::load_info`]).
     pub serial_number: u32,
 }
 
@@ -465,6 +475,11 @@ pub struct Node<R: Radio, S: Storage> {
     /// The queued packets' wait for channel access, while there is one: from the first time they
     /// have to wait until access is granted or the radio goes offline, a reset included.
     tx_wait: Option<TxWait>,
+    /// The EEPROM info block the storage held when the node last loaded it.
+    info: StoredInfo,
+    /// What `CMD_ROM_WRITE` wrote into the info block while the EEPROM was unprovisioned
+    /// ([`StoredInfo::Empty`]); erased until then. Like EEPROM, it survives `CMD_RESET`.
+    unprovisioned: InfoBlock,
 }
 
 impl<R: Radio, S: Storage> Node<R, S> {
@@ -509,10 +524,13 @@ impl<R: Radio, S: Storage> Node<R, S> {
             logged_settings: None,
             retune_pending_since: None,
             tx_wait: None,
+            info: StoredInfo::NotKept,
+            unprovisioned: InfoBlock::erased(),
         }
     }
 
-    /// Start-up: load saved radio settings and, if they are complete, bring the radio online.
+    /// Start-up: load the EEPROM info block and the saved radio settings and, if the settings are
+    /// complete, bring the radio online.
     ///
     /// Settings with a TX power from 128 to 254 are ignored with a warning, and the radio stays off
     /// until a host configures it, as if nothing were saved. Read as unsigned, such a byte would
@@ -521,6 +539,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
     /// firmware's EEPROM never holds one: `eeprom_conf_save()` stores the power after its host
     /// path clamped it to 22 dBm.
     pub fn boot(&mut self, now_ms: u64) {
+        self.load_info();
         match self.storage.load() {
             Ok(Some(settings)) if REFUSED_SAVED_TX_POWER.contains(&settings.tx_power) => log::warn!(
                 "ignoring saved radio settings: TX power {} is out of range (earlier builds saved -9 to -2 dBm \
@@ -860,14 +879,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
             // Firmware `kiss_dump_config()`: only ESP32 firmware has a config sector (Wi-Fi
             // settings) to send; on other platforms the frame is empty, as here.
             kiss::CMD_CFG_READ => kiss::frame_plain(kiss::CMD_CFG_READ, &[], &mut self.host_output),
-            // Firmware `eeprom_write()` refuses writes while the EEPROM is locked, as ours always is.
-            kiss::CMD_ROM_WRITE if payload.len() == 2 => {
-                log::warn!(
-                    "refusing CMD_ROM_WRITE to EEPROM address {:#04X}: the EEPROM is locked; sent ERROR_EEPROM_LOCKED",
-                    payload[0]
-                );
-                self.reply_error(kiss::ERROR_EEPROM_LOCKED);
-            }
+            kiss::CMD_ROM_WRITE if payload.len() == 2 => self.write_eeprom(payload[0], payload[1]),
             // Firmware `unlock_rom()` erases the EEPROM, saved settings included, and reboots.
             kiss::CMD_UNLOCK_ROM if b0 == kiss::ROM_UNLOCK_BYTE => {
                 log::warn!(
@@ -1041,10 +1053,32 @@ impl<R: Radio, S: Storage> Node<R, S> {
         };
     }
 
-    /// Send the EEPROM image (firmware `kiss_dump_eeprom()`), with the saved settings as they are
-    /// stored now.
+    /// Load the EEPROM info block the storage holds now. One it cannot read leaves the EEPROM
+    /// unprovisioned, as a corrupt one does. A locked one ends what was written into an
+    /// unprovisioned EEPROM before.
+    fn load_info(&mut self) {
+        self.info = self.storage.load_info().unwrap_or_else(|e| {
+            log::warn!("failed to load the EEPROM info block: {e}; the EEPROM reads as unprovisioned");
+            StoredInfo::Empty
+        });
+        if matches!(self.info, StoredInfo::Locked(_)) {
+            self.unprovisioned = InfoBlock::erased();
+        }
+    }
+
+    /// Send the EEPROM image (firmware `kiss_dump_eeprom()`), with the info block and the saved
+    /// settings as they are stored now.
     fn reply_eeprom(&mut self) {
-        let info = InfoBlock::unsigned(DeviceInfo::homebrew(self.config.serial_number));
+        self.load_info();
+        let built_in;
+        let info = match &self.info {
+            StoredInfo::NotKept => {
+                built_in = InfoBlock::unsigned(DeviceInfo::homebrew(self.config.serial_number));
+                &built_in
+            }
+            StoredInfo::Empty => &self.unprovisioned,
+            StoredInfo::Locked(block) => block,
+        };
         let tnc = match self.storage.load() {
             Ok(settings) => settings.filter(saved_settings_start_radio),
             Err(e) => {
@@ -1052,8 +1086,60 @@ impl<R: Radio, S: Storage> Node<R, S> {
                 None
             }
         };
-        let image = eeprom::image(&info, tnc.as_ref(), self.avoid_interference);
+        let image = eeprom::image(info, tnc.as_ref(), self.avoid_interference);
         kiss::frame_escaped(kiss::CMD_ROM_READ, &image, &mut self.host_output);
+    }
+
+    /// `CMD_ROM_WRITE` (firmware `eeprom_write()`): write `byte` at `addr` while the EEPROM is
+    /// unprovisioned, and lock it when the info lock byte arrives (see the module docs).
+    fn write_eeprom(&mut self, addr: u8, byte: u8) {
+        let at = usize::from(addr);
+        if self.info != StoredInfo::Empty {
+            log::warn!(
+                "refusing CMD_ROM_WRITE to EEPROM address {addr:#04X}: the EEPROM is locked; sent ERROR_EEPROM_LOCKED"
+            );
+            self.reply_error(kiss::ERROR_EEPROM_LOCKED);
+        } else if at > ADDR_INFO_LOCK {
+            log::warn!(
+                "refusing CMD_ROM_WRITE to EEPROM address {addr:#04X}: only the info block, 0x00 to 0x9B, can be \
+                 written; sent ERROR_EEPROM_LOCKED"
+            );
+            self.reply_error(kiss::ERROR_EEPROM_LOCKED);
+        } else if at == ADDR_INFO_LOCK && byte == INFO_LOCK_BYTE {
+            self.lock_eeprom();
+        } else {
+            self.unprovisioned.set(at, byte);
+        }
+    }
+
+    /// Lock the info block the host wrote, if it is valid and the storage keeps it.
+    fn lock_eeprom(&mut self) {
+        let mut block = self.unprovisioned.clone();
+        block.set(ADDR_INFO_LOCK, INFO_LOCK_BYTE);
+        let info = match block.validate() {
+            Ok(info) => info,
+            Err(e) => {
+                log::warn!("refusing to lock the EEPROM: {e}; it stays unprovisioned; sent ERROR_EEPROM_LOCKED");
+                self.reply_error(kiss::ERROR_EEPROM_LOCKED);
+                return;
+            }
+        };
+        if let Err(e) = self.storage.save_info(&block) {
+            log::warn!(
+                "failed to save the EEPROM info block: {e}; the EEPROM stays unprovisioned; sent ERROR_EEPROM_LOCKED"
+            );
+            self.reply_error(kiss::ERROR_EEPROM_LOCKED);
+            return;
+        }
+        log::info!(
+            "host provisioned the EEPROM: product {:#04X}, model {:#04X}, hardware revision {}, serial number {:#010X}",
+            info.product,
+            info.model,
+            info.hw_rev,
+            info.serial
+        );
+        self.info = StoredInfo::Locked(block);
+        self.unprovisioned = InfoBlock::erased();
     }
 
     fn conf_save(&mut self) {

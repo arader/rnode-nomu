@@ -2,18 +2,21 @@
 //! an rnode-linux PTY, replayed into a node in the order they ran, with the replies RNode_Firmware
 //! v1.86 gives to them.
 //!
-//! The writes were recorded with a logging proxy on a PTY pair between rnodeconf and a simulated
-//! rnode-linux daemon with `[eeprom] serial_number = 42`, starting without saved settings. Each
-//! write is listed with when it was made, in ms after rnodeconf started; one write can hold several
-//! frames. While its radio was on, the daemon also pushed `CMD_STAT_CHTM`, which comes from ticks
+//! The writes were recorded with a logging proxy on a PTY pair between rnodeconf and simulated
+//! rnode-linux daemons, starting without saved settings: one with `[eeprom] serial_number = 42`
+//! ([`SESSIONS`]), and one with `[storage] eeprom` set and no file yet, which rnodeconf signed with
+//! a throwaway key ([`SIGNING_SESSIONS`]). Each write is listed with when it was made, in ms after
+//! rnodeconf started; one write can hold several frames, and the 156 writes of `--rom` are listed
+//! as one. While its radio was on, the daemon also pushed `CMD_STAT_CHTM`, which comes from ticks
 //! that a replay does not run.
 
 mod common;
 
 use common::{cmd, plain};
+use rnode_core::eeprom::InfoBlock;
 use rnode_core::kiss::*;
 use rnode_core::phy::{Modulation, PhyParams};
-use rnode_core::{MemoryStorage, Node, NodeConfig, RadioSettings, SimMedium, SimRadio};
+use rnode_core::{MemoryStorage, Node, NodeConfig, RadioSettings, SimMedium, SimRadio, StoredInfo};
 
 /// One rnodeconf run: its options, and its writes as (ms after it started, bytes in hex).
 struct Session {
@@ -100,6 +103,68 @@ const SESSIONS: [Session; 9] = [
         ],
     },
 ];
+
+/// The sessions that signed an unprovisioned EEPROM with a local key, in the order they ran, after
+/// `rnodeconf -k`, which does not open the port.
+const SIGNING_SESSIONS: [Session; 3] = [
+    Session {
+        options: "-i",
+        writes: &[
+            (2662, "c00873c05000c04800c04900c04700c05601c06001c06002c0"),
+            (3420, "c05100c0"),
+        ],
+    },
+    Session {
+        options: "--rom --product f0 --model fe --hwrev 1",
+        writes: &[
+            (2675, "c00873c05000c04800c04900c04700c05601c06001c06002c0"),
+            (3436, "c05100c0"),
+            (7067, ROM_WRITES),
+            (8409, "c055f8c0"),
+            (10410, "c05100c0"),
+            (11020, "c055f8c0"),
+        ],
+    },
+    Session {
+        options: "-i",
+        writes: &[
+            (2667, "c00873c05000c04800c04900c04700c05601c06001c06002c0"),
+            (3421, "c05100c0"),
+            (4041, "c00affc0"),
+        ],
+    },
+];
+
+/// The 156 `CMD_ROM_WRITE` frames of `--rom`, one for each address from `0x00` to the info lock
+/// byte at `0x9B`, 6 ms apart: product, model, revision, serial number 1, the time, the checksum,
+/// the signature, then `0x73`. FEND and FESC are escaped.
+const ROM_WRITES: &str = concat!(
+    "c05200f0c0c05201fec0c0520201c0c0520300c0c0520400c0c0520500c0c0520601c0c052076ac0c05208dbddc0c052",
+    "0902c0c0520acbc0c0520b30c0c0520c62c0c0520d7bc0c0520ed9c0c0520f7ec0c0521032c0c052114dc0c0521252c0",
+    "c0521377c0c05214b1c0c052152cc0c05216e5c0c052173ec0c05218e2c0c052192cc0c0521a92c0c0521b60c0c0521c",
+    "89c0c0521dffc0c0521e41c0c0521ffbc0c052204fc0c05221f5c0c05222abc0c05223dbddc0c052248dc0c0522561c0",
+    "c05226b0c0c0522762c0c05228f0c0c052297ac0c0522ab0c0c0522b4ec0c0522c47c0c0522d30c0c0522e37c0c0522f",
+    "e0c0c05230d1c0c052312bc0c052322dc0c0523349c0c052343ec0c0523519c0c052362ac0c0523708c0c05238dfc0c0",
+    "5239efc0c0523addc0c0523b2ac0c0523c3dc0c0523d94c0c0523e3fc0c0523f53c0c052403fc0c0524146c0c052424c",
+    "c0c05243c4c0c0524465c0c0524577c0c05246d7c0c05247f1c0c05248cbc0c05249e7c0c0524a7bc0c0524bd6c0c052",
+    "4c2ac0c0524d85c0c0524e13c0c0524f42c0c0525040c0c0525189c0c05252a9c0c0525372c0c0525477c0c05255d0c0",
+    "c0525601c0c052575bc0c0525887c0c0525962c0c0525a57c0c0525b08c0c0525cd3c0c0525d0ac0c0525e2dc0c0525f",
+    "07c0c05260a4c0c052612fc0c052621ec0c0526320c0c05264ccc0c0526564c0c0526682c0c0526751c0c052682fc0c0",
+    "5269a1c0c0526ae7c0c0526b90c0c0526ce3c0c0526d5dc0c0526e79c0c0526f92c0c05270a3c0c05271f2c0c0527257",
+    "c0c052737ac0c0527418c0c0527546c0c05276d9c0c052776cc0c0527832c0c0527956c0c0527a55c0c0527bf0c0c052",
+    "7c0dc0c0527d91c0c0527e30c0c0527fdbdcc0c05280d3c0c05281a8c0c0528237c0c0528331c0c0528443c0c0528514",
+    "c0c05286e6c0c0528720c0c05288bbc0c0528905c0c0528a2ec0c0528baac0c0528cd1c0c0528d89c0c0528ec4c0c052",
+    "8fdbdcc0c0529024c0c05291dac0c0529287c0c05293a6c0c0529417c0c05295edc0c0529628c0c05297bac0c05298b7",
+    "c0c052996cc0c0529abcc0c0529b73c0",
+);
+
+/// The info block those writes hold, as the daemon stored it.
+const SIGNED_INFO_BLOCK: &str = concat!(
+    "f0fe01000000016adb02cb30627bd97e324d5277b12ce53ee22c926089ff41fb4ff5abdb8d61b062f07ab04e473037e0",
+    "d12b2d493e192a08dfefdd2a3d943f533f464cc46577d7f1cbe77bd62a8513424089a97277d0015b87625708d30a2d07",
+    "a42f1e20cc6482512fa1e790e35d7992a3f2577a1846d96c325655f00d9130c0d3a837314314e620bb052eaad189c4c0",
+    "24da87a617ed28bab76cbc73",
+);
 
 /// The settings `-T` configures and saves.
 const TNC: RadioSettings = RadioSettings {
@@ -262,4 +327,33 @@ fn rnodeconf_sessions_get_the_firmware_replies() {
     );
     assert!(!n.is_radio_online());
     assert!(sessions.next().is_none(), "a session was not checked");
+}
+
+/// `rnodeconf --rom` signs an unprovisioned EEPROM with the user's key: it reads the EEPROM, which
+/// rnodeconf calls invalid, writes the info block and locks it, resets the device and reads the
+/// EEPROM back, which must now hold the signed info block.
+#[test]
+fn rnodeconf_rom_signs_an_unprovisioned_eeprom() {
+    let mut n = Node::new(
+        SimMedium::new().radio(),
+        MemoryStorage::keeping_info(),
+        NodeConfig::default(),
+        1,
+    );
+    n.boot(0);
+    assert!(n.take_host_output().is_empty());
+    let block = InfoBlock::from_bytes(&hex(SIGNED_INFO_BLOCK)).unwrap();
+    let unprovisioned = cmd(CMD_ROM_READ, &[0xFF; 200]);
+    let signed = cmd(CMD_ROM_READ, &[&block.as_bytes()[..], &[0xFF; 44]].concat());
+    let [info, rom, signed_info] = &SIGNING_SESSIONS;
+
+    // "EEPROM is invalid, no further information available"
+    assert_eq!(replay(&mut n, info, 60_000), [detect_replies(), unprovisioned.clone()]);
+    assert_eq!(
+        replay(&mut n, rom, 120_000),
+        [detect_replies(), unprovisioned, vec![], vec![], signed.clone(), vec![]]
+    );
+    assert_eq!(n.storage().info(), &StoredInfo::Locked(block));
+    // "Device signature : Validated - Local signature"
+    assert_eq!(replay(&mut n, signed_info, 180_000), [detect_replies(), signed, vec![]]);
 }

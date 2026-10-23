@@ -562,14 +562,21 @@ pub struct StorageConfig {
     /// a `CMD_RESET` until a host configures it, and the daemon warns about this at startup.
     #[serde(default)]
     pub radio_settings: Option<PathBuf>,
+    /// File for the EEPROM info block that `rnodeconf --rom` writes and signs with the user's own
+    /// key. While the file does not exist, the EEPROM is unprovisioned and takes one; once written,
+    /// the daemon reports it instead of its built-in, unsigned one. When unset, the daemon always
+    /// reports the built-in one (`rnode_core::eeprom`).
+    #[serde(default)]
+    pub eeprom: Option<PathBuf>,
 }
 
 /// What the EEPROM image that `rnodeconf` reads reports (`rnode_core::eeprom`).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EepromConfig {
-    /// Serial number, which `rnodeconf --info` shows. When unset, [`Config::serial_number`] derives
-    /// one from the machine ID and `[pty] symlink`.
+    /// Serial number of the built-in info block, which `rnodeconf --info` shows. When unset,
+    /// [`Config::serial_number`] derives one from the machine ID and `[pty] symlink`. An info block
+    /// in `[storage] eeprom` has its own.
     #[serde(default)]
     pub serial_number: Option<u32>,
 }
@@ -667,6 +674,13 @@ impl Config {
             warnings.push(
                 "storage.radio_settings is not set: radio settings the host saves with CMD_CONF_SAVE \
                  are not kept, so they are lost on restart and on CMD_RESET"
+                    .to_owned(),
+            );
+        }
+        if self.storage.eeprom.is_some() && self.eeprom.serial_number.is_some() {
+            warnings.push(
+                "eeprom.serial_number has no effect while storage.eeprom is set: the EEPROM then holds the \
+                 serial number rnodeconf --rom writes"
                     .to_owned(),
             );
         }

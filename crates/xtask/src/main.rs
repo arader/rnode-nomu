@@ -15,8 +15,32 @@ const BANDWIDTH_HZ: u32 = 125_000;
 const TX_POWER_DBM: u8 = 2;
 const CODING_RATE: u8 = 5;
 
-/// Every scenario, in the order they run: SF7 is quick; SF11 is the slow, long-range case.
-const SCENARIOS: [Scenario; 2] = [Scenario { name: "sf7", sf: 7 }, Scenario { name: "sf11", sf: 11 }];
+/// Every scenario, in the order they run: SF7 is quick; SF11 is the slow, long-range case;
+/// rnodeconf runs Reticulum's RNode configuration tool, which configures SF8.
+const SCENARIOS: [Scenario; 3] = [
+    Scenario {
+        name: "sf7",
+        sf: 7,
+        check: Check::Reticulum,
+    },
+    Scenario {
+        name: "sf11",
+        sf: 11,
+        check: Check::Reticulum,
+    },
+    Scenario {
+        name: "rnodeconf",
+        sf: RNODECONF_SF,
+        check: Check::Rnodeconf,
+    },
+];
+
+/// The spreading factor `rnodeconf --tnc` configures in the rnodeconf scenario.
+const RNODECONF_SF: u8 = 8;
+
+/// How long one rnodeconf run may take. They take 1 to 12 s: rnodeconf waits 2.5 s before it talks
+/// to the device, and `--rom` waits 3 s before its writes and 2 s after each reset.
+const RNODECONF_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The Reticulum that `--fetch-reticulum` tests and CI runs: 1.5.5-1-ge40191b3 (`RNS.__version__`
 /// 1.5.5). Every validation of rnode-linux against Reticulum so far used this commit.
@@ -84,7 +108,8 @@ fn usage() -> String {
     format!(
         "usage: cargo xtask rns-e2e [--scenario NAME]... [--reticulum PATH | --fetch-reticulum] [--keep-logs]
 
-Runs Reticulum's RNodeInterface against two simulated rnode-linux daemons (crates/xtask/README.md).
+Runs Reticulum's RNodeInterface against two simulated rnode-linux daemons, and rnodeconf against
+simulated daemons (crates/xtask/README.md).
 
   --scenario NAME    run only this scenario ({names}); repeat it to run several. Default: all
   --reticulum PATH   the Reticulum checkout to test. Default: $RNODE_RETICULUM, else ../Reticulum
@@ -392,7 +417,18 @@ fn run_git(cmd: &mut Command) -> Result<String, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Scenario {
     name: &'static str,
+    /// The spreading factor the scenario configures, at 125 kHz.
     sf: u8,
+    check: Check,
+}
+
+/// What a scenario runs against the simulated daemons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// The KISS boundary probe, then two Reticulum processes over `RNodeInterface`.
+    Reticulum,
+    /// rnodeconf, Reticulum's RNode configuration tool ([`run_rnodeconf_checks`]).
+    Rnodeconf,
 }
 
 impl Scenario {
@@ -430,95 +466,24 @@ fn run_scenario(
     reticulum: &Path,
     scenario: Scenario,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("running RNS e2e scenario {} (SF{}/125kHz)", scenario.name, scenario.sf);
     let run_dir = base_run_dir.join(scenario.name);
     fs::create_dir_all(&run_dir)?;
     let air_dir = run_dir.join("air");
     create_private_dir(&air_dir)?;
-    write_python_scripts(&run_dir)?;
-    let node_a = NodePaths::new(&run_dir, "a");
-    let node_b = NodePaths::new(&run_dir, "b");
-    write_daemon_config(&node_a, &air_dir, -58, 9.0)?;
-    write_daemon_config(&node_b, &air_dir, -64, 6.5)?;
-    write_rns_config(&node_a, scenario.sf)?;
-    write_rns_config(&node_b, scenario.sf)?;
-
     let mut children = Children::default();
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        children.spawn_logged(
-            "daemon-a",
-            Command::new(daemon).arg("--config").arg(&node_a.daemon_config),
-            &node_a.log,
-            Some(node_a.pty.clone()),
-        )?;
-        children.spawn_logged(
-            "daemon-b",
-            Command::new(daemon).arg("--config").arg(&node_b.daemon_config),
-            &node_b.log,
-            Some(node_b.pty.clone()),
-        )?;
-        wait_for_path(&node_a.pty, Duration::from_secs(10), "daemon A PTY")?;
-        wait_for_path(&node_b.pty, Duration::from_secs(10), "daemon B PTY")?;
-
-        let py = venv.join("bin/python");
-        let mut kiss = Command::new(&py);
-        kiss.arg(run_dir.join("kiss_boundary.py"))
-            .arg(&node_a.pty)
-            .arg(&node_b.pty)
-            .arg(FREQUENCY_HZ.to_string())
-            .arg(BANDWIDTH_HZ.to_string())
-            .arg(TX_POWER_DBM.to_string())
-            .arg(scenario.sf.to_string())
-            .arg(CODING_RATE.to_string());
-        let kiss_timeout = if scenario.sf >= 11 { 180 } else { 60 };
-        let status = run_with_timeout(&mut kiss, Duration::from_secs(kiss_timeout), "KISS boundary probe")?;
-        if !status.success() {
-            return Err(format!("KISS boundary probe failed with {status}").into());
+    let result = match scenario.check {
+        Check::Reticulum => {
+            println!("running RNS e2e scenario {} (SF{}/125kHz)", scenario.name, scenario.sf);
+            run_reticulum_checks(&run_dir, &air_dir, daemon, venv, reticulum, scenario, &mut children)
         }
-
-        let mut server = Command::new(&py);
-        server
-            .arg("-u")
-            .arg(run_dir.join("rns_server.py"))
-            .arg(&node_b.rns_config_dir)
-            .arg(&run_dir);
-        server.env("PYTHONPATH", reticulum);
-        children.spawn_logged("rns-server", &mut server, &run_dir.join("rns-server.log"), None)?;
-        wait_for_path(
-            &run_dir.join("server.hash"),
-            Duration::from_secs(30),
-            "server announce file",
-        )?;
-
-        let mut client = Command::new(&py);
-        client
-            .arg("-u")
-            .arg(run_dir.join("rns_client.py"))
-            .arg(&node_a.rns_config_dir)
-            .arg(&run_dir)
-            .arg(scenario.sf.to_string());
-        client.env("PYTHONPATH", reticulum);
-        let client_log_path = run_dir.join("rns-client.log");
-        let client_log = fs::File::create(&client_log_path)?;
-        client
-            .stdout(Stdio::from(client_log.try_clone()?))
-            .stderr(Stdio::from(client_log));
-        let timeout = if scenario.sf >= 11 { 600 } else { 180 };
-        let status = run_with_timeout(&mut client, Duration::from_secs(timeout), "RNS client")?;
-        if !status.success() {
-            return Err(format!("RNS client failed with {status}").into());
+        Check::Rnodeconf => {
+            println!(
+                "running RNS e2e scenario {} (rnodeconf against simulated daemons)",
+                scenario.name
+            );
+            run_rnodeconf_checks(&run_dir, &air_dir, daemon, venv, reticulum, &mut children)
         }
-        wait_for_path(
-            &run_dir.join("server.done"),
-            Duration::from_secs(30),
-            "server completion",
-        )?;
-        let timings_path = run_dir.join("timings.json");
-        if let Ok(timings) = fs::read_to_string(&timings_path) {
-            println!("{} timings: {}", scenario.name, timings.trim());
-        }
-        Ok(())
-    })();
+    };
     // Stop the processes before reading their logs, so that the logs are complete.
     let result = scenario_outcome(result, children.terminate_all(scenario.sigterm_wait()));
     if let Err(err) = &result {
@@ -529,6 +494,278 @@ fn run_scenario(
         let _ = write_log_tails(&run_dir, FAILURE_LOG_LINES, &mut io::stderr().lock());
     }
     result
+}
+
+/// The KISS boundary probe, then Reticulum's announce, link, packets and resource between two
+/// daemons.
+fn run_reticulum_checks(
+    run_dir: &Path,
+    air_dir: &Path,
+    daemon: &Path,
+    venv: &Path,
+    reticulum: &Path,
+    scenario: Scenario,
+    children: &mut Children,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_python_scripts(run_dir)?;
+    let node_a = NodePaths::new(run_dir, "a");
+    let node_b = NodePaths::new(run_dir, "b");
+    write_daemon_config(&node_a, air_dir, -58, 9.0, false)?;
+    write_daemon_config(&node_b, air_dir, -64, 6.5, false)?;
+    write_rns_config(&node_a, scenario.sf)?;
+    write_rns_config(&node_b, scenario.sf)?;
+
+    children.spawn_logged(
+        "daemon-a",
+        Command::new(daemon).arg("--config").arg(&node_a.daemon_config),
+        &node_a.log,
+        Some(node_a.pty.clone()),
+    )?;
+    children.spawn_logged(
+        "daemon-b",
+        Command::new(daemon).arg("--config").arg(&node_b.daemon_config),
+        &node_b.log,
+        Some(node_b.pty.clone()),
+    )?;
+    wait_for_path(&node_a.pty, Duration::from_secs(10), "daemon A PTY")?;
+    wait_for_path(&node_b.pty, Duration::from_secs(10), "daemon B PTY")?;
+
+    let py = venv.join("bin/python");
+    let mut kiss = Command::new(&py);
+    kiss.arg(run_dir.join("kiss_boundary.py"))
+        .arg(&node_a.pty)
+        .arg(&node_b.pty)
+        .arg(FREQUENCY_HZ.to_string())
+        .arg(BANDWIDTH_HZ.to_string())
+        .arg(TX_POWER_DBM.to_string())
+        .arg(scenario.sf.to_string())
+        .arg(CODING_RATE.to_string());
+    let kiss_timeout = if scenario.sf >= 11 { 180 } else { 60 };
+    let status = run_with_timeout(&mut kiss, Duration::from_secs(kiss_timeout), "KISS boundary probe")?;
+    if !status.success() {
+        return Err(format!("KISS boundary probe failed with {status}").into());
+    }
+
+    let mut server = Command::new(&py);
+    server
+        .arg("-u")
+        .arg(run_dir.join("rns_server.py"))
+        .arg(&node_b.rns_config_dir)
+        .arg(run_dir);
+    server.env("PYTHONPATH", reticulum);
+    children.spawn_logged("rns-server", &mut server, &run_dir.join("rns-server.log"), None)?;
+    wait_for_path(
+        &run_dir.join("server.hash"),
+        Duration::from_secs(30),
+        "server announce file",
+    )?;
+
+    let mut client = Command::new(&py);
+    client
+        .arg("-u")
+        .arg(run_dir.join("rns_client.py"))
+        .arg(&node_a.rns_config_dir)
+        .arg(run_dir)
+        .arg(scenario.sf.to_string());
+    client.env("PYTHONPATH", reticulum);
+    let client_log_path = run_dir.join("rns-client.log");
+    let client_log = fs::File::create(&client_log_path)?;
+    client
+        .stdout(Stdio::from(client_log.try_clone()?))
+        .stderr(Stdio::from(client_log));
+    let timeout = if scenario.sf >= 11 { 600 } else { 180 };
+    let status = run_with_timeout(&mut client, Duration::from_secs(timeout), "RNS client")?;
+    if !status.success() {
+        return Err(format!("RNS client failed with {status}").into());
+    }
+    wait_for_path(
+        &run_dir.join("server.done"),
+        Duration::from_secs(30),
+        "server completion",
+    )?;
+    let timings_path = run_dir.join("timings.json");
+    if let Ok(timings) = fs::read_to_string(&timings_path) {
+        println!("{} timings: {}", scenario.name, timings.trim());
+    }
+    Ok(())
+}
+
+/// Runs rnodeconf against two daemons, with its `HOME` in the run directory, so that it neither
+/// reads nor changes the user's `~/.config/rnodeconf`:
+///
+/// - against the daemon's built-in EEPROM image: `--info`, then `--tnc`, which must save the
+///   settings, `--info` again in TNC mode, and `--normal`, which must delete them;
+/// - against a daemon with `[storage] eeprom` and no file yet: `--key` makes a throwaway signing key,
+///   `--rom` must sign the EEPROM with it and the daemon store it, and `--info` must then validate
+///   the local signature.
+fn run_rnodeconf_checks(
+    run_dir: &Path,
+    air_dir: &Path,
+    daemon: &Path,
+    venv: &Path,
+    reticulum: &Path,
+    children: &mut Children,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let built_in = NodePaths::new(run_dir, "built-in");
+    let signed = NodePaths::new(run_dir, "signed");
+    write_daemon_config(&built_in, air_dir, -58, 9.0, false)?;
+    write_daemon_config(&signed, air_dir, -64, 6.5, true)?;
+    for node in [&built_in, &signed] {
+        children.spawn_logged(
+            &format!("daemon-{}", node.name()),
+            Command::new(daemon).arg("--config").arg(&node.daemon_config),
+            &node.log,
+            Some(node.pty.clone()),
+        )?;
+    }
+    for node in [&built_in, &signed] {
+        wait_for_path(&node.pty, Duration::from_secs(10), "daemon PTY")?;
+    }
+    let mut rnodeconf = Rnodeconf {
+        python: venv.join("bin/python"),
+        reticulum: reticulum.to_path_buf(),
+        home: run_dir.join("home"),
+        log_dir: run_dir.to_path_buf(),
+        runs: 0,
+    };
+    fs::create_dir_all(&rnodeconf.home)?;
+
+    let settings = built_in.dir.join("radio-settings.toml");
+    let output = rnodeconf.run(Some(&built_in.pty), &["--info"])?;
+    expect_output(
+        &output,
+        &[
+            "EEPROM checksum correct",
+            "Device signature   : Unverified",
+            "Device mode        : Normal (host-controlled)",
+        ],
+    )?;
+    let (frequency, bandwidth, sf) = (
+        FREQUENCY_HZ.to_string(),
+        BANDWIDTH_HZ.to_string(),
+        RNODECONF_SF.to_string(),
+    );
+    let (tx_power, coding_rate) = (TX_POWER_DBM.to_string(), CODING_RATE.to_string());
+    let output = rnodeconf.run(
+        Some(&built_in.pty),
+        &[
+            "--tnc",
+            "--freq",
+            &frequency,
+            "--bw",
+            &bandwidth,
+            "--txp",
+            &tx_power,
+            "--sf",
+            &sf,
+            "--cr",
+            &coding_rate,
+        ],
+    )?;
+    expect_output(&output, &["Device set to TNC operating mode"])?;
+    let saved = fs::read_to_string(&settings).map_err(|err| {
+        format!(
+            "rnodeconf --tnc did not save the settings to {}: {err}",
+            settings.display()
+        )
+    })?;
+    for line in [
+        format!("frequency = {frequency}"),
+        format!("bandwidth = {bandwidth}"),
+        format!("spreading_factor = {sf}"),
+        format!("coding_rate = {coding_rate}"),
+        format!("tx_power = {tx_power}"),
+    ] {
+        if !saved.lines().any(|saved_line| saved_line == line) {
+            return Err(format!("the settings rnodeconf --tnc saved lack {line:?}:\n{saved}").into());
+        }
+    }
+    let output = rnodeconf.run(Some(&built_in.pty), &["--info"])?;
+    expect_output(&output, &["Device mode        : TNC", "Frequency        : 914.875 MHz"])?;
+    let output = rnodeconf.run(Some(&built_in.pty), &["--normal"])?;
+    expect_output(&output, &["Device set to normal (host-controlled) operating mode"])?;
+    if fs::symlink_metadata(&settings).is_ok() {
+        return Err(format!("rnodeconf --normal did not delete {}", settings.display()).into());
+    }
+
+    let eeprom = signed.dir.join("eeprom.bin");
+    rnodeconf.run(None, &["--key"])?;
+    let key = rnodeconf.home.join(".config/rnodeconf/firmware/signing.key");
+    if !key.is_file() {
+        return Err(format!("rnodeconf --key wrote no signing key to {}", key.display()).into());
+    }
+    let output = rnodeconf.run(
+        Some(&signed.pty),
+        &["--rom", "--product", "f0", "--model", "fe", "--hwrev", "1"],
+    )?;
+    expect_output(
+        &output,
+        &["Device signature validated", "EEPROM Bootstrapping successful!"],
+    )?;
+    let stored =
+        fs::read(&eeprom).map_err(|err| format!("the daemon stored no EEPROM in {}: {err}", eeprom.display()))?;
+    let mode = fs::metadata(&eeprom)?.permissions().mode() & 0o777;
+    if stored.len() != 156 || stored[..3] != [0xF0, 0xFE, 0x01] || stored[155] != 0x73 || mode != 0o600 {
+        return Err(format!(
+            "the daemon stored an unexpected EEPROM in {} (mode {mode:04o}): {stored:02x?}",
+            eeprom.display()
+        )
+        .into());
+    }
+    let output = rnodeconf.run(Some(&signed.pty), &["--info"])?;
+    expect_output(&output, &["Device signature   : Validated - Local signature"])?;
+    if output.contains("NOT verifiable") {
+        return Err(format!("rnodeconf still calls the signed device not verifiable:\n{output}").into());
+    }
+    println!("rnodeconf: {} runs passed", rnodeconf.runs);
+    Ok(())
+}
+
+/// Runs rnodeconf from the Reticulum checkout under test.
+struct Rnodeconf {
+    python: PathBuf,
+    reticulum: PathBuf,
+    /// rnodeconf's `HOME`: it keeps its keys, caches and device records in `~/.config/rnodeconf`.
+    home: PathBuf,
+    /// Where each run's output goes, as `rnodeconf-<n>.log`.
+    log_dir: PathBuf,
+    runs: usize,
+}
+
+impl Rnodeconf {
+    /// Runs `rnodeconf [port] args`, and returns its output once it exits successfully.
+    fn run(&mut self, port: Option<&Path>, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+        self.runs += 1;
+        let log = self.log_dir.join(format!("rnodeconf-{}.log", self.runs));
+        let mut cmd = Command::new(&self.python);
+        cmd.args(["-m", "RNS.Utilities.rnodeconf"]);
+        if let Some(port) = port {
+            cmd.arg(port);
+        }
+        let file = fs::File::create(&log)?;
+        cmd.args(args)
+            .env("HOME", &self.home)
+            .env("PYTHONPATH", &self.reticulum)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(file.try_clone()?))
+            .stderr(Stdio::from(file));
+        let what = format!("rnodeconf {}", args.join(" "));
+        println!("{what}");
+        let status = run_with_timeout(&mut cmd, RNODECONF_TIMEOUT, &what)?;
+        let output = fs::read_to_string(&log)?;
+        if !status.success() {
+            return Err(format!("{what} failed with {status}").into());
+        }
+        Ok(output)
+    }
+}
+
+/// Checks that `output` holds every one of `expected`.
+fn expect_output(output: &str, expected: &[&str]) -> Result<(), String> {
+    match expected.iter().find(|text| !output.contains(**text)) {
+        None => Ok(()),
+        Some(missing) => Err(format!("rnodeconf did not print {missing:?}; it printed:\n{output}")),
+    }
 }
 
 /// A scenario's outcome from how its checks went and how its processes shut down: it fails if
@@ -554,6 +791,11 @@ struct NodePaths {
 }
 
 impl NodePaths {
+    /// The node's name: the name of its directory.
+    fn name(&self) -> &str {
+        self.dir.file_name().and_then(|s| s.to_str()).unwrap_or("node")
+    }
+
     fn new(run_dir: &Path, name: &str) -> Self {
         let dir = run_dir.join(name);
         Self {
@@ -566,18 +808,31 @@ impl NodePaths {
     }
 }
 
-fn write_daemon_config(node: &NodePaths, air_dir: &Path, rssi: i16, snr: f32) -> io::Result<()> {
+/// Writes the node's daemon config; with `eeprom`, the daemon keeps an EEPROM info block in
+/// `eeprom.bin` in the node's directory.
+fn write_daemon_config(node: &NodePaths, air_dir: &Path, rssi: i16, snr: f32, eeprom: bool) -> io::Result<()> {
     fs::create_dir_all(&node.dir)?;
-    let name = node.dir.file_name().and_then(|s| s.to_str()).unwrap_or("node");
     let settings = node.dir.join("radio-settings.toml");
+    let eeprom = eeprom.then(|| node.dir.join("eeprom.bin"));
     fs::write(
         &node.daemon_config,
-        daemon_config(air_dir, name, &node.pty, &settings, rssi, snr),
+        daemon_config(air_dir, node.name(), &node.pty, &settings, eeprom.as_deref(), rssi, snr),
     )
 }
 
 /// An rnode-linux config for the simulated radio (see `crates/rnode-linux/src/config.rs`).
-fn daemon_config(air_dir: &Path, node_name: &str, pty: &Path, settings: &Path, rssi: i16, snr: f32) -> String {
+fn daemon_config(
+    air_dir: &Path,
+    node_name: &str,
+    pty: &Path,
+    settings: &Path,
+    eeprom: Option<&Path>,
+    rssi: i16,
+    snr: f32,
+) -> String {
+    let eeprom = eeprom.map_or(String::new(), |path| {
+        format!("eeprom = {}\n", toml_string(&path.to_string_lossy()))
+    });
     format!(
         r#"[radio]
 driver = "sim"
@@ -594,7 +849,7 @@ symlink = {pty}
 
 [storage]
 radio_settings = {settings}
-
+{eeprom}
 [logging]
 log_level = "debug"
 "#,
