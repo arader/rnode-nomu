@@ -166,7 +166,7 @@ fn validate_regulatory(args: &Args) -> Result<()> {
     Ok(())
 }
 
-type RadioDev = Sx126x<LinuxSpiDevice, GpioInput, GpioOutput, NoPin, StdDelay>;
+type RadioDev = Sx126x<LinuxSpiDevice, GpioInput, GpioOutput, NoPin, NoPin, StdDelay>;
 
 fn open_radio(args: &Args) -> Result<RadioDev> {
     let spi = LinuxSpiDevice::open(&args.spi, DEFAULT_SPI_HZ).context("open SPI")?;
@@ -180,7 +180,7 @@ fn open_radio(args: &Args) -> Result<RadioDev> {
         tx_timeout_ms: 30_000,
         lna_gain_db: 0, // The AIO V2 has no LNA in front of the SX1262.
     };
-    Ok(Sx126x::new(spi, busy, reset, None, StdDelay, config))
+    Ok(Sx126x::new(spi, busy, reset, None, None, StdDelay, config))
 }
 
 fn configure_radio(radio: &mut RadioDev, args: &Args) -> Result<()> {

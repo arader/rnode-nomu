@@ -6,11 +6,11 @@ use embedded_hal::digital::OutputPin;
 ///
 /// With `power_off_on_exit`, dropping the guard switches the modem off in a fixed order: it drives
 /// the lines added with [`PowerGuard::lower_on_power_off`] low, in the order they were added, and
-/// only then the power line. The daemon adds NRESET, then RXEN. A line left high would hold an
-/// unpowered modem's input above the SX1261/2's absolute maximum rating (VDD + 0.3 V on digital
-/// pins), and could feed the modem through its input protection (#86). Raspberry Pi kernels keep a
-/// released output at its level, so the level the guard leaves is the level the line keeps after
-/// the daemon exits.
+/// only then the power line. The daemon adds NRESET, then RXEN, then TXEN. A line left high would
+/// hold an unpowered modem's input above the SX1261/2's absolute maximum rating (VDD + 0.3 V on
+/// digital pins), and could feed the modem through its input protection (#86). Raspberry Pi kernels
+/// keep a released output at its level, so the level the guard leaves is the level the line keeps
+/// after the daemon exits.
 ///
 /// The guard owns the lines it lowers until it drops; the daemon gives it clones of the lines the
 /// radio driver drives (`gpio::RadioGpio::open()`). So the sequence is the same whatever is dropped

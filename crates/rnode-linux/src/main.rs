@@ -150,9 +150,9 @@ fn run_sx1262(
 
     // The power guard, dropped when this function returns, after `run()` has dropped the node (on
     // the early return above, it is dropped with the rest of `gpio`). With `power_off_on_exit` it
-    // then drives NRESET and RXEN low before the power line.
+    // then drives NRESET, RXEN and TXEN low before the power line.
     let _power = gpio.power;
-    let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, StdDelay, radio_config);
+    let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, gpio.txen, StdDelay, radio_config);
     let storage = TomlStorage::new(config.storage.radio_settings.clone());
     let node = Node::new(radio, storage, config.node_config(), seed);
     run(node, gpio.dio1, pty, shutdown).map_err(Into::into)

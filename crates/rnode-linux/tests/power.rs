@@ -1,5 +1,5 @@
-//! The power-down sequence of `[gpio] power_off_on_exit` (#86): with the setting, NRESET and then
-//! RXEN go low before the power line, after a stop, an error or an early return, whatever is
+//! The power-down sequence of `[gpio] power_off_on_exit` (#86): with the setting, NRESET, then RXEN,
+//! then TXEN go low before the power line, after a stop, an error or an early return, whatever is
 //! dropped first; without it, no line changes. Mock lines record what happens to them. Like the
 //! daemon's `GpioOutputPin`, clones of a mock line drive the same line, and the line is released
 //! when the last clone is dropped (Raspberry Pi kernels keep a released output at its level).
@@ -109,6 +109,15 @@ fn open_lines(log: &Log, power_off_on_exit: bool) -> (PowerGuard<MockLine>, Mock
     (guard, reset, rxen)
 }
 
+/// The power guard as `RadioGpio::open()` sets it up for a board with a TX-enable line too, and the
+/// radio driver's clones of NRESET, RXEN and TXEN.
+fn open_lines_with_txen(log: &Log, power_off_on_exit: bool) -> (PowerGuard<MockLine>, MockLine, MockLine, MockLine) {
+    let (mut guard, reset, rxen) = open_lines(log, power_off_on_exit);
+    let txen = MockLine::new("txen", log);
+    guard.lower_on_power_off("txen", txen.clone());
+    (guard, reset, rxen, txen)
+}
+
 /// What the SX1262 driver does with the lines in `begin()`: a reset pulse, then RXEN high.
 fn begin(reset: &mut MockLine, rxen: &mut MockLine) {
     reset.set_low().unwrap();
@@ -153,6 +162,33 @@ fn power_off_on_exit_runs_the_same_sequence_when_the_guard_is_dropped_first() {
     );
     drop((reset, rxen));
     assert_eq!(log.borrow()[4..], [Released("reset"), Released("rxen")]);
+}
+
+/// TXEN, high while the modem transmits, goes low after RXEN and before the power line.
+#[test]
+fn power_off_on_exit_drives_txen_low_after_rxen_before_the_power_line() {
+    let log = Log::default();
+    let (guard, mut reset, mut rxen, mut txen) = open_lines_with_txen(&log, true);
+    begin(&mut reset, &mut rxen);
+    // A transmission, as the driver switches to it: RXEN low, then TXEN high.
+    rxen.set_low().unwrap();
+    txen.set_high().unwrap();
+    log.borrow_mut().clear();
+    drop((reset, rxen, txen));
+    drop(guard);
+    assert_eq!(
+        *log.borrow(),
+        [
+            Low("reset"),
+            Low("rxen"),
+            Low("txen"),
+            Low("power"),
+            Released("power"),
+            Released("reset"),
+            Released("rxen"),
+            Released("txen"),
+        ]
+    );
 }
 
 #[test]
@@ -289,12 +325,21 @@ impl IrqSource for FailingIrq {
 fn run_daemon(
     reset: MockLine,
     rxen: Option<MockLine>,
+    txen: Option<MockLine>,
     irq: impl IrqSource,
     shutdown: &AtomicBool,
     log: &Log,
 ) -> Result<(), EventLoopError> {
     let spi = MockSx1262 { log: Rc::clone(log) };
-    let radio = Sx126x::new(spi, NotBusy, reset, rxen, NoDelay, rnode_sx126x::Config::default());
+    let radio = Sx126x::new(
+        spi,
+        NotBusy,
+        reset,
+        rxen,
+        txen,
+        NoDelay,
+        rnode_sx126x::Config::default(),
+    );
     let node = Node::new(
         radio,
         MemoryStorage::with_settings(SAVED_SETTINGS),
@@ -311,7 +356,7 @@ fn stop_puts_the_modem_to_sleep_before_the_guard_switches_it_off() {
     let (guard, reset, rxen) = open_lines(&log, true);
     // As if SIGTERM arrived as the daemon started: `run()` starts the radio and stops at once.
     let shutdown = AtomicBool::new(true);
-    run_daemon(reset, Some(rxen), NoIrq, &shutdown, &log).unwrap();
+    run_daemon(reset, Some(rxen), None, NoIrq, &shutdown, &log).unwrap();
     drop(guard);
     let log = log.borrow();
     let sleep = log
@@ -342,7 +387,7 @@ fn run_error_still_switches_the_modem_off_in_order() {
     let reset = MockLine::new("reset", &log);
     guard.lower_on_power_off("reset", reset.clone());
     let shutdown = AtomicBool::new(false);
-    let result = run_daemon(reset, None, FailingIrq::new(), &shutdown, &log);
+    let result = run_daemon(reset, None, None, FailingIrq::new(), &shutdown, &log);
     assert!(matches!(result, Err(EventLoopError::Irq(_))), "{result:?}");
     let ran = log.borrow().len();
     assert_eq!(
@@ -354,5 +399,49 @@ fn run_error_still_switches_the_modem_off_in_order() {
     assert_eq!(
         log.borrow()[ran..],
         [Low("reset"), Low("power"), Released("power"), Released("reset")]
+    );
+}
+
+/// A stop on a board with RXEN and TXEN: the driver's `end()` puts the modem to sleep and drives
+/// TXEN low, as firmware `sleep_now()` lowers the PA's lines, then the guard switches the modem off:
+/// NRESET, RXEN, TXEN, the power line.
+#[test]
+fn stop_with_txen_puts_the_modem_to_sleep_and_lowers_txen_before_the_guard_switches_it_off() {
+    let log = Log::default();
+    let (guard, reset, rxen, txen) = open_lines_with_txen(&log, true);
+    let shutdown = AtomicBool::new(true);
+    run_daemon(reset, Some(rxen), Some(txen), NoIrq, &shutdown, &log).unwrap();
+    drop(guard);
+    let log = log.borrow();
+    let sleep = log
+        .iter()
+        .position(|e| *e == Sleep)
+        .expect("the node put the modem to sleep");
+    // The radio started receiving: TXEN low before RXEN high, in `begin()` and in `receive()`.
+    assert_eq!(
+        log[..sleep],
+        [
+            Low("reset"),
+            High("reset"),
+            Low("txen"),
+            High("rxen"),
+            Low("txen"),
+            High("rxen"),
+        ]
+    );
+    assert_eq!(
+        log[sleep..],
+        [
+            Sleep,
+            Low("txen"),
+            Low("reset"),
+            Low("rxen"),
+            Low("txen"),
+            Low("power"),
+            Released("power"),
+            Released("reset"),
+            Released("rxen"),
+            Released("txen"),
+        ]
     );
 }

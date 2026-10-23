@@ -9,6 +9,16 @@
 //! the effective wait with the current packet airtime. The wait loop counts 1 ms delay iterations,
 //! so real wall time is somewhat longer than the nominal limit.
 //!
+//! An optional TX-enable line (`TXEN`) switches a PA or RF switch to transmit, as PA modules such
+//! as the Ebyte E22-900M30S need, and as firmware `beginPacket()` and `receive()` drive the
+//! KCT8103L's CTX line: high before a transmission, low when entering receive and, as firmware
+//! `sleep_now()` drives the PA's lines low, when the modem goes to sleep in [`Radio::end`]. With
+//! both TXEN and the RX-enable line (`RXEN`), the driver never has both high: before a
+//! transmission it drives RXEN low before TXEN high, and before receiving TXEN low before RXEN
+//! high. That deliberately differs from the firmware, whose SX1262 driver never drives RXEN low
+//! (it has no TXEN) and whose SX1280 driver raises TXEN before it lowers RXEN. Without TXEN, RXEN
+//! is driven as in the firmware: high in `begin()` and on every receive, never low.
+//!
 //! On a board with an LNA in front of the modem, [`Config::lna_gain_db`] is subtracted from every
 //! RSSI the driver reads, as firmware `currentRssi()` and `packetRssi()` subtract `lora_lna_gain`
 //! with `HAS_LORA_LNA`. That includes the packet RSSI of received frames, where the firmware's
@@ -182,7 +192,7 @@ impl fmt::Display for ParseTcxoVoltageError {
 
 impl std::error::Error for ParseTcxoVoltageError {}
 
-/// An output pin that ignores all writes, for boards without an RXEN line.
+/// An output pin that ignores all writes, for boards without an RXEN or TXEN line.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoPin;
 
@@ -206,6 +216,16 @@ pub enum Error<Spi> {
     Digital(DigitalErrorKind),
     BusyTimeout,
     NotDetected,
+    /// [`Radio::end`] could neither put the modem to sleep nor drive the TX-enable line low, so the
+    /// modem may still be awake and the PA still switched to transmit. Both errors are kept, the
+    /// TXEN one first in the message, as a PA left on transmit matters at least as much as the
+    /// modem; either failure alone is reported as it is.
+    SleepAndTxen {
+        /// Why `SetSleep` failed.
+        sleep: Box<Self>,
+        /// Why TXEN could not be driven low.
+        txen: DigitalErrorKind,
+    },
 }
 
 impl<Spi: fmt::Debug + fmt::Display> fmt::Display for Error<Spi> {
@@ -215,6 +235,11 @@ impl<Spi: fmt::Debug + fmt::Display> fmt::Display for Error<Spi> {
             Self::Digital(kind) => write!(f, "GPIO error: {kind:?}"),
             Self::BusyTimeout => f.write_str("SX126x BUSY timeout"),
             Self::NotDetected => f.write_str("SX126x not detected"),
+            Self::SleepAndTxen { sleep, txen } => write!(
+                f,
+                "TXEN could not be driven low (GPIO error: {txen:?}), so the PA may still be switched to \
+                 transmit; SetSleep failed too: {sleep}"
+            ),
         }
     }
 }
@@ -223,11 +248,12 @@ impl<Spi: fmt::Debug + fmt::Display> std::error::Error for Error<Spi> {}
 
 /// Portable SX1262 driver that mirrors RNode_Firmware v1.86 `sx126x.cpp`.
 #[derive(Debug)]
-pub struct Sx126x<SPI, BUSY, RESET, RXEN, DELAY> {
+pub struct Sx126x<SPI, BUSY, RESET, RXEN, TXEN, DELAY> {
     spi: SPI,
     busy: BUSY,
     reset: RESET,
     rxen: Option<RXEN>,
+    txen: Option<TXEN>,
     delay: DELAY,
     config: Config,
     frequency: u32,
@@ -251,20 +277,33 @@ pub struct Sx126x<SPI, BUSY, RESET, RXEN, DELAY> {
     crc_errors: RxCrcErrors,
 }
 
-impl<SPI, BUSY, RESET, RXEN, DELAY> Sx126x<SPI, BUSY, RESET, RXEN, DELAY>
+impl<SPI, BUSY, RESET, RXEN, TXEN, DELAY> Sx126x<SPI, BUSY, RESET, RXEN, TXEN, DELAY>
 where
     SPI: SpiDevice,
     BUSY: InputPin,
     RESET: OutputPin,
     RXEN: OutputPin,
+    TXEN: OutputPin,
     DELAY: DelayNs,
 {
-    pub fn new(spi: SPI, busy: BUSY, reset: RESET, rxen: Option<RXEN>, delay: DELAY, config: Config) -> Self {
+    /// A driver for the modem on `spi`, with its BUSY and NRESET lines and, if the board has them,
+    /// its RX-enable and TX-enable lines (see the crate docs). Pass `None::<NoPin>` for a line the
+    /// board does not have.
+    pub fn new(
+        spi: SPI,
+        busy: BUSY,
+        reset: RESET,
+        rxen: Option<RXEN>,
+        txen: Option<TXEN>,
+        delay: DELAY,
+        config: Config,
+    ) -> Self {
         Self {
             spi,
             busy,
             reset,
             rxen,
+            txen,
             delay,
             config,
             frequency: 0,
@@ -479,9 +518,37 @@ where
         self.set_packet_params()
     }
 
+    /// Firmware `rxAntEnable()`: RXEN high. Callers drive TXEN low first.
     fn rx_ant_enable(&mut self) -> Result<(), Error<SPI::Error>> {
         if let Some(rxen) = &mut self.rxen {
             rxen.set_high().map_err(Self::map_pin_error)?;
+        }
+        Ok(())
+    }
+
+    /// Before a transmission, as firmware `beginPacket()` raises the KCT8103L's CTX: with a TXEN
+    /// line, RXEN low (if the board has it), then TXEN high. Without TXEN, nothing, as in the
+    /// firmware.
+    fn tx_ant_enable(&mut self) -> Result<(), Error<SPI::Error>> {
+        if let Some(txen) = &mut self.txen {
+            if let Some(rxen) = &mut self.rxen {
+                rxen.set_low().map_err(Self::map_pin_error)?;
+            }
+            txen.set_high().map_err(Self::map_pin_error)?;
+        }
+        Ok(())
+    }
+
+    /// TXEN low, if the board has it: as firmware `receive()` lowers the KCT8103L's CTX, before
+    /// RXEN goes high, and when the modem goes to sleep.
+    fn tx_ant_disable(&mut self) -> Result<(), Error<SPI::Error>> {
+        self.lower_txen().map_err(Error::Digital)
+    }
+
+    /// [`Self::tx_ant_disable`], with the pin's error kind, for [`Error::SleepAndTxen`].
+    fn lower_txen(&mut self) -> Result<(), DigitalErrorKind> {
+        if let Some(txen) = &mut self.txen {
+            txen.set_low().map_err(|e| e.kind())?;
         }
         Ok(())
     }
@@ -508,13 +575,14 @@ where
     }
 }
 
-impl<SPI, BUSY, RESET, RXEN, DELAY> Radio for Sx126x<SPI, BUSY, RESET, RXEN, DELAY>
+impl<SPI, BUSY, RESET, RXEN, TXEN, DELAY> Radio for Sx126x<SPI, BUSY, RESET, RXEN, TXEN, DELAY>
 where
     SPI: SpiDevice,
     SPI::Error: fmt::Debug + fmt::Display,
     BUSY: InputPin,
     RESET: OutputPin,
     RXEN: OutputPin,
+    TXEN: OutputPin,
     DELAY: DelayNs,
 {
     type Error = Error<SPI::Error>;
@@ -537,6 +605,7 @@ where
         if self.config.dio2_as_rf_switch {
             self.execute_opcode(OP_DIO2_RF_CTRL, &[0x01])?;
         }
+        self.tx_ant_disable()?;
         self.rx_ant_enable()?;
         self.set_frequency(frequency_hz)?;
         self.set_tx_power(2)?;
@@ -552,11 +621,24 @@ where
         )
     }
 
-    /// Firmware `sx126x::end()`.
+    /// Firmware `sx126x::end()`, then TXEN low, as firmware `sleep_now()` drives the PA's lines
+    /// low once the radio is stopped. TXEN goes low after a failed `SetSleep` too: the driver can
+    /// no longer tell what the modem does, and low is the line's state at sleep. If both fail, the
+    /// error is [`Error::SleepAndTxen`], with both.
     fn end(&mut self) -> Result<(), Self::Error> {
-        self.execute_opcode(OP_SLEEP, &[0x00])?;
-        self.preinit_done = false;
-        Ok(())
+        let sleep = self.execute_opcode(OP_SLEEP, &[0x00]);
+        if sleep.is_ok() {
+            self.preinit_done = false;
+        }
+        match (sleep, self.lower_txen()) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(sleep), Ok(())) => Err(sleep),
+            (Ok(()), Err(txen)) => Err(Error::Digital(txen)),
+            (Err(sleep), Err(txen)) => Err(Error::SleepAndTxen {
+                sleep: Box::new(sleep),
+                txen,
+            }),
+        }
     }
 
     /// Firmware `sx126x::setFrequency()`.
@@ -657,16 +739,21 @@ where
         self.ldro
     }
 
-    /// Firmware `sx126x::receive()`.
+    /// Firmware `sx126x::receive()`: TXEN low first, as the firmware lowers the KCT8103L's CTX,
+    /// and RXEN high just before `SetRx`.
     fn receive(&mut self, implicit_len: Option<u8>) -> Result<(), Self::Error> {
+        self.tx_ant_disable()?;
         self.current_rx_implicit_len = implicit_len;
         self.set_header_mode(implicit_len)?;
         self.rx_ant_enable()?;
         self.execute_opcode(OP_RX, &[0xff, 0xff, 0xff])
     }
 
-    /// Firmware `beginPacket()` / `write()` / `endPacket()`.
+    /// Firmware `beginPacket()` / `write()` / `endPacket()`, with TXEN high first, as
+    /// `beginPacket()` raises the KCT8103L's CTX. TXEN stays high until the next `receive()` or
+    /// `end()`, through the frames of a burst, as in the firmware.
     fn transmit(&mut self, frame: &[u8], implicit: bool) -> Result<TxOutcome, Self::Error> {
+        self.tx_ant_enable()?;
         self.standby()?;
         self.implicit_header_mode = if implicit {
             MODE_IMPLICIT_HEADER

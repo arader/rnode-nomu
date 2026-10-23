@@ -173,21 +173,22 @@ impl IrqSource for GpioIrqLine {
 /// The modem's lines, as [`RadioGpio::open`] requests them.
 #[derive(Debug)]
 pub struct RadioGpio {
-    /// The power-enable line, if `[gpio] power` is set. It holds clones of `reset` and `rxen`, so
-    /// dropping it with `power_off_on_exit` drives them low before the power line, whether or not
-    /// the radio driver still holds them.
+    /// The power-enable line, if `[gpio] power` is set. It holds clones of `reset`, `rxen` and
+    /// `txen`, so dropping it with `power_off_on_exit` drives them low before the power line,
+    /// whether or not the radio driver still holds them.
     pub power: Option<PowerGuard<GpioOutputPin>>,
     pub reset: GpioOutputPin,
     pub busy: GpioInputPin,
     pub dio1: GpioIrqLine,
     pub rxen: Option<GpioOutputPin>,
+    pub txen: Option<GpioOutputPin>,
 }
 
 impl RadioGpio {
     /// Request the lines: the power line first, driven high, then, `power_on_delay_ms` later,
-    /// NRESET (high), BUSY, DIO1 and RXEN (low). The power guard takes its clone of each output as
-    /// soon as it is requested, so if a later line cannot be requested, dropping the guard switches
-    /// the modem off in the same order as on exit (with `power_off_on_exit`).
+    /// NRESET (high), BUSY, DIO1, RXEN and TXEN (low). The power guard takes its clone of each
+    /// output as soon as it is requested, so if a later line cannot be requested, dropping the
+    /// guard switches the modem off in the same order as on exit (with `power_off_on_exit`).
     pub fn open(config: &GpioConfig) -> Result<Self, GpioError> {
         let chip = resolve_chip(&config.chip)?;
         let mut power = config
@@ -211,12 +212,20 @@ impl RadioGpio {
         if let (Some(guard), Some(rxen)) = (&mut power, &rxen) {
             guard.lower_on_power_off("rxen", rxen.clone());
         }
+        let txen = config
+            .txen
+            .map(|offset| GpioOutputPin::request(&chip, offset, Value::Inactive, "rnode-txen"))
+            .transpose()?;
+        if let (Some(guard), Some(txen)) = (&mut power, &txen) {
+            guard.lower_on_power_off("txen", txen.clone());
+        }
         Ok(Self {
             power,
             reset,
             busy,
             dio1,
             rxen,
+            txen,
         })
     }
 }

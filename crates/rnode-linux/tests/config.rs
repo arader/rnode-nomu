@@ -176,8 +176,9 @@ fn config_validation_allows_sim_without_hardware_sections() {
     let avoid_cfg = Config::from_toml("[radio]\ndriver = \"sim\"\navoid_interference = true\n").unwrap();
     assert!(avoid_cfg.radio.avoid_interference);
 
-    let gpio_cfg = Config::from_toml("[spi]\ndevice = \"/dev/spidev0.0\"\n[gpio]\nreset = 1\nbusy = 2\ndio1 = 3\npower = 4\npower_on_delay_ms = 250\npower_off_on_exit = true\n[radio]\ndriver = \"sx1262\"\n").unwrap();
+    let gpio_cfg = Config::from_toml("[spi]\ndevice = \"/dev/spidev0.0\"\n[gpio]\nreset = 1\nbusy = 2\ndio1 = 3\npower = 4\npower_on_delay_ms = 250\npower_off_on_exit = true\nrxen = 5\ntxen = 6\n[radio]\ndriver = \"sx1262\"\n").unwrap();
     let gpio = gpio_cfg.gpio.unwrap();
+    assert_eq!((gpio.rxen, gpio.txen), (Some(5), Some(6)));
     assert_eq!(gpio.power, Some(4));
     assert_eq!(gpio.power_on_delay_ms, 250);
     assert!(gpio.power_off_on_exit);
@@ -187,6 +188,7 @@ fn config_validation_allows_sim_without_hardware_sections() {
     )
     .unwrap();
     let default_gpio = default_power_cfg.gpio.unwrap();
+    assert_eq!((default_gpio.rxen, default_gpio.txen), (None, None));
     assert_eq!(default_gpio.power, None);
     assert_eq!(default_gpio.power_on_delay_ms, 100);
     assert!(!default_gpio.power_off_on_exit);

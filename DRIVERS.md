@@ -67,7 +67,7 @@ flowchart TB
         StorageT[["trait Storage"]]
     end
     subgraph drivers["driver crates"]
-        Sx["rnode_sx126x::Sx126x&lt;SPI, BUSY, RESET, RXEN, DELAY&gt;"]
+        Sx["rnode_sx126x::Sx126x&lt;SPI, BUSY, RESET, RXEN, TXEN, DELAY&gt;"]
         Sim["rnode_sim::SimRadio"]
         New["your driver, e.g. Sx127x&lt;SPI, RESET, DELAY&gt;"]
     end
@@ -138,7 +138,7 @@ Each arm builds a different concrete type and calls the same generic event loop:
 // run_sx1262, abridged
 let spi = LinuxSpiDevice::open(&spi_config.device, spi_config.speed_hz, recorder)?;
 let gpio = RadioGpio::open(gpio_config)?;
-let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, StdDelay, radio_config);
+let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, gpio.txen, StdDelay, radio_config);
 let node = Node::new(radio, TomlStorage::new(path), config.node_config(), seed);
 run(node, gpio.dio1, pty, shutdown)
 
@@ -150,7 +150,7 @@ run(node, irq, pty, shutdown)
 ```
 
 The first `node` is a
-`Node<Sx126x<LinuxSpiDevice, GpioInputPin, GpioOutputPin, GpioOutputPin, StdDelay>, TomlStorage>`
+`Node<Sx126x<LinuxSpiDevice, GpioInputPin, GpioOutputPin, GpioOutputPin, GpioOutputPin, StdDelay>, TomlStorage>`
 and the second a `Node<SimRadio, TomlStorage>`. The compiler generates the node and the event loop
 once for each, so every `Radio` call is a direct call that can be inlined: there is no
 `Box<dyn Radio>`, no vtable and no allocation. The same holds one level down: `Sx126x` is generic
@@ -474,6 +474,7 @@ The work splits as it does in the firmware:
 | Clamping `CMD_TXPOWER` to the PA's maximum output | `Node`, with `NodeConfig::max_tx_power` | `serial_callback()`: `PA_MAX_OUTPUT` |
 | Subtracting the LNA's gain from every RSSI | the driver: `rnode_sx126x::Config::lna_gain_db` | `sx126x::currentRssi()`, `packetRssi()`: `lora_lna_gain` |
 | Leaving RSSI samples more than 12 dB below the noise floor out of it | `Node`, when `NodeConfig::external_lna` is set | `update_noise_floor()`: `LORA_LNA_GVT` |
+| Switching the PA to transmit and back | the driver: `Sx126x`'s TXEN line | `beginPacket()`, `receive()`: `LORA_PA_CTX`; `sleep_now()` |
 
 For a driver this means:
 
@@ -487,12 +488,19 @@ For a driver this means:
 - **RSSI is measured at the antenna.** If the board has an LNA, subtract its gain from the channel
   RSSI, the packet RSSI and the signal of CRC-failed frames, as `rnode-sx126x` does with
   `Config::lna_gain_db`. The SNR is a ratio and stays as it is.
+- **A TX enable goes with the transmission.** If the PA or the RF switch has a TX-enable input
+  that the modem does not drive itself (through DIO2 on the SX1262), drive it high before the
+  transmission's first command, keep it high through the frames of a burst, and drive it low when
+  entering receive and after putting the modem to sleep. With an RX-enable line too, never have
+  both high: lower one before raising the other. If the line cannot be lowered in `end()`, report
+  that even when the sleep command failed too: `rnode-sx126x` returns both errors in
+  `Error::SleepAndTxen`.
 - **The rest is board wiring.** PA enable lines, and telling one PA from another as the firmware
   does on the Heltec V4, belong to the platform or to the driver's configuration; the daemon
   ports neither.
 
-The daemon fills all of this from `[radio.pa]`, described in
-[README.md](README.md#radiopa), which also lists what is not ported.
+The daemon fills all of this from [`[radio.pa]`](README.md#radiopa), which also lists what is not
+ported, and the TX enable from [`[gpio] txen`](README.md#gpio).
 
 ## Worked example: rnode-sx126x
 
@@ -503,12 +511,20 @@ method.
 **Types.** The driver is generic over the `embedded-hal` 1.0 traits and has no Linux dependency:
 
 ```rust
-pub struct Sx126x<SPI, BUSY, RESET, RXEN, DELAY> { /* … */ }
+pub struct Sx126x<SPI, BUSY, RESET, RXEN, TXEN, DELAY> { /* … */ }
 
-impl<SPI: SpiDevice, BUSY: InputPin, RESET: OutputPin, RXEN: OutputPin, DELAY: DelayNs>
-    Sx126x<SPI, BUSY, RESET, RXEN, DELAY>
+impl<SPI: SpiDevice, BUSY: InputPin, RESET: OutputPin, RXEN: OutputPin, TXEN: OutputPin, DELAY: DelayNs>
+    Sx126x<SPI, BUSY, RESET, RXEN, TXEN, DELAY>
 {
-    pub fn new(spi: SPI, busy: BUSY, reset: RESET, rxen: Option<RXEN>, delay: DELAY, config: Config) -> Self {
+    pub fn new(
+        spi: SPI,
+        busy: BUSY,
+        reset: RESET,
+        rxen: Option<RXEN>,
+        txen: Option<TXEN>,
+        delay: DELAY,
+        config: Config,
+    ) -> Self {
         /* … */
     }
 }
@@ -523,7 +539,8 @@ pub struct Config {
 }
 ```
 
-Boards without an RX-enable line pass `None::<NoPin>`. The daemon fills `Config` from
+Boards without an RX-enable or a TX-enable line pass `None::<NoPin>` for it. The daemon fills
+`Config` from
 `[radio.sx1262]`, and `lna_gain_db` from `[radio.pa]`, with `RadioConfig::sx1262_driver_config()`.
 
 **Bus access.** Every SPI transaction first waits for BUSY to go low, as the firmware's
@@ -544,7 +561,7 @@ sequenceDiagram
     D->>M: SetPacketType(LoRa), SetStandby(XOSC)
     D->>M: write sync word 0x14, 0x24
     D->>M: SetDIO2AsRfSwitchCtrl(1), if configured
-    D->>M: RXEN high, if the board has the line
+    D->>M: TXEN low, then RXEN high, if the board has the lines
     D->>M: SetRfFrequency, TX power 2 dBm, CRC on, LNA boost (0x08AC = 0x96)
     D->>M: SetBufferBaseAddress(0, 0), SetModulationParams, sensitivity fix, SetPacketParams
     D->>M: SetDioIrqParams: all IRQs enabled, only RxDone on DIO1
@@ -565,10 +582,16 @@ sequenceDiagram
 - With `lna_gain_db`, the packet RSSI is compensated like the channel RSSI. The firmware's ESP32
   builds, the Heltec V4 among them, read it with `packetRssi(uint8_t)`, which leaves the LNA's gain
   in.
+- With both RXEN and TXEN, RXEN goes low before TXEN goes high, and TXEN low before RXEN goes high,
+  so that the RF switch is never asked for both paths. The firmware's SX1262 driver has no TXEN and
+  never drives RXEN low, which the driver keeps when TXEN is absent; the firmware's SX1280 driver
+  raises TXEN before it lowers RXEN.
 
 **Tests.** [`crates/rnode-sx126x/src/tests.rs`](crates/rnode-sx126x/src/tests.rs) checks the
 exact bytes of every command against the firmware with a mocked bus; see
 [Testing a driver](#testing-a-driver).
+[`crates/rnode-sx126x/tests/rf_switch.rs`](crates/rnode-sx126x/tests/rf_switch.rs) logs the SPI
+commands and the levels of RXEN and TXEN in one sequence, to pin where the lines switch.
 
 ## Worked example: rnode-sim
 
@@ -654,8 +677,9 @@ impl SpiDevice for MockSpi {
 
 The `Rc<RefCell<…>>` lets the test keep a clone of the mock after moving the original into the
 driver. Pins and the delay are mocked the same way: `MockInput` returns a scripted sequence of BUSY
-levels, `MockOutput` records the levels written to RESET and RXEN, and `MockDelay` records every
-delay.
+levels, `MockOutput` records the levels written to RESET, RXEN and TXEN, and `MockDelay` records
+every delay. Where the order of line changes and commands matters, as for the RF switch lines, log
+both in one sequence.
 
 **Golden values from the firmware.** Assert the exact bytes the firmware sends, not values computed
 with your own helpers:
@@ -681,7 +705,8 @@ programs the wrong register.
 
 **What to cover:**
 
-- the `begin()` sequence for each board option (TCXO or not, RF switch, RX enable);
+- the `begin()` sequence for each board option (TCXO or not, RF switch, RX and TX enable);
+- where the RF switch lines change around transmit, receive and sleep;
 - frequency encoding for frequencies in each band you support;
 - every bandwidth step, and the spreading factor and coding rate clamps;
 - the low-data-rate decision at its boundaries (it must equal `rnode_core::phy::low_data_rate()`);

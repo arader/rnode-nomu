@@ -298,8 +298,8 @@ RNode_Firmware sends every queued packet once a burst starts; stopping between p
 the [deliberate differences](#differences-from-rnode_firmware).
 
 With `power_off_on_exit = true`, the daemon switches the modem off last: it drives NRESET low, then
-RXEN if the board has it, and only then the power line, so that no line is left driving the
-unpowered modem. [`[gpio]`](#gpio) lists the state each line is left in, with and without the
+RXEN and TXEN if the board has them, and only then the power line, so that no line is left driving
+the unpowered modem. [`[gpio]`](#gpio) lists the state each line is left in, with and without the
 setting.
 
 #### How long a stop takes
@@ -350,6 +350,8 @@ If a supervisor sends SIGKILL during a transmission, after a stop timeout that w
   default), so on the uConsole the modem keeps power and is not reset: the power line and NRESET
   stay high, even with `power_off_on_exit = true`. A GPIO driver that switches released lines back
   to inputs can instead cut the modem's power or hold it in reset, which ends the frame early.
+  On a board with [`[gpio] txen`](#gpio), TXEN stays high as well, so the PA stays switched to
+  transmit while the modem idles, until the daemon starts again.
 - systemd logs `State 'stop-sigterm' timed out. Killing.` and marks the unit failed, with result
   `timeout`.
 
@@ -364,7 +366,7 @@ which the stop timeout has to allow for.
 
 ### What the daemon needs from the board
 
-The `sx1262` driver talks to the modem through one spidev device and up to five GPIO lines on one
+The `sx1262` driver talks to the modem through one spidev device and up to six GPIO lines on one
 GPIO chip. Two of the modem's own pins, DIO2 and DIO3, are configured inside the chip and need no
 host GPIO.
 
@@ -380,6 +382,7 @@ flowchart LR
         BUSY["BUSY"]
         DIO1["DIO1"]
         RXEN["RXEN, some modules"]
+        TXEN["TXEN, some PA modules"]
         PWR["power switch, some boards"]
         DIO2["DIO2"]
         DIO3["DIO3"]
@@ -391,6 +394,7 @@ flowchart LR
     CHIP ---|"busy"| BUSY
     CHIP ---|"dio1"| DIO1
     CHIP -.-|"rxen"| RXEN
+    CHIP -.-|"txen"| TXEN
     CHIP -.-|"power"| PWR
     DIO2 -.-|"dio2_as_rf_switch"| SWITCH
     DIO3 -.-|"tcxo_voltage"| TCXO
@@ -402,7 +406,8 @@ flowchart LR
 | NRESET | GPIO output | `[gpio] reset` | Held high; pulsed low for 10 ms by `begin()`; driven low on exit before `power_off_on_exit` switches the modem off |
 | BUSY | GPIO input | `[gpio] busy` | Polled before every command, up to `busy_timeout_ms` |
 | DIO1 | GPIO input with rising-edge events | `[gpio] dio1` | RX-done interrupt; wakes the event loop |
-| RXEN (optional) | GPIO output | `[gpio] rxen` | Driven high when the radio starts and on every receive, never low while the daemon runs (firmware `rxAntEnable()`); driven low on exit before `power_off_on_exit` switches the modem off |
+| RXEN (optional) | GPIO output | `[gpio] rxen` | Driven high when the radio starts and on every receive (firmware `rxAntEnable()`); without TXEN never low while the daemon runs, as in the firmware; with TXEN driven low before each transmission, before TXEN goes high; driven low on exit before `power_off_on_exit` switches the modem off |
+| TXEN (optional) | GPIO output | `[gpio] txen` | Requested low; driven high before each transmission, after RXEN goes low, and low before receive, when the radio stops, and on exit before `power_off_on_exit` switches the modem off (firmware `beginPacket()`, `receive()` and `sleep_now()` with the KCT8103L's CTX) |
 | Power enable (optional) | GPIO output | `[gpio] power` | Driven high before the other lines are requested; held while the daemon runs; driven low last on exit with `power_off_on_exit` |
 | DIO2 | inside the module | `[radio.sx1262] dio2_as_rf_switch` | SX1262 drives the RF switch from DIO2 |
 | DIO3 | inside the module | `[radio.sx1262] tcxo_voltage` | SX1262 powers the TCXO from DIO3 at this voltage |
@@ -533,8 +538,8 @@ resent it. Every packet showed up in the daemon's debug log.
 
 1. **Collect the wiring** from the module datasheet and your board's schematic:
    - which SPI controller and chip select the module uses;
-   - which SoC GPIOs connect to NRESET, BUSY and DIO1, and to RXEN or a power enable if the board
-     has them;
+   - which SoC GPIOs connect to NRESET, BUSY and DIO1, and to RXEN, TXEN or a power enable if the
+     board has them;
    - whether DIO2 drives the RF switch;
    - whether DIO3 powers a TCXO, and at which voltage.
 
@@ -555,6 +560,7 @@ resent it. Every packet showed up in the daemon's debug log.
    | Module on SPI bus B, chip select C | `[spi] device = "/dev/spidevB.C"` |
    | NRESET, BUSY, DIO1 on chip N, lines r, b, d | `[gpio] chip = "gpiochipN"`, `reset = r`, `busy = b`, `dio1 = d` |
    | Separate RX-enable pin | `[gpio] rxen = <line>` |
+   | Separate TX-enable pin, for example of a PA module | `[gpio] txen = <line>` |
    | Switched power for the module | `[gpio] power = <line>`, and `power_on_delay_ms` if it needs longer to settle |
    | TCXO powered from DIO3 | `[radio.sx1262] tcxo_voltage = "1.8V"`, or the voltage in the module datasheet |
    | Plain crystal, no TCXO | leave `tcxo_voltage` unset |
@@ -562,8 +568,12 @@ resent it. Every packet showed up in the daemon's debug log.
    | RF switch driven some other way | `dio2_as_rf_switch = false` |
    | Power amplifier after the SX1262 | [`[radio.pa]`](#radiopa) with its gain table |
 
-   Modules with separate RX-enable and TX-enable pins are usually wired with TXEN driven by DIO2 and
-   RXEN by a host GPIO. rnode-linux supports exactly that, like RNode_Firmware; it has no TXEN line.
+   Modules with separate RX-enable and TX-enable pins, such as the Ebyte E22 series, are often wired
+   with TXEN driven by DIO2 and RXEN by a host GPIO, as RNode_Firmware supports them. Where TXEN
+   needs a host GPIO instead, set `txen` as well: the driver then never has RXEN and TXEN high
+   together, and the KCT8103L's CTX input works the same way. With a PA, also set
+   [`[radio.pa]`](#radiopa).
+
    Use the TCXO voltage from the module's datasheet: a missing or wrong `tcxo_voltage` leaves the
    modem without a working reference clock, and too high a voltage can damage the TCXO.
 
@@ -607,9 +617,10 @@ Required when `radio.driver = "sx1262"`; ignored otherwise. Line numbers are off
 | `busy` | integer | required | BUSY line, an input |
 | `dio1` | integer | required | DIO1 line, an input watched for rising edges (RX done) |
 | `rxen` | integer | unset | Optional RX-enable output, driven high on receive |
+| `txen` | integer | unset | Optional TX-enable output of a PA or RF switch, driven high before each transmission and low before receive and when the radio stops; with `rxen`, never high together with it |
 | `power` | integer | unset | Optional power-rail enable output, driven high before the other lines are requested |
 | `power_on_delay_ms` | integer | `100` | Wait after driving `power` high, before resetting the modem; only used when `power` is set |
-| `power_off_on_exit` | bool | `false` | Switch the modem off when the daemon exits: drive `reset`, then `rxen`, then `power` low. Needs `power`. The default leaves the rail on and the lines as they are, so restarts do not power-cycle the modem; see below |
+| `power_off_on_exit` | bool | `false` | Switch the modem off when the daemon exits: drive `reset`, then `rxen`, then `txen`, then `power` low. Needs `power`. The default leaves the rail on and the lines as they are, so restarts do not power-cycle the modem; see below |
 
 The daemon holds the lines for as long as it runs and releases them when it exits. Raspberry Pi
 kernels keep a released output at its level (`persist_gpio_outputs`, on by default); other GPIO
@@ -619,14 +630,15 @@ exits on a fatal error, it leaves the lines like this:
 | Line | `power_off_on_exit = false` | `power_off_on_exit = true` |
 | --- | --- | --- |
 | `reset` | high | low, driven first |
-| `rxen` | low until the radio first starts, then high | low, driven next |
+| `rxen` | low until the radio first starts, then high; with `txen`, low after a transmission that ended in a reset | low, driven next |
+| `txen` | low: it is high only during transmissions, and the radio stops first | low, driven after `rxen` |
 | `power` | high: the modem stays on | low, driven last |
 | `busy`, `dio1` | inputs | inputs |
 
-With `power_off_on_exit = true`, a stop still puts the radio to sleep first. Then `reset` and
-`rxen` go low before `power`: a line left high would hold 3.3 V on a pin of the unpowered SX1262,
-whose datasheet allows at most VDD + 0.3 V on a digital input, and could feed the modem through
-its input protection. If a line cannot be driven low, the daemon logs a [warning](#warnings) and
+With `power_off_on_exit = true`, a stop still puts the radio to sleep first. Then `reset`, `rxen`
+and `txen` go low before `power`: a line left high would hold 3.3 V on a pin of the unpowered
+SX1262, whose datasheet allows at most VDD + 0.3 V on a digital input, and could feed the modem
+through its input protection. If a line cannot be driven low, the daemon logs a [warning](#warnings) and
 goes on with the next. Without `power`, the setting does nothing and the lines stay as in the first
 column.
 
@@ -802,6 +814,10 @@ does because the LNA's gain varies while it re-calibrates. The firmware's ESP32 
 V4 among them, report the packet RSSI without subtracting the gain; see
 [Differences from RNode_Firmware](#differences-from-rnode_firmware).
 
+**A PA's TX-enable input**, such as the KCT8103L's CTX (firmware `LORA_PA_CTX`) or the TXEN pin of
+an Ebyte E22-900M30S, goes to [`[gpio] txen`](#gpio): high for each transmission, low for
+receive, as the firmware drives CTX.
+
 **With `driver = "sim"`** the daemon maps the TX power the same way, so you can try a configuration
 without hardware. `lna_gain_db` has no effect there: the simulated radio reports `rssi_dbm` as
 configured.
@@ -812,7 +828,6 @@ configured.
 - the PA's enable lines `LORA_PA_PWR_EN`, `LORA_PA_CSD` and `LORA_PA_CPS`, which the firmware
   drives high once the radio starts and low when the board goes to sleep: [`[gpio] power`](#gpio)
   can hold one supply line on while the daemon runs;
-- the KCT8103L's TX enable line `LORA_PA_CTX`, which the firmware drives high for each transmission;
 - the V4's interference rule, which compares the RSSI with −89 dBm (`LNA_GD_LIMIT`) instead of the
   noise floor while the noise floor is at or below −109 dBm (`LNA_GD_THRSHLD`).
 
@@ -1326,9 +1341,15 @@ running the daemon in the foreground with its log in a private file that you del
   128 to 254, probably a negative power saved by an earlier build; see
   [Saved radio settings](#saved-radio-settings). It is logged on every start and `CMD_RESET` until
   the file is fixed.
-- `power_off_on_exit: failed to drive [gpio] reset low: …`, or `rxen` or `power`: on exit, the
-  daemon could not drive that line low while switching the modem off; see [`[gpio]`](#gpio). It
-  still drives the other lines low, the power line last, so a failed `power` leaves the modem on.
+- `failed to put the radio to sleep: …`: the modem did not take `SetSleep` when the radio stopped,
+  or [`[gpio] txen`](#gpio) could not be driven low (`GPIO error: …`). If both failed, the line
+  reads `failed to put the radio to sleep: TXEN could not be driven low (GPIO error: …), so the PA
+  may still be switched to transmit; SetSleep failed too: …`. Check the module's power, the SPI
+  bus and the GPIO line; with `power_off_on_exit`, the daemon drives TXEN low again on exit.
+- `power_off_on_exit: failed to drive [gpio] reset low: …`, or `rxen`, `txen` or `power`: on exit,
+  the daemon could not drive that line low while switching the modem off; see [`[gpio]`](#gpio).
+  It still drives the other lines low, the power line last, so a failed `power` leaves the modem
+  on.
 
 Logging never changes what the daemon sends to the host or the radio. Below `debug` the per-packet
 code costs only a level check.
@@ -1577,6 +1598,10 @@ behaviour, except for these deliberate differences:
 - A received frame that fails its CRC is dropped as in the firmware, but the driver then reads its
   packet status (`GetPacketStatus`), a transaction the firmware does not make, for the
   [debug log](#packets-at-debug).
+- With both [`[gpio] rxen` and `txen`](#gpio), the driver drives RXEN low before TXEN goes high,
+  and TXEN low before RXEN goes high, so the two are never high together. The firmware's SX1262
+  driver has no TXEN and never drives RXEN low; its SX1280 driver raises TXEN before it lowers
+  RXEN. With `rxen` alone, RXEN is driven as in the firmware.
 - With an LNA ([`[radio.pa] lna_gain_db`](#radiopa)), the packet RSSI the host gets has the LNA's
   gain taken out, like the channel RSSI and the noise floor. The firmware's ESP32 builds, the
   Heltec V4 with its LNA among them, read the packet RSSI with `packetRssi(uint8_t)`, which leaves
@@ -1603,8 +1628,6 @@ never answered on request; and data frames over 508 bytes are dropped without an
 - **The firmware's board-specific PA control is not ported:** PA model detection and the Heltec
   V4's enable lines and interference rule; see [`[radio.pa]`](#radiopa).
 - **One GPIO chip.** All of a modem's GPIO lines must be on the chip named by `[gpio] chip`.
-- **No TXEN line.** The RF switch is driven by DIO2, optionally with an RX-enable GPIO. A PA's
-  TX-enable input, such as the KCT8103L's, cannot be driven from a host GPIO yet.
 - **Hardware support needs Linux;** other systems can only run the simulator.
 - **One host at a time.** The PTY is a serial port, so only one program can use it.
 

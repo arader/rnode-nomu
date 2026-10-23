@@ -11,13 +11,15 @@ chip = "gpiochip0"
 # Optional switched radio power rail enable line.
 # power = 16
 power_on_delay_ms = 100
-# Switch the rail off on exit, after driving reset and rxen low. The default, false, leaves the rail
-# on and the lines as they are, so a restart does not power-cycle the modem.
+# Switch the rail off on exit, after driving reset, rxen and txen low. The default, false, leaves
+# the rail on and the lines as they are, so a restart does not power-cycle the modem.
 power_off_on_exit = false
 reset = 17
 busy = 27
 dio1 = 22
 # rxen = 23
+# TX-enable line of a PA module or RF switch: high while transmitting, never with rxen.
+# txen = 24
 
 [radio]
 driver = "sx1262" # "sx1262" or "sim"

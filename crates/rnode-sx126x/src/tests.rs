@@ -159,7 +159,7 @@ impl DelayNs for MockDelay {
     }
 }
 
-type Dev = Sx126x<MockSpi, MockInput, MockOutput, MockOutput, MockDelay>;
+type Dev = Sx126x<MockSpi, MockInput, MockOutput, MockOutput, MockOutput, MockDelay>;
 
 fn dev_with_delay(config: Config) -> (Dev, MockSpi, MockOutput, MockOutput, MockDelay) {
     let spi = MockSpi::default();
@@ -171,6 +171,7 @@ fn dev_with_delay(config: Config) -> (Dev, MockSpi, MockOutput, MockOutput, Mock
         MockInput::low(),
         reset.clone(),
         Some(rxen.clone()),
+        None,
         delay.clone(),
         config,
     );
@@ -263,10 +264,11 @@ fn begin_sequence_with_tcxo_dio2_and_rxen() {
 #[test]
 fn begin_without_tcxo_dio2_or_rxen() {
     let spi = MockSpi::default();
-    let mut radio: Sx126x<_, _, _, NoPin, _> = Sx126x::new(
+    let mut radio: Sx126x<_, _, _, NoPin, NoPin, _> = Sx126x::new(
         spi.clone(),
         MockInput::low(),
         MockOutput::default(),
+        None,
         None,
         MockDelay::default(),
         Config {
@@ -638,11 +640,12 @@ fn poll_rx_good_frame_transactions_are_unchanged() {
 #[test]
 fn poll_rx_crc_error_with_a_failed_status_read() {
     let spi = MockSpi::default();
-    let mut radio: Sx126x<_, _, _, NoPin, _> = Sx126x::new(
+    let mut radio: Sx126x<_, _, _, NoPin, NoPin, _> = Sx126x::new(
         spi.clone(),
         // BUSY low for GetIrqStatus and ClearIrqStatus, then stuck high.
         MockInput::busy([false, false, true, true, true]),
         MockOutput::default(),
+        None,
         None,
         MockDelay::default(),
         Config {
@@ -748,20 +751,22 @@ fn coding_rate_clamps_and_writes_modulation_params() {
 
 #[test]
 fn spi_and_gpio_errors_are_mapped() {
-    let mut spi_radio: Sx126x<_, _, _, NoPin, _> = Sx126x::new(
+    let mut spi_radio: Sx126x<_, _, _, NoPin, NoPin, _> = Sx126x::new(
         FailingSpi,
         MockInput::low(),
         MockOutput::default(),
+        None,
         None,
         MockDelay::default(),
         Config::default(),
     );
     assert_eq!(spi_radio.current_rssi().unwrap_err(), Error::Spi(SpiFail));
 
-    let mut gpio_radio: Sx126x<_, _, _, NoPin, _> = Sx126x::new(
+    let mut gpio_radio: Sx126x<_, _, _, NoPin, NoPin, _> = Sx126x::new(
         MockSpi::default(),
         FailingInput,
         MockOutput::default(),
+        None,
         None,
         MockDelay::default(),
         Config::default(),
@@ -775,10 +780,11 @@ fn spi_and_gpio_errors_are_mapped() {
 #[test]
 fn busy_timeout_is_reported_before_transaction() {
     let spi = MockSpi::default();
-    let mut radio: Sx126x<_, _, _, NoPin, _> = Sx126x::new(
+    let mut radio: Sx126x<_, _, _, NoPin, NoPin, _> = Sx126x::new(
         spi.clone(),
         MockInput::busy([true, true, true]),
         MockOutput::default(),
+        None,
         None,
         MockDelay::default(),
         Config {

@@ -49,7 +49,8 @@ pub struct GpioConfig {
     #[serde(default = "default_power_on_delay_ms")]
     pub power_on_delay_ms: u64,
     /// Switch the optional power rail off when the daemon exits: drive `reset`, then `rxen`, then
-    /// `power` low, so that no line drives the unpowered modem ([`crate::power::PowerGuard`]).
+    /// `txen`, then `power` low, so that no line drives the unpowered modem
+    /// ([`crate::power::PowerGuard`]).
     /// Defaults false to avoid power-cycling on restart: the rail and the lines then stay as they
     /// are.
     #[serde(default)]
@@ -59,6 +60,11 @@ pub struct GpioConfig {
     pub dio1: u32,
     #[serde(default)]
     pub rxen: Option<u32>,
+    /// Optional TX-enable line of a PA or RF switch, such as the TXEN of an Ebyte E22-900M30S or
+    /// the KCT8103L's CTX: requested low, driven high before each transmission and low before
+    /// receive and when the modem sleeps (`rnode_sx126x` crate docs).
+    #[serde(default)]
+    pub txen: Option<u32>,
 }
 
 fn default_gpio_chip() -> String {
