@@ -139,13 +139,13 @@ Each arm builds a different concrete type and calls the same generic event loop:
 let spi = LinuxSpiDevice::open(&spi_config.device, spi_config.speed_hz, recorder)?;
 let gpio = RadioGpio::open(gpio_config)?;
 let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, gpio.txen, StdDelay, radio_config);
-let node = Node::new(radio, TomlStorage::new(path), config.node_config(), seed);
+let node = Node::new(radio, TomlStorage::new(path), node_config(&config), seed);
 run(node, gpio.dio1, pty, shutdown)
 
 // run_sim, abridged
 let radio = SimRadio::new(sim_config)?;
 let irq = FdIrqSource::new(radio.irq_fd().try_clone_to_owned()?);
-let node = Node::new(radio, TomlStorage::new(path), config.node_config(), seed);
+let node = Node::new(radio, TomlStorage::new(path), node_config(&config), seed);
 run(node, irq, pty, shutdown)
 ```
 
@@ -1226,14 +1226,15 @@ places:
        let _power = gpio.power;
        let radio = Sx127x::new(spi, gpio.reset, StdDelay, config.radio.sx127x.driver_config()?);
        let storage = TomlStorage::new(config.storage.radio_settings.clone());
-       let node = Node::new(radio, storage, config.node_config(), seed);
+       let node = Node::new(radio, storage, node_config(&config), seed);
        run(node, gpio.dio1, pty, shutdown).map_err(Into::into)
    }
    ```
 
    `gpio.dio1` is the `IrqSource` here: whatever line carries RX done. A modem without an IRQ line
-   can pass `NoIrq`. `Config::node_config()` turns the driver-independent settings, such as
-   `avoid_interference`, into the `NodeConfig`.
+   can pass `NoIrq`. `node_config()` in `main.rs` builds the `NodeConfig`: `Config::node_config()`
+   turns the driver-independent settings, such as `avoid_interference`, into one, and it adds the
+   serial number of the EEPROM image that `rnodeconf` reads.
 
 7. **Examples and tests.** Add a commented `[radio.sx127x]` section to
    [`config.example.toml`](config.example.toml), and maybe a board file like

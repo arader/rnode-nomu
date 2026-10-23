@@ -74,7 +74,17 @@
 //!   other setting, too, and both are the same whenever the radio takes the modem output as asked,
 //!   or clamps it at a bound beyond which the gain table holds no further entry: the mapping back
 //!   clamps to the table first. That holds for the SX1262, which clamps to −9…22 dBm, with any
-//!   table of up to 23 entries, the firmware's 22-entry tables included.
+//!   table of up to 23 entries, the firmware's 22-entry tables included;
+//! - there is no EEPROM. `CMD_ROM_READ` gets an image built from the device information in
+//!   [`NodeConfig::serial_number`], the saved settings and the interference-avoidance setting
+//!   (see [`crate::eeprom`]), which is locked: like the firmware's `eeprom_write()` on a locked
+//!   EEPROM, the node refuses `CMD_ROM_WRITE` with `ERROR_EEPROM_LOCKED`. It also refuses
+//!   `CMD_UNLOCK_ROM`, which makes the firmware's `unlock_rom()` erase the EEPROM, saved settings
+//!   included, and reboot: the node replies `ERROR_EEPROM_LOCKED` and keeps the saved settings.
+//!   Each refusal logs one warning, and so do `CMD_FW_UPD`, `CMD_FW_HASH` and `CMD_DEV_SIG`, which
+//!   the node ignores because firmware updates and device signing do not apply to it. Like the
+//!   firmware on platforms without device hashes or Wi-Fi, it does not answer `CMD_DEV_HASH` or
+//!   `CMD_HASHES`, and answers `CMD_CFG_READ` with an empty config sector.
 //!
 //! An external PA changes the host's TX power to the power after the PA, as with the firmware's
 //! `HAS_LORA_PA`: `CMD_TXPOWER` is clamped to the PA's maximum output as well as to
@@ -110,6 +120,7 @@ use core::fmt;
 
 use crate::RSSI_OFFSET;
 use crate::csma::{Access, Csma, StatusUpdate};
+use crate::eeprom::{self, DeviceInfo, InfoBlock};
 use crate::fault_log::FaultLog;
 use crate::framing::{self, Reassembly, RxReassembler};
 use crate::identity::DeviceIdentity;
@@ -176,6 +187,10 @@ pub struct NodeConfig {
     /// [`crate::csma::LORA_LNA_GVT`] dB below the noise floor out of it, as firmware
     /// `update_noise_floor()` does, because the LNA's gain varies while it re-calibrates.
     pub external_lna: bool,
+    /// The serial number in the EEPROM image the node sends for `CMD_ROM_READ` (`ADDR_SERIAL`),
+    /// which `rnodeconf --info` shows. The rest of the device information is the homebrew RNode of
+    /// [`DeviceInfo::homebrew`].
+    pub serial_number: u32,
 }
 
 impl Default for NodeConfig {
@@ -188,6 +203,7 @@ impl Default for NodeConfig {
             avoid_interference: false,
             external_pa: None,
             external_lna: false,
+            serial_number: 0,
         }
     }
 }
@@ -206,6 +222,17 @@ fn log_tx(summary: PacketSummary, payload: &[u8], outcome: fmt::Arguments<'_>) {
     if log::log_enabled!(log::Level::Trace) {
         log::trace!("TX payload, {} bytes:{}", payload.len(), HexDump(payload));
     }
+}
+
+/// Whether [`Node::boot`] brings the radio online with these saved settings: their TX power is not
+/// one it refuses, and they leave the radio unlocked (`radio_locked()` after `apply_settings()`,
+/// which raises a spreading factor of 0 to 5). The firmware's EEPROM only ever holds such settings:
+/// `eeprom_conf_save()` saves the settings of the running radio.
+fn saved_settings_start_radio(settings: &RadioSettings) -> bool {
+    !REFUSED_SAVED_TX_POWER.contains(&settings.tx_power)
+        && settings.tx_power != 0xFF
+        && settings.frequency != 0
+        && settings.bandwidth != 0
 }
 
 /// The TX power a host's `CMD_TXPOWER` byte selects. Firmware `serial_callback()` reads the byte
@@ -828,9 +855,36 @@ impl<R: Radio, S: Storage> Node<R, S> {
                     if self.avoid_interference { "enabled" } else { "disabled" }
                 );
             }
-            // Display, Bluetooth, Wi-Fi, ROM and firmware-update commands are irrelevant for a
-            // Linux modem process. Firmware either performs board-specific side effects or dumps
-            // ROM data; we ignore them harmlessly unless covered above.
+            // Firmware `kiss_dump_eeprom()`, which `serial_callback()` calls for each payload byte.
+            kiss::CMD_ROM_READ => self.reply_eeprom(),
+            // Firmware `kiss_dump_config()`: only ESP32 firmware has a config sector (Wi-Fi
+            // settings) to send; on other platforms the frame is empty, as here.
+            kiss::CMD_CFG_READ => kiss::frame_plain(kiss::CMD_CFG_READ, &[], &mut self.host_output),
+            // Firmware `eeprom_write()` refuses writes while the EEPROM is locked, as ours always is.
+            kiss::CMD_ROM_WRITE if payload.len() == 2 => {
+                log::warn!(
+                    "refusing CMD_ROM_WRITE to EEPROM address {:#04X}: the EEPROM is locked; sent ERROR_EEPROM_LOCKED",
+                    payload[0]
+                );
+                self.reply_error(kiss::ERROR_EEPROM_LOCKED);
+            }
+            // Firmware `unlock_rom()` erases the EEPROM, saved settings included, and reboots.
+            kiss::CMD_UNLOCK_ROM if b0 == kiss::ROM_UNLOCK_BYTE => {
+                log::warn!(
+                    "refusing to wipe the EEPROM (CMD_UNLOCK_ROM): the saved radio settings are kept, \
+                     CMD_CONF_DELETE deletes them; sent ERROR_EEPROM_LOCKED"
+                );
+                self.reply_error(kiss::ERROR_EEPROM_LOCKED);
+            }
+            kiss::CMD_FW_UPD => log::warn!("ignoring CMD_FW_UPD: firmware updates do not apply to rnode-linux"),
+            kiss::CMD_FW_HASH => log::warn!(
+                "ignoring CMD_FW_HASH: firmware updates do not apply to rnode-linux, which has no firmware hash"
+            ),
+            kiss::CMD_DEV_SIG => log::warn!("ignoring CMD_DEV_SIG: device signing does not apply to rnode-linux"),
+            // Display, Bluetooth and Wi-Fi commands are irrelevant for a Linux modem process, and
+            // so are the device and firmware hashes, which the firmware only has on ESP32 and nRF52
+            // (`CMD_DEV_HASH`, `CMD_HASHES`): the node ignores them, as the firmware ignores
+            // commands for hardware it lacks.
             _ => {}
         }
         let retune = matches!(
@@ -985,6 +1039,21 @@ impl<R: Radio, S: Storage> Node<R, S> {
             0xFF => 0xFF,
             txp => clamp_tx_power(txp, self.tx_power_ceiling()),
         };
+    }
+
+    /// Send the EEPROM image (firmware `kiss_dump_eeprom()`), with the saved settings as they are
+    /// stored now.
+    fn reply_eeprom(&mut self) {
+        let info = InfoBlock::unsigned(DeviceInfo::homebrew(self.config.serial_number));
+        let tnc = match self.storage.load() {
+            Ok(settings) => settings.filter(saved_settings_start_radio),
+            Err(e) => {
+                log::warn!("failed to load saved radio settings: {e}");
+                None
+            }
+        };
+        let image = eeprom::image(&info, tnc.as_ref(), self.avoid_interference);
+        kiss::frame_escaped(kiss::CMD_ROM_READ, &image, &mut self.host_output);
     }
 
     fn conf_save(&mut self) {

@@ -8,6 +8,9 @@
 //! `serial_callback()` queues it, `pop_queue()`/`flush_queue()` skip lengths above `MTU`, and no
 //! `CMD_ERROR` is sent.
 //!
+//! Each daemon must also answer `CMD_ROM_READ` with the EEPROM image of its installation: the
+//! serial number the daemon derives from the machine ID and its PTY symlink (#66).
+//!
 //! The KISS framing here is written out from the firmware's `Framing.h` rather than taken from
 //! rnode-core, so the test cannot agree with a broken encoder in the daemon.
 
@@ -28,6 +31,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use rnode_linux::config::{Config, RadioDriver};
+use rnode_linux::eeprom::{derive_serial_number, machine_id};
 
 // Framing.h
 const FEND: u8 = 0xC0;
@@ -44,6 +48,7 @@ const CMD_RADIO_STATE: u8 = 0x06;
 const CMD_DETECT: u8 = 0x08;
 const CMD_STAT_RSSI: u8 = 0x23;
 const CMD_STAT_SNR: u8 = 0x24;
+const CMD_ROM_READ: u8 = 0x51;
 const CMD_ERROR: u8 = 0x90;
 const DETECT_REQ: u8 = 0x73;
 const DETECT_RESP: u8 = 0x46;
@@ -105,6 +110,7 @@ fn two_sim_daemons_carry_kiss_data_between_processes() {
     let run = RunDir::create();
     let mut smoke = Smoke::start(&run.0);
     smoke.bring_radios_online();
+    smoke.expect_eeprom_images();
 
     for len in [1, 254, 255, 508] {
         // Both directions, with different bytes; the first byte of each must be KISS-escaped.
@@ -185,6 +191,24 @@ impl Smoke {
                 "daemon {} did not answer CMD_DETECT before going online: {replies:?}",
                 NODES[host].name
             );
+        }
+        self.assert_no_errors();
+    }
+
+    /// Reads each daemon's EEPROM image (`kiss_dump_eeprom()`, `ROM.h`): 200 bytes, a homebrew
+    /// RNode (product `0xF0`, model `0xFE`, revision 1) with the serial number derived for its
+    /// symlink on this machine, provisioned (info lock byte `0x73`).
+    fn expect_eeprom_images(&mut self) {
+        let machine_id = machine_id();
+        for host in [A, B] {
+            self.write(host, &kiss_frame(CMD_ROM_READ, &[0x00]));
+            let frames = self.take_through(host, REPLY_TIMEOUT, "EEPROM image", |frame| frame.cmd == CMD_ROM_READ);
+            let image = &frames.last().expect("take_through returns the matching frame").payload;
+            let serial = derive_serial_number(machine_id.as_deref(), Some(&self.daemons.0[host].pty));
+            assert_eq!(image.len(), 200, "host {}: {image:02x?}", NODES[host].name);
+            assert_eq!(image[..3], [0xF0, 0xFE, 0x01], "host {}", NODES[host].name);
+            assert_eq!(image[3..7], serial.to_be_bytes(), "host {}", NODES[host].name);
+            assert_eq!(image[0x9B], 0x73, "host {}", NODES[host].name);
         }
         self.assert_no_errors();
     }

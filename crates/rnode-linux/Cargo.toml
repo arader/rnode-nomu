@@ -16,6 +16,7 @@ clap = { version = "4", features = ["derive"] }
 embedded-hal = "1"
 env_logger = "0.11"
 log = "0.4"
+md-5 = { version = "0.11", default-features = false }
 nix = { version = "0.31", features = ["fs", "poll", "signal", "term", "user"] }
 rnode-core = { path = "../rnode-core" }
 rnode-sx126x = { path = "../rnode-sx126x" }

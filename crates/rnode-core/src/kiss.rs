@@ -78,6 +78,8 @@ pub const DETECT_RESP: u8 = 0x46;
 pub const RADIO_STATE_OFF: u8 = 0x00;
 pub const RADIO_STATE_ON: u8 = 0x01;
 pub const CMD_RESET_BYTE: u8 = 0xF8;
+/// The byte that makes `CMD_UNLOCK_ROM` wipe the EEPROM (firmware `ROM_UNLOCK_BYTE`).
+pub const ROM_UNLOCK_BYTE: u8 = 0xF8;
 
 pub const ERROR_INITRADIO: u8 = 0x01;
 pub const ERROR_TXFAILED: u8 = 0x02;
@@ -223,8 +225,10 @@ fn multi_len(cmd: u8) -> Option<usize> {
         // `serial_callback()` unescapes each CMD_DIS_IA byte and passes it to `dia_conf_save()`,
         // which reboots: only the first payload byte takes effect, and an empty frame does nothing.
         CMD_DIS_IA => Some(1),
-        CMD_FB_WRITE | CMD_DEV_SIG | CMD_FW_HASH | CMD_WIFI_SSID | CMD_WIFI_PSK | CMD_WIFI_IP | CMD_WIFI_NM
-        | CMD_DISP_INT | CMD_DISP_ADDR | CMD_DISP_BLNK | CMD_DISP_ROT | CMD_DISP_RCND | CMD_NP_INT => Some(64),
+        // `DEV_HASH_LEN`: the firmware stores the target firmware hash once 32 bytes have arrived.
+        CMD_FW_HASH => Some(32),
+        CMD_FB_WRITE | CMD_DEV_SIG | CMD_WIFI_SSID | CMD_WIFI_PSK | CMD_WIFI_IP | CMD_WIFI_NM | CMD_DISP_INT
+        | CMD_DISP_ADDR | CMD_DISP_BLNK | CMD_DISP_ROT | CMD_DISP_RCND | CMD_NP_INT => Some(64),
         _ => None,
     }
 }

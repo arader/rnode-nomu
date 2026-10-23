@@ -669,9 +669,10 @@ than 11 dB above the measured noise floor and no LoRa carrier is detected (firmw
   floor is measured from 128 RSSI samples taken every 3 ms, so for about 384 ms after the radio
   starts or resets every transmission waits. After that, TX is deferred for as long as the
   interference lasts, which on a noisy host can be indefinitely.
-- The host can change the running value with `CMD_DIS_IA`. Unlike the firmware, which stores the
-  value in EEPROM and reboots, rnode-linux keeps it until the daemon exits (including across
-  `CMD_RESET`) and logs it at `INFO`. The config file stays the persistent setting.
+- The host can change the running value with `CMD_DIS_IA`, as `rnodeconf --ia-enable` and
+  `--ia-disable` do. Unlike the firmware, which stores the value in EEPROM and reboots, rnode-linux
+  keeps it until the daemon exits (including across `CMD_RESET`) and logs it at `INFO`. The config
+  file stays the persistent setting.
 
 **`max_tx_power_dbm`** caps the TX power below the SX1262's 22 dBm, or below a power amplifier's
 `max_output_dbm`, for a regional limit, a bench setup, or a module or antenna that cannot take full
@@ -887,6 +888,19 @@ Without `radio_settings`, `CMD_CONF_SAVE` stores nothing, and the daemon says so
 
 The radio then stays off after a restart or a `CMD_RESET` until a host configures it again.
 
+### `[eeprom]`
+
+What the EEPROM image that [`rnodeconf`](#using-rnodeconf) reads reports.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `serial_number` | integer | derived | Serial number, from 0 to 4294967295 (`0xFFFFFFFF`). Unset, the daemon derives one from the machine ID and [`[pty] symlink`](#pty) |
+
+```toml
+[eeprom]
+serial_number = 0x0000002A
+```
+
 ### `[logging]`
 
 | Key | Type | Default | Meaning |
@@ -957,9 +971,8 @@ Set `tx_power` to the power you want, delete the file, or have a host save new s
 `CMD_CONF_SAVE`. RNode_Firmware never meets such a value: its EEPROM only ever holds the power its
 host path clamped to 22 dBm.
 
-`rnodeconf --tnc` cannot configure rnode-linux (see [Using rnodeconf](#using-rnodeconf)). To
-provision TNC mode, write this file yourself, or have a host configure the radio and send
-`CMD_CONF_SAVE`.
+To provision TNC mode, write this file yourself, run [`rnodeconf --tnc`](#using-rnodeconf), or have
+another host configure the radio and send `CMD_CONF_SAVE`.
 
 ## Running with Reticulum
 
@@ -1015,41 +1028,101 @@ spreading factor.
 
 ### Using rnodeconf
 
-`rnodeconf`, Reticulum's tool for setting up RNode devices, does not work with rnode-linux. Before
-anything else it reads the RNode's EEPROM with `CMD_ROM_READ`. rnode-linux has no EEPROM and
-ignores that command, so `rnodeconf` gives up and exits with status 0.
-`rnodeconf /run/rnode/rnode0 --info`, for example, ends with:
+`rnodeconf`, Reticulum's tool for setting up RNodes, works with rnode-linux for the jobs that apply
+to it: device info, TNC and normal mode, and interference avoidance. Before almost anything else it
+reads the RNode's EEPROM with `CMD_ROM_READ`. rnode-linux has no EEPROM, so it answers with an image
+in the firmware's layout (`ROM.h`), built from what the daemon keeps:
+
+- the device information of a homebrew RNode: product `0xF0` and model `0xFE`, the firmware's codes
+  for homebrew boards, hardware revision 1, a serial number, and 2026-10-22 00:00 UTC as the
+  manufacturing time, the same on every installation;
+- the MD5 checksum of that information, an empty signature (128 bytes of `0xFF`) and the lock byte
+  of a provisioned device;
+- the [saved settings](#saved-radio-settings) as TNC settings, if the file holds settings the radio
+  starts with;
+- interference avoidance as the daemon runs it;
+- erased bytes, `0xFF`, for everything else, so Bluetooth and Wi-Fi read as off.
+
+The serial number stays the same across restarts: the daemon derives it from the machine ID
+(`/etc/machine-id`, or `/var/lib/dbus/machine-id` if that is missing) and the
+[`[pty] symlink`](#pty) path, so that daemons on one machine differ. Without a machine ID it depends
+on the symlink path alone. [`[eeprom] serial_number`](#eeprom) sets it instead.
+
+Stop Reticulum first, and anything else that has the PTY open. As with a USB RNode, `rnsd` and
+rnodeconf would both send commands and take each other's replies. Then give rnodeconf the PTY
+symlink as its port. This is a simulated daemon with `serial_number = 42`, after
+`rnodeconf /run/rnode/rnode0 --tnc --freq 914875000 --bw 125000 --txp 2 --sf 8 --cr 5`:
 
 ```text
-[14:11:47] Device connected
-[14:11:47] Current firmware version: 1.86
-[14:11:47] Reading EEPROM...
-[14:11:47] Could not download EEPROM from device. Is a valid firmware installed?
+$ rnodeconf /run/rnode/rnode0 --info
+[23:20:48] Opening serial port /run/rnode/rnode0...
+[23:20:51] Device connected
+[23:20:51] Current firmware version: 1.86
+[23:20:51] Reading EEPROM...
+[23:20:51] EEPROM checksum correct
+[23:20:51] Device signature validation failed
+
+     WARNING! This device is NOT verifiable and should NOT be trusted.
+     Someone could have added privacy-breaking or malicious code to it.
+     …
+              rnodeconf /run/rnode/rnode0 --autoinstall
+
+[23:20:51]
+[23:20:51] Device info:
+[23:20:51]      Product            : Hombrew RNode (Band capabilities unknown) (f0:fe:60)
+[23:20:51]      Device signature   : Unverified
+[23:20:51]      Firmware version   : 1.86
+[23:20:51]      Hardware revision  : 1
+[23:20:51]      Serial number      : 00:00:00:2a
+[23:20:51]      Modem chip         : Unknown
+[23:20:51]      Frequency range    : 100.0 MHz - 1100.0 MHz
+[23:20:51]      Max TX power       : 17 dBm
+[23:20:51]      Manufactured       : 2026-10-21 17:00:00
+[23:20:51]
+[23:20:51]      Device mode        : TNC
+[23:20:51]        Frequency        : 914.875 MHz
+[23:20:51]        Bandwidth        : 125.0 KHz
+[23:20:51]        TX power         : 2 dBm (1.585 mW)
+[23:20:51]        Spreading factor : 8
+[23:20:51]        Coding rate      : 5
+[23:20:51]        On-air bitrate   : 3.12 kbps
 ```
 
-Nothing that uses the radio is affected: Reticulum's `RNodeInterface` (also the Android one) and
-`RNodeMultiInterface` never read the EEPROM. The config file describes the hardware, and each
-`rnodeconf` job has an equivalent or does not apply:
+`f0:fe:60` are the product, the model and the board rnode-linux reports; "Hombrew" is rnodeconf's
+spelling. The modem chip, frequency range and maximum TX power are what rnodeconf lists for model
+`0xFE`. They limit nothing: the daemon accepts up to 22 dBm, or what
+[`max_tx_power_dbm`](#radio) and [`[radio.pa]`](#radiopa) allow. rnodeconf shows the
+manufacturing time in local time.
 
-| `rnodeconf` job | rnode-linux |
+| `rnodeconf` option | With rnode-linux |
 | --- | --- |
-| TNC mode (`--tnc`) | The [saved settings file](#saved-radio-settings): write it, or have a host configure the radio and send `CMD_CONF_SAVE` |
-| Normal mode (`--normal`) | Delete the saved settings file, or have a host send `CMD_CONF_DELETE`. From the next start or `CMD_RESET`, the radio waits for a host |
-| Interference avoidance (`--ia-enable`, `--ia-disable`) | [`[radio] avoid_interference`](#radio). A host's `CMD_DIS_IA` lasts until the daemon exits |
-| Device info (`--info`, `--config`) | `rnode-linux --version`, the config file, and the `radio online …` [log line](#what-info-shows) |
-| Firmware update and installation (`--update`, `--autoinstall`, `--flash`, `--extract`) | Not applicable: install a new rnode-linux build instead |
-| EEPROM bootstrap, signing and wipe (`--rom`, `--sign`, `--eeprom-wipe`) | Not applicable: there is no EEPROM or device signature |
-| Bluetooth, display, NeoPixel and Wi-Fi settings | Not applicable |
+| `--info` (`-i`) | The device info above. Without saved settings, `Device mode : Normal (host-controlled)` |
+| `--config` (`-c`) | Bluetooth and Wi-Fi disabled, interference avoidance as the daemon runs it, display defaults |
+| `--tnc` (`-T`) with `--freq`, `--bw`, `--txp`, `--sf` and `--cr` | Configures and starts the radio, then saves its settings with `CMD_CONF_SAVE` to [`storage.radio_settings`](#storage), if that is set: from then on the radio starts without a host. rnodeconf asks for the TX power if `--txp` is missing or above 17 dBm; type it at the prompt |
+| `--normal` (`-N`) | Deletes the saved settings (`CMD_CONF_DELETE`). The radio stays on until the daemon restarts or a host sends `CMD_RESET`, then waits for a host |
+| `--ia-enable` (`-x`), `--ia-disable` (`-X`) | Interference avoidance with `CMD_DIS_IA`, until the daemon exits; [`[radio] avoid_interference`](#radio) applies again after a restart |
+| `--eeprom-dump`, `--eeprom-backup` | Print the image, or save it under `~/.config/rnodeconf/` |
+| `--eeprom-wipe` | Refused. rnodeconf prints `hardware error (code 03)` and sends `CMD_RESET` 13 s later, which resets the node; the saved settings stay. Use `--normal` to delete them |
+| `--update` (`-u`) | Fetches the firmware release list, finds no firmware for model `0xFE` and stops without flashing anything. Update rnode-linux by installing a new build |
+| `--rom` (`-r`), `--sign` (`-S`), `--firmware-hash` (`-H`) | Change nothing: `--rom` refuses because the EEPROM is provisioned already, `--sign` finds no device hash to sign, and the daemon ignores the hash `--firmware-hash` sends, with a `WARN` line, although rnodeconf prints "Firmware hash set" |
+| `--get-target-firmware-hash` (`-K`), `--get-firmware-hash` (`-L`) | rnodeconf stops with an `AttributeError`: it does not handle a device without firmware hashes |
+| Bluetooth, display, NeoPixel and Wi-Fi options | Ignored |
 
-`--eeprom-wipe` is the only option with an effect, because `rnodeconf` sends it before reading the
-EEPROM. rnode-linux ignores the wipe but carries out the `CMD_RESET` that follows: the node resets
-(`radio offline (reset)`, then `radio online (saved settings)` if a settings file exists), and the
-saved settings stay.
+Never run `rnodeconf --flash` (`-f`) on the PTY. Given `--fw-version` and a downloaded firmware, it
+starts a flasher, avrdude unless `--platform` names another, on the port before it talks KISS; there
+is no bootloader behind the PTY, and the flasher's bytes go to the daemon. `--autoinstall` looks the
+port up among the serial ports, where a PTY never appears, and stops with "Could not find specified
+port"; `--extract` fails the same lookup with an `UnboundLocalError`. No other option starts a
+flasher: rnode-linux reports its own platform, `0x60`, for which rnodeconf has none.
 
-**Future work:** issue #66 records what
-`rnodeconf` expects and how rnode-linux could emulate the EEPROM, so that `--info`, `--config`,
-`--tnc`, `--normal` and the interference-avoidance options work while firmware, signing and wipe
-operations are refused. It is not scheduled.
+**The "NOT verifiable" warning.** rnodeconf checks the signature in the EEPROM against the RNode
+vendor's keys and the user's own, and prints the warning above on every run when none verifies. An
+image rnode-linux makes up can never carry the vendor's signature. rnodeconf refuses nothing because
+of it: every option above works the same. The `--autoinstall` it suggests does not apply.
+
+Reticulum's `RNodeInterface` (also the Android one) and `RNodeMultiInterface` never read the EEPROM,
+so none of this affects using the radio. rnodeconf could recognise platform `0x60` and skip its
+firmware and flashing steps for it; that would be a change to Reticulum.
 
 ## Running as a systemd service
 
@@ -1138,7 +1211,7 @@ so errors in it appear as `fatal:` lines on stderr.
 
 | Level | What you get |
 | --- | --- |
-| `warn` | Problems: radio driver errors (rate-limited), modem TX timeouts, failed settings writes, a host that stopped reading the PTY |
+| `warn` | Problems: radio driver errors (rate-limited), modem TX timeouts, failed settings writes, a host that stopped reading the PTY, EEPROM writes and wipes the daemon refuses, firmware-update and signing commands it ignores |
 | `info` (default) | Startup, the radio going online and offline with the reason and the settings, retuning by the host, interference-avoidance changes, packets dropped at shutdown, recovery of a failing radio call |
 | `debug` | One line per packet received, per packet sent and per packet dropped, with the reason, received frames that failed their CRC included; two lines per wait for channel access |
 | `trace` | Everything above, plus a hex dump of every received and sent payload; see the [warning](#trace-logs-contain-your-traffic) below |
@@ -1350,6 +1423,12 @@ running the daemon in the foreground with its log in a private file that you del
   the daemon could not drive that line low while switching the modem off; see [`[gpio]`](#gpio).
   It still drives the other lines low, the power line last, so a failed `power` leaves the modem
   on.
+- `refusing CMD_ROM_WRITE to EEPROM address 0x00: the EEPROM is locked; sent ERROR_EEPROM_LOCKED`
+  and `refusing to wipe the EEPROM (CMD_UNLOCK_ROM): …`: a host tried to change the EEPROM image,
+  for example with `rnodeconf --eeprom-wipe`. Nothing changed; see
+  [Using rnodeconf](#using-rnodeconf).
+- `ignoring CMD_FW_UPD: …`, `ignoring CMD_FW_HASH: …` and `ignoring CMD_DEV_SIG: …`: a host tried to
+  update the firmware or sign the device, which do not apply to rnode-linux.
 
 Logging never changes what the daemon sends to the host or the radio. Below `debug` the per-packet
 code costs only a level check.
@@ -1431,7 +1510,8 @@ After every merge, CI on `main` ([`.forgejo/workflows/ci.yml`](.forgejo/workflow
 same steps with every scenario of that test, so every commit on `main` is checked with all of them.
 
 - `rnode-core` checks the KISS protocol, framing, CSMA/CA, PHY timing and logging against values
-  derived from the firmware.
+  derived from the firmware, and the EEPROM image `rnodeconf` reads against Python's MD5. It also
+  replays the bytes recorded from `rnodeconf` 1.5.5 sessions and checks the replies.
 - `rnode-sx126x` checks the exact SPI bytes the driver sends against a mocked bus.
 - `rnode-sim` runs simulated radios against each other.
 - `rnode-linux` covers config parsing, storage, the PTY and its symlink, the GPIO chip lookup, the
@@ -1443,8 +1523,9 @@ same steps with every scenario of that test, so every commit on `main` is checke
   links in both, so the documentation cannot drift from the code.
 - The smoke test [`crates/rnode-linux/tests/sim_daemon_smoke.rs`](crates/rnode-linux/tests/sim_daemon_smoke.rs)
   starts two daemon processes on the simulated radio. It checks that KISS data frames of 1, 254,
-  255 and 508 bytes travel between their PTYs in both directions, and that a 509-byte frame is
-  dropped. It is part of `cargo test`, so it runs in CI.
+  255 and 508 bytes travel between their PTYs in both directions, that a 509-byte frame is
+  dropped, and that each daemon's EEPROM image has the serial number derived for it. It is part of
+  `cargo test`, so it runs in CI.
 - The unit tests in [`tools/hwtest`](tools/hwtest) check the hardware test tools without
   hardware or Reticulum. For the over-the-air LXMF echo test they cover the frequency and power
   limits, the arguments, how it describes packets, matches them to the daemon's debug log and
@@ -1579,6 +1660,15 @@ behaviour, except for these deliberate differences:
   [Stopping the daemon](#stopping-the-daemon).
 - `CMD_RESET` resets the node's state and reloads the saved settings without restarting the
   process, so the PTY stays open.
+- There is no EEPROM. `CMD_ROM_READ` gets an image in the firmware's layout, built from the serial
+  number, the saved settings and interference avoidance, with an empty signature; see
+  [Using rnodeconf](#using-rnodeconf). The image is locked, so `CMD_ROM_WRITE` gets
+  `ERROR_EEPROM_LOCKED`, as on a provisioned RNode. `CMD_UNLOCK_ROM`, with which the firmware erases
+  its EEPROM, saved settings included, and reboots, gets `ERROR_EEPROM_LOCKED` too and changes
+  nothing.
+- `CMD_FW_UPD`, `CMD_FW_HASH` and `CMD_DEV_SIG` are ignored with a `WARN` line each. As firmware
+  without device hashes or Wi-Fi does, the node answers `CMD_DEV_HASH` and `CMD_HASHES` with
+  nothing and `CMD_CFG_READ` with an empty config sector.
 - Saved settings with a TX power from 128 to 254 are ignored with a warning, and the radio waits
   for a host. Earlier builds saved negative powers that way; see
   [Saved radio settings](#saved-radio-settings). The firmware's EEPROM never holds such a value.
@@ -1614,8 +1704,8 @@ never answered on request; and data frames over 508 bytes are dropped without an
 
 ## Limitations
 
-- **`rnodeconf` does not work:** rnode-linux has no EEPROM for it to read. See
-  [Using rnodeconf](#using-rnodeconf) for the equivalents.
+- **`rnodeconf` calls the device not verifiable:** the EEPROM image rnode-linux makes up carries no
+  signature. rnodeconf works anyway; [Using rnodeconf](#using-rnodeconf) lists what it can do.
 - **Commands for microcontroller boards are ignored:** display, framebuffer, Bluetooth, Wi-Fi, LEDs,
   device signatures, firmware hashes and firmware updates.
 - **SX1262 only.** Other modems need a driver; see [DRIVERS.md](DRIVERS.md).
@@ -1655,7 +1745,9 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm, or at most `max_tx_power_dbm` if you set it (see [Running with Reticulum](#running-with-reticulum)). With `[radio.pa]`, use a `txpower` from the PA's minimum to its `max_output_dbm` (see [`[radio.pa]`](#radiopa)). If the daemon logged `radio set_… failed`, the modem rejected the setting; see [Warnings](#warnings) |
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
-| `rnodeconf`: "Could not download EEPROM from device" | rnode-linux has no EEPROM; see [Using rnodeconf](#using-rnodeconf) |
+| `rnodeconf`: "Could not download EEPROM from device" | Another program, such as `rnsd`, has the PTY open and took the reply: stop it first. rnode-linux builds without EEPROM emulation never reply; update. See [Using rnodeconf](#using-rnodeconf) |
+| `rnodeconf`: "WARNING! This device is NOT verifiable" | Expected: the EEPROM image carries no signature. rnodeconf works anyway; see [Using rnodeconf](#using-rnodeconf) |
+| `rnodeconf --eeprom-wipe`: "hardware error (code 03)" | rnode-linux refuses the wipe and keeps the saved settings. `rnodeconf --normal` deletes them |
 | Two RNodes do not hear each other | They must share frequency, bandwidth and spreading factor. With `RUST_LOG=debug`, a `TX packet` line on one side and no `RX packet` line on the other points at RF: antenna, distance or power. A `CRC error` line instead means the frame was heard but corrupted: interference, a collision or a weak signal |
 | `WARN … dropping host output because the PTY is not draining` | No host is reading the PTY. Harmless while none is attached |
 | The daemon takes long to stop | It finishes the packet on the air, which takes seconds at high spreading factors and minutes at SF12 with the narrowest bandwidths; see [How long a stop takes](#how-long-a-stop-takes) |

@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default)]
     pub storage: StorageConfig,
     #[serde(default)]
+    pub eeprom: EepromConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
 }
 
@@ -562,6 +564,16 @@ pub struct StorageConfig {
     pub radio_settings: Option<PathBuf>,
 }
 
+/// What the EEPROM image that `rnodeconf` reads reports (`rnode_core::eeprom`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EepromConfig {
+    /// Serial number, which `rnodeconf --info` shows. When unset, [`Config::serial_number`] derives
+    /// one from the machine ID and `[pty] symlink`.
+    #[serde(default)]
+    pub serial_number: Option<u32>,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingConfig {
@@ -616,7 +628,8 @@ impl Config {
         Ok(config)
     }
 
-    /// The `rnode_core::Node` configuration this file selects.
+    /// The `rnode_core::Node` configuration this file selects, except the EEPROM serial number,
+    /// which also depends on the machine ([`Config::serial_number`]) and is left at its default.
     ///
     /// With `[radio.pa]` the node maps TX power through the PA's gain table with either driver;
     /// the LNA's noise-floor rule (`NodeConfig::external_lna`) only applies to the SX1262, as the
@@ -636,6 +649,15 @@ impl Config {
                 && self.radio.pa.as_ref().is_some_and(|pa| pa.lna_gain_db() > 0),
             ..rnode_core::NodeConfig::default()
         }
+    }
+
+    /// The serial number of the EEPROM image (`rnode_core::NodeConfig::serial_number`) on the
+    /// machine whose ID is `machine_id`: `[eeprom] serial_number` if set, or else one derived from
+    /// the machine ID and `[pty] symlink` ([`crate::eeprom::derive_serial_number`]).
+    pub fn serial_number(&self, machine_id: Option<&str>) -> u32 {
+        self.eeprom
+            .serial_number
+            .unwrap_or_else(|| crate::eeprom::derive_serial_number(machine_id, self.pty.symlink.as_deref()))
     }
 
     /// Non-fatal configuration problems, logged once at startup.

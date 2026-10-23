@@ -19,6 +19,7 @@
 pub mod cli;
 pub mod config;
 pub mod delay;
+pub mod eeprom;
 pub mod event_loop;
 pub mod power;
 pub mod pty;

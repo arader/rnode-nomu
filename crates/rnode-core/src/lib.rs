@@ -15,6 +15,7 @@
 //! air; deliberate differences are documented where they occur.
 
 pub mod csma;
+pub mod eeprom;
 mod fault_log;
 pub mod framing;
 pub mod identity;

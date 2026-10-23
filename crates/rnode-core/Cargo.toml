@@ -15,6 +15,8 @@ sim = []
 
 [dependencies]
 log = "0.4"
+# MD5 for the EEPROM checksum that rnodeconf verifies (firmware `eeprom_checksum_valid()`).
+md-5 = { version = "0.11", default-features = false }
 
 [dev-dependencies]
 # The integration tests in tests/ run nodes on the simulated medium, which needs the `sim` feature.

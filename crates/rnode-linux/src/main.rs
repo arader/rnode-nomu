@@ -113,7 +113,7 @@ fn run_sim(config: Config, seed: u64, shutdown: &std::sync::atomic::AtomicBool) 
     let irq = FdIrqSource::new(irq_fd);
     let pty = open_pty(&config)?;
     let storage = TomlStorage::new(config.storage.radio_settings.clone());
-    let node = Node::new(radio, storage, config.node_config(), seed);
+    let node = Node::new(radio, storage, node_config(&config), seed);
     run(node, irq, pty, shutdown).map_err(Into::into)
 }
 
@@ -154,8 +154,16 @@ fn run_sx1262(
     let _power = gpio.power;
     let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, gpio.txen, StdDelay, radio_config);
     let storage = TomlStorage::new(config.storage.radio_settings.clone());
-    let node = Node::new(radio, storage, config.node_config(), seed);
+    let node = Node::new(radio, storage, node_config(&config), seed);
     run(node, gpio.dio1, pty, shutdown).map_err(Into::into)
+}
+
+/// The node's configuration: the settings of `config`, and the serial number of this installation.
+fn node_config(config: &Config) -> rnode_core::NodeConfig {
+    rnode_core::NodeConfig {
+        serial_number: config.serial_number(rnode_linux::eeprom::machine_id().as_deref()),
+        ..config.node_config()
+    }
 }
 
 fn open_pty(config: &Config) -> anyhow::Result<rnode_linux::pty::PtyPair> {

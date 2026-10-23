@@ -79,6 +79,11 @@ symlink = "target/rnode0"
 [storage]
 radio_settings = "target/rnode-radio-settings.toml"
 
+[eeprom]
+# Serial number that rnodeconf --info shows. Unset, it is derived from the machine ID
+# (/etc/machine-id) and the [pty] symlink path, and stays the same across restarts.
+# serial_number = 0x0000002A
+
 [logging]
 # RUST_LOG overrides this setting.
 log_level = "info"
