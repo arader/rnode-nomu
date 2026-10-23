@@ -397,3 +397,36 @@ fn dis_ia_changes_channel_access_immediately() {
         .expect("disabled avoidance ignores the interference");
     assert_eq!(listener.queued_rx(), 1);
 }
+
+/// `NodeConfig::external_lna` turns on the `HAS_LORA_LNA` rule of firmware `update_noise_floor()`,
+/// from the start and again after `CMD_RESET`: RSSI samples more than 12 dB below the noise floor
+/// stay out of it, so a channel that drops from -100 to -113 dBm leaves the floor at -100 dBm.
+/// Without an LNA the floor follows, to -113 dBm. `CMD_STAT_CHTM` reports the floor in byte 9:
+/// -100 + 157 = 57, -113 + 157 = 44.
+#[test]
+fn an_external_lna_keeps_samples_far_below_the_noise_floor_out_of_it() {
+    for (external_lna, floor_byte) in [(true, 57), (false, 44)] {
+        let medium = SimMedium::new();
+        let config = NodeConfig {
+            external_lna,
+            ..NodeConfig::default()
+        };
+        let mut n = Node::new(medium.radio(), MemoryStorage::default(), config, 1);
+        init(&mut n);
+        n.handle_host_input(&plain(CMD_CONF_SAVE, &[0]), 0); // So CMD_RESET brings the radio back.
+        for cause in ["start", "reset"] {
+            if cause == "reset" {
+                n.handle_host_input(&plain(CMD_RESET, &[CMD_RESET_BYTE]), medium.now_ms());
+                assert!(n.is_radio_online());
+            }
+            medium.set_noise_dbm(-100);
+            tick_every_until(&mut n, &medium, crate::node::STATUS_INTERVAL_MS, 1_000, |_| false);
+            medium.set_noise_dbm(-113);
+            n.take_host_output();
+            tick_every_until(&mut n, &medium, crate::node::STATUS_INTERVAL_MS, 2_000, |_| false);
+            let chtm = chtm_payloads(&n.take_host_output());
+            let last = chtm.last().expect("CMD_STAT_CHTM once a second");
+            assert_eq!(last[9], floor_byte, "external_lna = {external_lna}, after {cause}");
+        }
+    }
+}

@@ -1,8 +1,9 @@
 //! Hardware-independent RNode logic.
 //!
 //! This crate holds everything that decides *what* an RNode does, with no I/O of its own:
-//! the KISS host protocol, the TX queue, RNode framing (split packets), the PHY/CSMA logic and
-//! the [`Node`] state machine that ties them together. Time is passed in explicitly (`now_ms`,
+//! the KISS host protocol, the TX queue, RNode framing (split packets), the PHY/CSMA logic, the
+//! TX power mapping of an external power amplifier and the [`Node`] state machine that ties them
+//! together. Time is passed in explicitly (`now_ms`,
 //! a monotonic millisecond clock) and randomness comes from a seed, so every behaviour can be
 //! tested deterministically.
 //!
@@ -19,6 +20,7 @@ pub mod framing;
 pub mod identity;
 pub mod kiss;
 pub mod node;
+pub mod pa;
 mod packet_log;
 pub mod phy;
 pub mod queue;
@@ -30,6 +32,7 @@ pub mod storage;
 
 pub use identity::DeviceIdentity;
 pub use node::{Node, NodeConfig};
+pub use pa::ExternalPa;
 pub use radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimMedium, SimRadio};

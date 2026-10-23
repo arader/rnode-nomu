@@ -51,6 +51,11 @@ pub const CSMA_INFR_THRESHOLD_DB: i16 = 11;
 pub const CSMA_RFENV_RECAL_MS: u64 = 2500;
 /// Firmware `CSMA_RFENV_RECAL_LIMIT_DB`.
 pub const CSMA_RFENV_RECAL_LIMIT_DB: i16 = -83;
+/// Firmware `LORA_LNA_GVT` (`Boards.h`, the Heltec V4, the firmware's one board with
+/// `HAS_LORA_LNA`): with an external LNA, how far in dB below the noise floor an RSSI sample may
+/// be before `update_noise_floor()` discards it. The LNA's gain varies while it re-calibrates, and
+/// such samples come from that variance, not from the channel.
+pub const LORA_LNA_GVT: i16 = 12;
 const INITIAL_RSSI_DBM: i16 = -292;
 
 /// What the TX queue handler may do now (firmware `tx_queue_handler()`).
@@ -109,6 +114,7 @@ pub struct Csma {
     noise_floor_buffer: [i16; NOISE_FLOOR_SAMPLES],
     interference: bool,
     avoid_interference: bool,
+    external_lna: bool,
     interference_start: Option<u64>,
     util_samples: [bool; DCD_SAMPLES],
     airtime_bins: [u16; AIRTIME_BINS],
@@ -153,6 +159,7 @@ impl Csma {
             noise_floor_buffer: [0; NOISE_FLOOR_SAMPLES],
             interference: false,
             avoid_interference: true,
+            external_lna: false,
             interference_start: None,
             util_samples: [false; DCD_SAMPLES],
             airtime_bins: [0; AIRTIME_BINS],
@@ -245,10 +252,26 @@ impl Csma {
         self.avoid_interference
     }
 
+    /// Configure whether an external LNA amplifies the signal before the modem (firmware
+    /// `HAS_LORA_LNA`). With one, [`Csma::status_tick`] leaves RSSI samples more than
+    /// [`LORA_LNA_GVT`] dB below the noise floor out of it. Off by default, as for the firmware's
+    /// boards without an LNA; [`crate::Node`] applies [`crate::NodeConfig::external_lna`].
+    pub fn set_external_lna(&mut self, external_lna: bool) {
+        self.external_lna = external_lna;
+    }
+
+    /// Whether an external LNA amplifies the signal before the modem.
+    pub fn external_lna(&self) -> bool {
+        self.external_lna
+    }
+
     /// Record a fresh carrier-detect and current-RSSI reading (firmware
-    /// `update_modem_status()`). Board-specific HELTEC32_V4/LNA gain branches are deliberately
-    /// omitted: this core is board-independent and the reference SX1262 target does not need
-    /// those compensations.
+    /// `update_modem_status()`). The Heltec V4's own interference rule, which compares the RSSI
+    /// with the fixed `LNA_GD_LIMIT` of −89 dBm instead of the noise floor while the noise floor
+    /// is at or below `LNA_GD_THRSHLD` (−109 dBm), is deliberately left out, like that board's
+    /// matching noise-floor branch: it is tuned to one board's LNA, and this core is
+    /// board-independent. The general `HAS_LORA_LNA` rule of `update_noise_floor()` is ported (see
+    /// [`Csma::set_external_lna`]).
     pub fn observe(&mut self, now_ms: u64, carrier: bool, rssi_dbm: i16) {
         self.carrier = carrier;
         self.current_rssi = rssi_dbm;
@@ -430,6 +453,11 @@ impl Csma {
     fn update_noise_floor(&mut self) {
         if !self.carrier && (!self.noise_floor_sampled || self.current_rssi < self.noise_floor + CSMA_INFR_THRESHOLD_DB)
         {
+            // Firmware `HAS_LORA_LNA`: discard invalid samples due to gain variance during LNA
+            // re-calibration.
+            if self.external_lna && self.current_rssi < self.noise_floor - LORA_LNA_GVT {
+                return;
+            }
             self.noise_floor_buffer[self.noise_floor_sample] = self.current_rssi;
             self.noise_floor_sample += 1;
             let mut sum_noise_floor = false;

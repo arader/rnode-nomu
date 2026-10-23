@@ -67,7 +67,21 @@
 //!   waits for a host as if nothing were saved. `CMD_TXPOWER` is read as unsigned dBm, as in
 //!   firmware `serial_callback()`, but earlier builds read it as signed and saved −9…−2 dBm as
 //!   247…254, which would now select the highest power allowed. The firmware has no such case:
-//!   its EEPROM only ever holds the power its host path clamped to 22 dBm.
+//!   its EEPROM only ever holds the power its host path clamped to 22 dBm;
+//! - with an external power amplifier ([`NodeConfig::external_pa`]), the TX power the node reports
+//!   is the power after the PA at the modem output the radio reads back. Firmware `setTXPower()`
+//!   maps back the modem output it asked for instead. The node reports the read-back value of every
+//!   other setting, too, and both are the same whenever the radio takes the modem output as asked,
+//!   or clamps it at a bound beyond which the gain table holds no further entry: the mapping back
+//!   clamps to the table first. That holds for the SX1262, which clamps to −9…22 dBm, with any
+//!   table of up to 23 entries, the firmware's 22-entry tables included.
+//!
+//! An external PA changes the host's TX power to the power after the PA, as with the firmware's
+//! `HAS_LORA_PA`: `CMD_TXPOWER` is clamped to the PA's maximum output as well as to
+//! [`NodeConfig::max_tx_power`]; while the radio is online, the node programs the modem output that
+//! the PA's gain table maps the request to and echoes the power that output gives, which below the
+//! PA's minimum is that minimum ([`crate::pa`]). While the radio is offline, it echoes the clamped
+//! request, as the firmware's `setTXPower()` only acts on an online radio.
 //!
 //! Logging (`log` facade): at debug level, one line per packet delivered to the host (after split
 //! reassembly), one per host packet sent to the radio (before splitting, with its outcome) and one
@@ -89,6 +103,8 @@
 //! has worked for 10 s. A preamble length the node retries is logged the same way, except that its
 //! info line comes with the first call that works. Formatting is lazy, so disabled levels cost
 //! nothing, and logging never changes what the node sends to the host or the radio.
+//! With an external PA, a debug line also gives each TX power the node programs, with the modem
+//! output it maps to and the power it reports.
 
 use core::fmt;
 
@@ -98,6 +114,7 @@ use crate::fault_log::FaultLog;
 use crate::framing::{self, Reassembly, RxReassembler};
 use crate::identity::DeviceIdentity;
 use crate::kiss;
+use crate::pa::ExternalPa;
 use crate::packet_log::{Elapsed, HexDump, Hz, PacketSummary, RadioSummary, plural};
 use crate::phy::{self, Modulation, PhyParams};
 use crate::queue::TxQueue;
@@ -113,8 +130,9 @@ const OFFLINE_WAKEUP_MS: u64 = 1_000;
 /// the last line logged is never stale for longer than this.
 const RETUNE_LOG_DELAY_MS: u64 = 100;
 /// TX power bytes that [`Node::boot`] refuses in saved settings: −128…−2 dBm to earlier builds,
-/// which read `CMD_TXPOWER` as signed. The node clamps every request to
-/// [`NodeConfig::max_tx_power`] before it can be saved, so none of these is saved today.
+/// which read `CMD_TXPOWER` as signed. The node clamps every request to its ceiling before it can
+/// be saved, and an external PA never reports more than [`crate::pa::MAX_OUTPUT_DBM`], so none of
+/// these is saved today.
 const REFUSED_SAVED_TX_POWER: core::ops::RangeInclusive<u8> = 0x80..=0xFE;
 
 /// Static configuration of a [`Node`].
@@ -123,8 +141,10 @@ pub struct NodeConfig {
     /// What the node reports to the host.
     pub identity: DeviceIdentity,
     /// Highest TX power in dBm the host may request; higher requests are clamped
-    /// (firmware: 22 for an SX1262 without external PA). Keep it below 128: [`Node::boot`]
-    /// refuses saved settings with a power from 128 up.
+    /// (firmware: 22 for an SX1262 without external PA). With an
+    /// [`external_pa`](NodeConfig::external_pa), its maximum output clamps them too, and the lower
+    /// of the two applies (firmware: `PA_MAX_OUTPUT`). Keep it below 128: [`Node::boot`] refuses
+    /// saved settings with a power from 128 up.
     pub max_tx_power: u8,
     /// Maximum number of packets in the TX queue (firmware `CONFIG_QUEUE_MAX_LENGTH`).
     pub queue_max_packets: usize,
@@ -142,6 +162,20 @@ pub struct NodeConfig {
     /// and only `rnodeconf --ia-enable` turns it on. The host can change the running value with
     /// `CMD_DIS_IA` (see [`Node::avoid_interference`]); this field stays the start-up default.
     pub avoid_interference: bool,
+    /// The power amplifier (PA) between the modem and the antenna, if the board has one (firmware
+    /// `HAS_LORA_PA`). The host's TX power is then the power after the PA: the node clamps
+    /// `CMD_TXPOWER` to the PA's [`ExternalPa::max_output_dbm`] as well as to
+    /// [`NodeConfig::max_tx_power`], programs the radio with the modem output that the PA's gain
+    /// table maps the request to, and reports the power that output gives, as firmware
+    /// `setTXPower()` does (see [`crate::pa`]). `None`, the default, programs the host's power as
+    /// it is.
+    pub external_pa: Option<ExternalPa>,
+    /// Whether a low-noise amplifier (LNA) amplifies received signals before the modem (firmware
+    /// `HAS_LORA_LNA`). The radio driver subtracts the LNA's gain from the RSSI it reads, as
+    /// firmware `currentRssi()` does. The node then leaves RSSI samples more than
+    /// [`crate::csma::LORA_LNA_GVT`] dB below the noise floor out of it, as firmware
+    /// `update_noise_floor()` does, because the LNA's gain varies while it re-calibrates.
+    pub external_lna: bool,
 }
 
 impl Default for NodeConfig {
@@ -152,14 +186,17 @@ impl Default for NodeConfig {
             queue_max_packets: 200,
             queue_max_bytes: 6144,
             avoid_interference: false,
+            external_pa: None,
+            external_lna: false,
         }
     }
 }
 
-/// A fresh channel-access state with interference avoidance set as given.
-fn new_csma(avoid_interference: bool) -> Csma {
+/// A fresh channel-access state with interference avoidance and the external LNA set as given.
+fn new_csma(avoid_interference: bool, external_lna: bool) -> Csma {
     let mut csma = Csma::new();
     csma.set_avoid_interference(avoid_interference);
+    csma.set_external_lna(external_lna);
     csma
 }
 
@@ -173,7 +210,8 @@ fn log_tx(summary: PacketSummary, payload: &[u8], outcome: fmt::Arguments<'_>) {
 
 /// The TX power a host's `CMD_TXPOWER` byte selects. Firmware `serial_callback()` reads the byte
 /// as unsigned dBm (`int txp = sbyte;`) and clamps it to the modem's maximum (`if (txp > 22)
-/// txp = 22;` on an SX1262 without a PA); here the maximum is [`NodeConfig::max_tx_power`].
+/// txp = 22;` on an SX1262 without a PA, `PA_MAX_OUTPUT` with one); here the maximum is the node's
+/// ceiling, [`Node::tx_power_ceiling`].
 fn clamp_tx_power(requested: u8, max_tx_power: u8) -> u8 {
     requested.min(max_tx_power)
 }
@@ -184,8 +222,9 @@ fn radio_dbm(txp: u8) -> i8 {
     i8::try_from(txp).unwrap_or(i8::MAX)
 }
 
-/// The power a [`Radio`] reports, as the unsigned byte the host protocol carries. The node never
-/// asks for less than 0 dBm, so no driver has a reason to report less; it would read as 0.
+/// The power a [`Radio`] reports, as the unsigned byte the host protocol carries. Without an
+/// external PA the node never asks for less than 0 dBm, so no driver has a reason to report less;
+/// it would read as 0.
 fn txp_byte(dbm: i8) -> u8 {
     u8::try_from(dbm).unwrap_or(0)
 }
@@ -371,6 +410,9 @@ pub struct Node<R: Radio, S: Storage> {
     freq: u32,
     bw: u32,
     txp: u8,
+    /// The modem output in dBm the radio last accepted for `txp` while online, as read back: what
+    /// a failed `set_tx_power()` restores. Without an external PA it is `txp`.
+    modem_tx_power: i8,
     sf: u8,
     cr: u8,
     implicit_len: u8,
@@ -404,6 +446,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
     pub fn new(radio: R, storage: S, config: NodeConfig, seed: u64) -> Self {
         let queue = TxQueue::new(config.queue_max_packets, config.queue_max_bytes);
         let avoid_interference = config.avoid_interference;
+        let csma = new_csma(avoid_interference, config.external_lna);
         Self {
             radio,
             storage,
@@ -415,11 +458,12 @@ impl<R: Radio, S: Storage> Node<R, S> {
             decoder: kiss::Decoder::new(),
             queue,
             reassembler: RxReassembler::new(),
-            csma: new_csma(avoid_interference),
+            csma,
             avoid_interference,
             freq: 0,
             bw: 0,
             txp: 0xFF,
+            modem_tx_power: 0,
             sf: 0,
             cr: 5,
             implicit_len: 0,
@@ -650,13 +694,14 @@ impl<R: Radio, S: Storage> Node<R, S> {
             }
             kiss::CMD_TXPOWER => {
                 if b0 != 0xFF {
-                    let txp = clamp_tx_power(b0, self.config.max_tx_power);
+                    let txp = clamp_tx_power(b0, self.tx_power_ceiling());
                     if !self.radio_online {
+                        // Firmware `setTXPower()` only acts on an online radio: the echo is the
+                        // clamped request, not mapped through an external PA.
                         self.txp = txp;
-                    } else if let Some(dbm) =
-                        self.apply_setting(Setting::TxPower, R::tx_power, radio_dbm(txp), radio_dbm(self.txp))
-                    {
-                        self.txp = txp_byte(dbm);
+                    } else if let Some(dbm) = self.apply_tx_power(txp, self.modem_tx_power) {
+                        self.modem_tx_power = dbm;
+                        self.txp = self.reported_tx_power(dbm);
                     }
                 }
                 kiss::frame_plain(kiss::CMD_TXPOWER, &[self.txp], &mut self.host_output);
@@ -838,12 +883,12 @@ impl<R: Radio, S: Storage> Node<R, S> {
         // Firmware startRadio(): setTXPower(), setBandwidth(), setSpreadingFactor() and
         // setCodingRate(), each reading back the value in use. Where a setter fails, the modem
         // keeps what begin() programmed, which the driver reports.
-        let txp = radio_dbm(clamp_tx_power(self.txp, self.config.max_tx_power));
         let begun = self.radio.tx_power();
-        self.txp = txp_byte(
-            self.apply_setting(Setting::TxPower, R::tx_power, txp, begun)
-                .unwrap_or(begun),
-        );
+        let dbm = self
+            .apply_tx_power(clamp_tx_power(self.txp, self.tx_power_ceiling()), begun)
+            .unwrap_or(begun);
+        self.modem_tx_power = dbm;
+        self.txp = self.reported_tx_power(dbm);
         let begun = self.radio.bandwidth();
         self.bw = self
             .apply_setting(Setting::Bandwidth, R::bandwidth, self.bw, begun)
@@ -906,7 +951,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
         self.reassembler.reset();
         // A fresh CSMA, as after the firmware's reboot, with the avoidance setting the host may
         // have changed: the firmware rereads it from EEPROM at boot.
-        self.csma = new_csma(self.avoid_interference);
+        self.csma = new_csma(self.avoid_interference, self.config.external_lna);
         self.decoder.reset();
         self.radio_online = false;
         self.freq = 0;
@@ -938,7 +983,7 @@ impl<R: Radio, S: Storage> Node<R, S> {
         // `update_radio_lock()` after `eeprom_conf_load()`.
         self.txp = match settings.tx_power {
             0xFF => 0xFF,
-            txp => clamp_tx_power(txp, self.config.max_tx_power),
+            txp => clamp_tx_power(txp, self.tx_power_ceiling()),
         };
     }
 
@@ -1307,6 +1352,63 @@ impl<R: Radio, S: Storage> Node<R, S> {
                 }
                 None
             }
+        }
+    }
+
+    /// The highest TX power in dBm a host may set: [`NodeConfig::max_tx_power`], or the external
+    /// PA's maximum output if that is lower (firmware `PA_MAX_OUTPUT`).
+    fn tx_power_ceiling(&self) -> u8 {
+        match &self.config.external_pa {
+            Some(pa) => self.config.max_tx_power.min(pa.max_output_dbm()),
+            None => self.config.max_tx_power,
+        }
+    }
+
+    /// Program the TX power `txp` into the online radio, as firmware `setTXPower()` does: through
+    /// the external PA's gain table if there is one. Returns the modem output in use, as read back,
+    /// or `None` if `set_tx_power()` failed and [`Node::apply_setting`] restored `accepted`, the
+    /// modem output the radio last accepted.
+    fn apply_tx_power(&mut self, txp: u8, accepted: i8) -> Option<i8> {
+        let requested = self.modem_output(txp);
+        let dbm = self.apply_setting(Setting::TxPower, R::tx_power, requested, accepted)?;
+        if self.config.external_pa.is_some() {
+            let reported = self.reported_tx_power(dbm);
+            if dbm == requested {
+                log::debug!(
+                    "TX power {txp} dBm through the external PA: modem output {dbm} dBm, reported as {reported} dBm"
+                );
+            } else {
+                log::debug!(
+                    "TX power {txp} dBm through the external PA: modem output {requested} dBm, {dbm} dBm in use, \
+                     reported as {reported} dBm"
+                );
+            }
+        }
+        Some(dbm)
+    }
+
+    /// The modem output in dBm for the TX power `txp`: with an external PA, the one its gain table
+    /// maps `txp` to (firmware `map_target_power_to_modem_output()`), otherwise `txp` itself.
+    fn modem_output(&self, txp: u8) -> i8 {
+        match &self.config.external_pa {
+            Some(pa) => {
+                // `txp` is at most the PA's maximum output, 127 dBm or less, whose modem outputs
+                // are within −127…127 dBm: this never saturates.
+                let dbm = pa.modem_output_dbm(txp);
+                i8::try_from(dbm).unwrap_or(if dbm < 0 { i8::MIN } else { i8::MAX })
+            }
+            None => radio_dbm(txp),
+        }
+    }
+
+    /// The TX power to report while the radio runs at the modem output `dbm`: with an external PA,
+    /// the power its gain table gives there (firmware `map_modem_output_to_target_power()`),
+    /// otherwise `dbm` itself. The node maps back the modem output the radio reads back, where the
+    /// firmware maps back the one it asked for; see the module docs.
+    fn reported_tx_power(&self, dbm: i8) -> u8 {
+        match &self.config.external_pa {
+            Some(pa) => pa.target_power_dbm(i32::from(dbm)),
+            None => txp_byte(dbm),
         }
     }
 

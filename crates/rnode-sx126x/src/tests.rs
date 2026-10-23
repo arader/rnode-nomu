@@ -817,3 +817,47 @@ fn current_rssi_and_frequency_math() {
     spi.push(&[100]);
     assert_eq!(radio.current_rssi().unwrap(), -50);
 }
+
+/// Firmware `currentRssi()` and `packetRssi()` with `HAS_LORA_LNA`: `-(int(byte)) / 2`, then
+/// `rssi -= lora_lna_gain`. With the KCT8103L's 21 dB: RssiInst 101 → -50 - 21 = -71 and 255 →
+/// -127 - 21 = -148; a frame's RssiPkt 194 → -97 - 21 = -118, and a CRC-failed frame's 80 →
+/// -40 - 21 = -61. The SNR, a ratio, is not touched, and the gain costs no SPI transaction.
+#[test]
+fn lna_gain_is_subtracted_from_every_rssi() {
+    let (mut radio, spi, _, _) = dev(Config {
+        lna_gain_db: 21,
+        ..Config::default()
+    });
+    spi.push(&[101]);
+    assert_eq!(radio.current_rssi().unwrap(), -71);
+    spi.push(&[255]);
+    assert_eq!(radio.current_rssi().unwrap(), -148);
+    assert_eq!(
+        take_transactions(&spi),
+        [
+            vec![OpLog::Write(vec![OP_CURRENT_RSSI, 0x00]), OpLog::Read(1)],
+            vec![OpLog::Write(vec![OP_CURRENT_RSSI, 0x00]), OpLog::Read(1)],
+        ]
+    );
+
+    spi.push(&[0x00, IRQ_RX_DONE_MASK]);
+    spi.push(&[1, 0]);
+    spi.push(&[0xaa]);
+    spi.push(&[194, 0xf3, 0]);
+    let frame = radio.poll_rx().unwrap().unwrap();
+    assert_eq!((frame.data, frame.rssi_dbm, frame.snr_raw), (vec![0xaa], -118, 0xf3));
+
+    spi.push(&[0x00, IRQ_RX_DONE_MASK | IRQ_PAYLOAD_CRC_ERROR_MASK]);
+    spi.push(&[80, 0x28, 0]);
+    assert_eq!(radio.poll_rx().unwrap(), None);
+    assert_eq!(
+        radio.take_rx_crc_errors(),
+        RxCrcErrors {
+            count: 1,
+            last: Some(RxSignal {
+                rssi_dbm: -61,
+                snr_raw: 0x28
+            })
+        }
+    );
+}

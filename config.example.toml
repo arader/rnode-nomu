@@ -25,9 +25,10 @@ driver = "sx1262" # "sx1262" or "sim"
 # This can avoid strong interference, but also defers TX during initial floor sampling (~384 ms).
 # Applied at startup; a host can switch it with CMD_DIS_IA until the daemon restarts.
 avoid_interference = false
-# Highest TX power in dBm a host may set: 0 to 22, default 22 (the SX1262 maximum). Higher
-# requests are clamped and the host is told the clamped value, so keep Reticulum's txpower at or
-# below it. For regional limits, bench tests, or a front end that cannot take full power.
+# Highest TX power in dBm a host may set: 0 to 22, default 22 (the SX1262 maximum); with
+# [radio.pa], 0 to its max_output_dbm, by default that. Higher requests are clamped and the host is
+# told the clamped value, so keep Reticulum's txpower at or below it. For regional limits, bench
+# tests, or a front end that cannot take full power.
 # max_tx_power_dbm = 10
 
 [radio.sx1262]
@@ -38,6 +39,22 @@ dio2_as_rf_switch = true
 ocp = 0x28
 # busy_timeout_ms = 100 # default from rnode-sx126x / firmware sx126x::waitOnBusy()
 # tx_timeout_ms = 20000 # default from rnode-sx126x / firmware LORA_MODEM_TIMEOUT_MS
+
+# Power amplifier after the SX1262: untested on PA hardware, see README.md "[radio.pa]". The host's
+# TX power is then the power after the PA. Without this section the daemon drives a PA as if it were
+# the antenna, and the board puts out up to the PA's gain more than hosts ask for.
+# [radio.pa]
+# "gc1109" or "kct8103l", the Heltec V4's front ends with the firmware's tables, or "custom".
+# model = "gc1109"
+# custom only: gain in dB at modem outputs of 0, 1, 2, ... dBm; each equal to the one before or
+# 1 dB lower.
+# gain_db = [12, 12, 12, 11, 11, 10]
+# Highest TX power a host may set through the PA: default 28 for gc1109 and kct8103l, required for
+# custom; at most the table's highest output.
+# max_output_dbm = 28
+# Gain of the LNA before the SX1262, subtracted from RSSI: default 17 (gc1109), 21 (kct8103l),
+# 0 (custom).
+# lna_gain_db = 17
 
 [radio.sim]
 air_dir = "target/rnode-air"

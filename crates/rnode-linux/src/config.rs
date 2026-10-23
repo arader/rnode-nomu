@@ -2,6 +2,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rnode_core::pa::ExternalPa;
 use serde::Deserialize;
 
 use crate::pty::PtyPermissions;
@@ -85,13 +86,14 @@ pub struct RadioConfig {
     /// Highest TX power in dBm the host may set (`rnode_core::NodeConfig::max_tx_power`). Higher
     /// `CMD_TXPOWER` requests and saved settings are clamped to it, and the node reports the
     /// clamped value back, as firmware `kiss_indicate_txpower()` reports the power it applied.
-    /// Unset, it is the driver's maximum, [`RadioDriver::max_tx_power_dbm`].
+    /// Unset, it is [`RadioConfig::tx_power_limit_dbm`]: the driver's maximum, or with
+    /// `[radio.pa]` the PA's maximum output.
     ///
-    /// [`Config::validate`] accepts 0 up to that maximum:
+    /// [`Config::validate`] accepts 0 up to that limit:
     /// - Not below 0: the `CMD_TXPOWER` byte is unsigned dBm, as in firmware `serial_callback()`,
     ///   and Reticulum's `RNodeInterface` rejects a `txpower` below 0, so no host asks for less;
     ///   `NodeConfig::max_tx_power` is a `u8` too.
-    /// - Not above the driver's maximum: the modem cannot go higher, and while the radio is off
+    /// - Not above the limit: the modem, or the PA, cannot go higher, and while the radio is off
     ///   the node echoes a request clamped only to the ceiling. A host asking for, say, 25 dBm
     ///   would be told 25 dBm and transmit at 22, instead of getting the mismatch that the
     ///   default ceiling gives it.
@@ -101,6 +103,10 @@ pub struct RadioConfig {
     pub sx1262: Sx1262Config,
     #[serde(default)]
     pub sim: SimConfig,
+    /// `[radio.pa]`: the power amplifier between the modem and the antenna, if the board has one,
+    /// and the LNA that such front ends put before the modem.
+    #[serde(default)]
+    pub pa: Option<PaConfig>,
 }
 
 impl Default for RadioConfig {
@@ -111,7 +117,28 @@ impl Default for RadioConfig {
             max_tx_power_dbm: None,
             sx1262: Sx1262Config::default(),
             sim: SimConfig::default(),
+            pa: None,
         }
+    }
+}
+
+impl RadioConfig {
+    /// The highest TX power in dBm a host may set before `max_tx_power_dbm` lowers it: the PA's
+    /// `max_output_dbm` with `[radio.pa]` (firmware `PA_MAX_OUTPUT`), otherwise the driver's
+    /// maximum, [`RadioDriver::max_tx_power_dbm`].
+    pub fn tx_power_limit_dbm(&self) -> u8 {
+        self.pa
+            .as_ref()
+            .map_or(self.driver.max_tx_power_dbm(), PaConfig::max_output_dbm)
+    }
+
+    /// The `rnode-sx126x` driver configuration: `[radio.sx1262]`, with the LNA gain of
+    /// `[radio.pa]`.
+    pub fn sx1262_driver_config(&self) -> Result<rnode_sx126x::Config, ConfigError> {
+        Ok(rnode_sx126x::Config {
+            lna_gain_db: self.pa.as_ref().map_or(0, PaConfig::lna_gain_db),
+            ..self.sx1262.driver_config()?
+        })
     }
 }
 
@@ -122,10 +149,11 @@ pub enum RadioDriver {
 }
 
 impl RadioDriver {
-    /// The most TX power in dBm the driver's modem can be set to: the default and the upper bound
-    /// of `radio.max_tx_power_dbm`. Both drivers clamp to 22 dBm, the SX1262 without an external
-    /// PA (firmware `sx126x::setTxPower()`, and the `CMD_TXPOWER` handler's `txp > 22` clamp for
-    /// SX1262 boards without `HAS_LORA_PA`); the simulator stands in for an SX1262.
+    /// The most TX power in dBm the driver's modem can be set to: without `[radio.pa]`, the
+    /// default and the upper bound of `radio.max_tx_power_dbm`. Both drivers clamp to 22 dBm, the
+    /// SX1262 without an external PA (firmware `sx126x::setTxPower()`, and the `CMD_TXPOWER`
+    /// handler's `txp > 22` clamp for SX1262 boards without `HAS_LORA_PA`); the simulator stands
+    /// in for an SX1262.
     pub fn max_tx_power_dbm(self) -> u8 {
         match self {
             Self::Sx1262 | Self::Sim => 22,
@@ -197,7 +225,9 @@ impl Default for Sx1262Config {
 }
 
 impl Sx1262Config {
-    /// The `rnode-sx126x` driver configuration. Unset timeouts inherit the driver's defaults.
+    /// The `rnode-sx126x` driver configuration of this section alone. Unset timeouts inherit the
+    /// driver's defaults, and the LNA gain is the driver's default of 0: it comes from
+    /// `[radio.pa]`, which [`RadioConfig::sx1262_driver_config`] adds.
     pub fn driver_config(&self) -> Result<rnode_sx126x::Config, ConfigError> {
         let defaults = rnode_sx126x::Config::default();
         Ok(rnode_sx126x::Config {
@@ -206,6 +236,7 @@ impl Sx1262Config {
             ocp: self.ocp,
             busy_timeout_ms: self.busy_timeout_ms.unwrap_or(defaults.busy_timeout_ms),
             tx_timeout_ms: self.tx_timeout_ms.unwrap_or(defaults.tx_timeout_ms),
+            lna_gain_db: defaults.lna_gain_db,
         })
     }
 }
@@ -224,6 +255,195 @@ fn default_ocp() -> u8 {
 }
 fn default_true() -> bool {
     true
+}
+
+/// The PA models of `[radio.pa] model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaModel {
+    /// The GC1109 front end of the Heltec WiFi LoRa 32 V4 (firmware `LORA_PA_GC1109`).
+    Gc1109,
+    /// The KCT8103L front end of the Heltec WiFi LoRa 32 V4 (firmware `LORA_PA_KCT8103L`).
+    Kct8103l,
+    /// A gain table from `gain_db`.
+    Custom,
+}
+
+impl<'de> Deserialize<'de> for PaModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "gc1109" => Ok(Self::Gc1109),
+            "kct8103l" => Ok(Self::Kct8103l),
+            "custom" => Ok(Self::Custom),
+            _ => Err(serde::de::Error::custom(
+                "radio.pa.model must be \"gc1109\", \"kct8103l\" or \"custom\"",
+            )),
+        }
+    }
+}
+
+impl fmt::Display for PaModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Gc1109 => "gc1109",
+            Self::Kct8103l => "kct8103l",
+            Self::Custom => "custom",
+        })
+    }
+}
+
+/// Most entries of a custom `radio.pa.gain_db`: one for each modem output from 0 to 22 dBm, the
+/// SX1262's range.
+pub const PA_GAIN_POINTS_MAX: usize = 23;
+/// Highest gain in dB a custom `radio.pa.gain_db` entry may have: more than any LoRa front end
+/// adds, to catch typos.
+pub const PA_GAIN_DB_MAX: i64 = 40;
+/// Highest `radio.pa.lna_gain_db`. The weakest RSSI the SX1262 reports is −127 dBm; less 30 dB it
+/// is −157 dBm, the lowest RSSI the host's byte can carry (`RSSI_OFFSET`, 157). A higher gain would
+/// wrap weak signals around to strong ones, in the firmware as here.
+pub const LNA_GAIN_DB_MAX: i64 = 30;
+
+/// `[radio.pa]`: an external power amplifier after the modem (firmware `HAS_LORA_PA`) and the
+/// gain of the LNA before it on receive (firmware `HAS_LORA_LNA`). It is checked as it is read, so
+/// a `PaConfig` always describes a PA the node can map TX power through.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "PaToml")]
+pub struct PaConfig {
+    model: PaModel,
+    external_pa: ExternalPa,
+    lna_gain_db: u8,
+}
+
+/// `[radio.pa]` as written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaToml {
+    model: PaModel,
+    #[serde(default)]
+    gain_db: Option<Vec<i64>>,
+    #[serde(default)]
+    max_output_dbm: Option<i64>,
+    #[serde(default)]
+    lna_gain_db: Option<i64>,
+}
+
+impl TryFrom<PaToml> for PaConfig {
+    type Error = String;
+
+    fn try_from(toml: PaToml) -> Result<Self, Self::Error> {
+        let model = toml.model;
+        let (gain_db, default_max_output_dbm, default_lna_gain_db) = match model {
+            PaModel::Gc1109 | PaModel::Kct8103l => {
+                if toml.gain_db.is_some() {
+                    return Err(format!(
+                        "radio.pa.gain_db is only for model = \"custom\"; model = \"{model}\" uses the firmware's \
+                         gain table"
+                    ));
+                }
+                let (pa, lna_gain_db) = match model {
+                    // Firmware `LORA_LNA_GAIN` and `LORA_LNA_KCT8103L_GAIN` (`Boards.h`).
+                    PaModel::Gc1109 => (ExternalPa::gc1109(), 17),
+                    _ => (ExternalPa::kct8103l(), 21),
+                };
+                (pa.gain_db().to_vec(), Some(pa.max_output_dbm()), lna_gain_db)
+            }
+            PaModel::Custom => {
+                let gain_db = toml
+                    .gain_db
+                    .ok_or("radio.pa.gain_db is required for model = \"custom\"")?;
+                (custom_gain_table(&gain_db)?, None, 0)
+            }
+        };
+        // Each gain is at most 1 dB below the one before, so the last output is the highest.
+        let highest_output_dbm = gain_db.len() - 1 + usize::from(gain_db[gain_db.len() - 1]);
+        let max_output_dbm = match toml.max_output_dbm {
+            Some(dbm) => u8::try_from(dbm)
+                .ok()
+                .filter(|&dbm| usize::from(dbm) <= highest_output_dbm)
+                .ok_or_else(|| {
+                    format!(
+                        "radio.pa.max_output_dbm = {dbm} is out of range: 0 to {highest_output_dbm} dBm, the \
+                         highest output of the {model} gain table"
+                    )
+                })?,
+            None => default_max_output_dbm.ok_or("radio.pa.max_output_dbm is required for model = \"custom\"")?,
+        };
+        let lna_gain_db = match toml.lna_gain_db {
+            Some(db) => u8::try_from(db)
+                .ok()
+                .filter(|&db| i64::from(db) <= LNA_GAIN_DB_MAX)
+                .ok_or_else(|| format!("radio.pa.lna_gain_db = {db} is out of range: 0 to {LNA_GAIN_DB_MAX} dB"))?,
+            None => default_lna_gain_db,
+        };
+        let external_pa = ExternalPa::new(gain_db, max_output_dbm).map_err(|e| format!("radio.pa: {e}"))?;
+        Ok(Self {
+            model,
+            external_pa,
+            lna_gain_db,
+        })
+    }
+}
+
+/// A custom `radio.pa.gain_db`: 1 to [`PA_GAIN_POINTS_MAX`] entries of 0 to [`PA_GAIN_DB_MAX`] dB,
+/// each equal to the one before or 1 dB lower. Then the PA's output, modem output plus gain, rises
+/// by 1 or 0 dB with each dB of modem output, as in the firmware's tables, and the firmware's
+/// mapping (`rnode_core::pa`) hits every power from the table's lowest output to its highest. With
+/// a gain that grows, it would set the modem below the PA's minimum for the powers the table skips;
+/// with one that drops faster, it would miss powers that a later entry reaches, and report less
+/// than the modem then puts out.
+fn custom_gain_table(gain_db: &[i64]) -> Result<Vec<u8>, String> {
+    if !(1..=PA_GAIN_POINTS_MAX).contains(&gain_db.len()) {
+        return Err(format!(
+            "radio.pa.gain_db must have 1 to {PA_GAIN_POINTS_MAX} entries, the gain in dB at modem outputs from \
+             0 dBm up; it has {}",
+            gain_db.len()
+        ));
+    }
+    let mut table = Vec::with_capacity(gain_db.len());
+    for (i, &gain) in gain_db.iter().enumerate() {
+        let gain = u8::try_from(gain)
+            .ok()
+            .filter(|&gain| i64::from(gain) <= PA_GAIN_DB_MAX)
+            .ok_or_else(|| format!("radio.pa.gain_db[{i}] = {gain} is out of range: 0 to {PA_GAIN_DB_MAX} dB"))?;
+        if let Some(&previous) = table.last() {
+            if gain > previous || gain + 1 < previous {
+                return Err(format!(
+                    "radio.pa.gain_db[{i}] = {gain} after {previous}: each gain must equal the one before or be \
+                     1 dB lower, as in the firmware's tables, so that the PA's output rises by 1 or 0 dB per dB \
+                     of modem output; RNode_Firmware's mapping, which the daemon follows, gets some powers wrong \
+                     otherwise"
+                ));
+            }
+        }
+        table.push(gain);
+    }
+    Ok(table)
+}
+
+impl PaConfig {
+    /// `model`.
+    pub fn model(&self) -> PaModel {
+        self.model
+    }
+
+    /// The gain table and maximum output the node maps TX power through
+    /// (`rnode_core::NodeConfig::external_pa`).
+    pub fn external_pa(&self) -> &ExternalPa {
+        &self.external_pa
+    }
+
+    /// `max_output_dbm`: the highest TX power in dBm a host may set through the PA.
+    pub fn max_output_dbm(&self) -> u8 {
+        self.external_pa.max_output_dbm()
+    }
+
+    /// `lna_gain_db`: the gain in dB that the SX1262 driver subtracts from the RSSI it reads.
+    pub fn lna_gain_db(&self) -> u8 {
+        self.lna_gain_db
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -391,16 +611,23 @@ impl Config {
     }
 
     /// The `rnode_core::Node` configuration this file selects.
+    ///
+    /// With `[radio.pa]` the node maps TX power through the PA's gain table with either driver;
+    /// the LNA's noise-floor rule (`NodeConfig::external_lna`) only applies to the SX1262, as the
+    /// simulated radio reports `rssi_dbm` as configured, with no LNA gain to vary.
     pub fn node_config(&self) -> rnode_core::NodeConfig {
-        let driver_max = self.radio.driver.max_tx_power_dbm();
+        let limit = self.radio.tx_power_limit_dbm();
         rnode_core::NodeConfig {
             avoid_interference: self.radio.avoid_interference,
-            // `validate()` keeps the setting within 0..=driver_max; clamping keeps a `Config` built
-            // without it within the driver's range too, and makes the cast lossless.
+            // `validate()` keeps the setting within 0..=limit; clamping keeps a `Config` built
+            // without it within the limit too, and makes the cast lossless.
             max_tx_power: self
                 .radio
                 .max_tx_power_dbm
-                .map_or(driver_max, |dbm| dbm.clamp(0, i64::from(driver_max)) as u8),
+                .map_or(limit, |dbm| dbm.clamp(0, i64::from(limit)) as u8),
+            external_pa: self.radio.pa.as_ref().map(|pa| pa.external_pa().clone()),
+            external_lna: self.radio.driver == RadioDriver::Sx1262
+                && self.radio.pa.as_ref().is_some_and(|pa| pa.lna_gain_db() > 0),
             ..rnode_core::NodeConfig::default()
         }
     }
@@ -476,14 +703,21 @@ impl Config {
         let Some(dbm) = self.radio.max_tx_power_dbm else {
             return Ok(());
         };
-        let max = self.radio.driver.max_tx_power_dbm();
+        let max = self.radio.tx_power_limit_dbm();
         if (0..=i64::from(max)).contains(&dbm) {
             return Ok(());
         }
-        Err(ConfigError::Invalid(format!(
-            "radio.max_tx_power_dbm = {dbm} is out of range; the {} driver allows 0 to {max} dBm",
-            self.radio.driver
-        )))
+        Err(ConfigError::Invalid(match &self.radio.pa {
+            None => format!(
+                "radio.max_tx_power_dbm = {dbm} is out of range; the {} driver allows 0 to {max} dBm",
+                self.radio.driver
+            ),
+            Some(pa) => format!(
+                "radio.max_tx_power_dbm = {dbm} is out of range; with the {} PA of [radio.pa] it allows 0 to \
+                 {max} dBm, its max_output_dbm",
+                pa.model()
+            ),
+        }))
     }
 }
 

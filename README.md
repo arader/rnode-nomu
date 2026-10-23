@@ -6,8 +6,9 @@ pseudo-terminal (PTY) that speaks the RNode KISS host protocol. Reticulum's `RNo
 any other RNode host, uses that PTY exactly like the serial port of a USB-attached RNode running
 RNode_Firmware. On the air, rnode-linux interoperates with real RNodes.
 
-The supported modem is the Semtech SX1262. The reference platform is the Clockwork uConsole (CM5)
-with the HackerGadgets AIO V2 extension board. A simulated radio lets you run everything, including
+The supported modem is the Semtech SX1262, optionally with a power amplifier after it (not yet
+tested on such hardware). The reference platform is the Clockwork uConsole (CM5) with the
+HackerGadgets AIO V2 extension board. A simulated radio lets you run everything, including
 Reticulum end-to-end tests, on any Linux or macOS machine without radio hardware.
 
 Behaviour follows [RNode_Firmware](https://github.com/markqvist/RNode_Firmware) v1.86 (commit
@@ -157,9 +158,16 @@ is off, the loop waits for at most 50 ms between checks.
   illegal in other regions: Europe, for example, uses 863–870 MHz with duty-cycle limits.
 - **rnode-linux enforces no regional rules.** The host (Reticulum) chooses the frequency,
   bandwidth, spreading factor, coding rate and TX power over KISS, or they come from the saved
-  settings file. The daemon only caps TX power at the SX1262's 22 dBm, or at a lower ceiling you
-  set with [`[radio] max_tx_power_dbm`](#radio). Reticulum's
+  settings file. The daemon only caps TX power at the SX1262's 22 dBm, or with a power amplifier
+  at its [`max_output_dbm`](#radiopa), or at a lower ceiling you set with
+  [`[radio] max_tx_power_dbm`](#radio). Reticulum's
   `airtime_limit_short` and `airtime_limit_long` options can help you stay within a duty cycle.
+- **A power amplifier needs `[radio.pa]`.** With an amplifier after the SX1262, the host's TX
+  power is the power after the amplifier, and [`[radio.pa]`](#radiopa) tells the daemon how much
+  the amplifier adds. Without it, or with a wrong gain table, the daemon drives the amplifier as if
+  it were the antenna, and the board puts out up to the amplifier's gain more than the host asked
+  for. Support for amplifiers is untested on hardware: measure the output into a dummy load
+  before you transmit through one.
 - **Attach an antenna or a dummy load before transmitting.** Transmitting into an open RF port can
   damage the power amplifier.
 - **Start with low power** (the examples use 2 dBm) and raise it only as far as you need and are
@@ -552,6 +560,7 @@ resent it. Every packet showed up in the daemon's debug log.
    | Plain crystal, no TCXO | leave `tcxo_voltage` unset |
    | RF switch driven by DIO2 | `dio2_as_rf_switch = true` (the default) |
    | RF switch driven some other way | `dio2_as_rf_switch = false` |
+   | Power amplifier after the SX1262 | [`[radio.pa]`](#radiopa) with its gain table |
 
    Modules with separate RX-enable and TX-enable pins are usually wired with TXEN driven by DIO2 and
    RXEN by a host GPIO. rnode-linux supports exactly that, like RNode_Firmware; it has no TXEN line.
@@ -567,7 +576,8 @@ The daemon reads one TOML file. It contains only how the hardware is wired and h
 behaves. Radio link parameters (frequency, bandwidth, spreading factor, coding rate, TX power) are
 not in it: the host sets them over KISS, as with any RNode, and `CMD_CONF_SAVE` stores them in the
 [saved settings file](#saved-radio-settings). The config can only cap the TX power, with
-[`max_tx_power_dbm`](#radio).
+[`max_tx_power_dbm`](#radio), and describe a power amplifier after the modem, with
+[`[radio.pa]`](#radiopa), whose gain the host's TX power then includes.
 
 - Unknown sections and keys are errors, so typos fail at startup instead of being ignored.
 - Relative paths resolve against the daemon's working directory, not the config file's location.
@@ -634,7 +644,7 @@ is a matter for the device-tree overlay or the board.
 | --- | --- | --- | --- |
 | `driver` | string | `"sx1262"` | `"sx1262"` for the hardware driver, `"sim"` for the simulator |
 | `avoid_interference` | bool | `false` | Interference avoidance at startup; see below |
-| `max_tx_power_dbm` | integer | `22` | Highest TX power in dBm a host may set, from 0 to 22; see below |
+| `max_tx_power_dbm` | integer | `22`, or `max_output_dbm` with [`[radio.pa]`](#radiopa) | Highest TX power in dBm a host may set, from 0 to 22, or to `max_output_dbm` with `[radio.pa]`; see below |
 
 **`avoid_interference`** decides whether CSMA/CA treats strong non-LoRa signals as a busy channel
 (firmware `avoid_interference`). When it is on, the channel counts as busy while the RSSI is more
@@ -651,8 +661,9 @@ than 11 dB above the measured noise floor and no LoRa carrier is detected (firmw
   value in EEPROM and reboots, rnode-linux keeps it until the daemon exits (including across
   `CMD_RESET`) and logs it at `INFO`. The config file stays the persistent setting.
 
-**`max_tx_power_dbm`** caps the TX power below the SX1262's 22 dBm, for a regional limit, a bench
-setup, or a module or antenna that cannot take full power:
+**`max_tx_power_dbm`** caps the TX power below the SX1262's 22 dBm, or below a power amplifier's
+`max_output_dbm`, for a regional limit, a bench setup, or a module or antenna that cannot take full
+power:
 
 - A host's `CMD_TXPOWER` above the ceiling sets the ceiling, and the daemon reports the clamped
   value back, as RNode_Firmware's `kiss_indicate_txpower()` reports the power it applied. Settings
@@ -670,6 +681,14 @@ setup, or a module or antenna that cannot take full power:
   fatal: load /etc/rnode-linux.toml: invalid config: radio.max_tx_power_dbm = 30 is out of range; the sx1262 driver allows 0 to 22 dBm
   ```
 
+- With [`[radio.pa]`](#radiopa), the TX power is the power after the amplifier, and the range and
+  the default become its `max_output_dbm`, as the firmware clamps `CMD_TXPOWER` to `PA_MAX_OUTPUT`
+  on a board with an amplifier:
+
+  ```text
+  fatal: load /etc/rnode-linux.toml: invalid config: radio.max_tx_power_dbm = 30 is out of range; with the gc1109 PA of [radio.pa] it allows 0 to 28 dBm, its max_output_dbm
+  ```
+
 - The ceiling limits the power the modem is set to. Antenna gain comes on top of it, so check the
   radiated power against your limit.
 
@@ -684,6 +703,118 @@ Board options of the SX1262 driver. All of them are optional.
 | `ocp` | integer | `0x28` | Over-current protection register value, in 2.5 mA steps (`0x28` = 100 mA); firmware `OCP_TUNED` |
 | `busy_timeout_ms` | integer | `100` | How long to wait for BUSY to go low before a command fails with `SX126x BUSY timeout` (firmware `waitOnBusy()` waits 100 ms) |
 | `tx_timeout_ms` | integer | `20000` | Minimum TX-done wait (firmware `LORA_MODEM_TIMEOUT_MS`). The driver waits for `max(tx_timeout_ms, 2 × airtime + 1000 ms)`, so long frames at SF12 are not cut short |
+
+### `[radio.pa]`
+
+A power amplifier (PA) after the SX1262, as on boards and modules that put out more than the
+SX1262's 22 dBm, and the low-noise amplifier (LNA) that such front ends put before it on receive.
+Leave the section out for a modem that drives the antenna itself.
+
+> **Untested on PA hardware.** The mapping below is checked against RNode_Firmware's own functions,
+> but no board with an amplifier has run it yet, and no measurement backs a `custom` table. Check
+> the output power into a dummy load before you transmit through an amplifier.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `model` | string | required | `"gc1109"` or `"kct8103l"`, the two front ends of the Heltec WiFi LoRa 32 V4, with the firmware's gain tables (`Boards.h`); `"custom"` for your own table in `gain_db` |
+| `gain_db` | array of integers | none | For `"custom"`, and required there: the PA's gain in dB at each modem output from 0 dBm up, one entry per dB. 1 to 23 entries (0 to 22 dBm), of 0 to 40 dB, each equal to the one before or 1 dB lower |
+| `max_output_dbm` | integer | `28` for the named models; required for `"custom"` | Highest TX power in dBm a host may set through the PA (firmware `PA_MAX_OUTPUT`), from 0 up to the table's highest output: the last entry's modem output plus its gain, 28 dBm for both named models. Also the default and the upper bound of [`max_tx_power_dbm`](#radio) |
+| `lna_gain_db` | integer | `17` for `"gc1109"`, `21` for `"kct8103l"`, `0` for `"custom"` | Gain in dB of the LNA before the SX1262 (firmware `LORA_LNA_GAIN`, `LORA_LNA_KCT8103L_GAIN`), 0 to 30. Set 0 if the receive path has none |
+
+```toml
+[radio.pa]
+model = "gc1109"
+# max_output_dbm = 28 # lower it to cap what hosts may set
+# lna_gain_db = 17    # 0 if the receive path has no LNA
+```
+
+A `custom` table, with made-up values for illustration only:
+
+```toml
+[radio.pa]
+model = "custom"
+# Gain in dB at modem outputs of 0, 1, 2, ... 15 dBm.
+gain_db = [12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 11, 10, 10, 9, 8]
+max_output_dbm = 23 # 15 + 8, the highest output of the table
+lna_gain_db = 0
+```
+
+**How the TX power maps.** With `[radio.pa]`, the TX power a host sets (Reticulum's `txpower`,
+`CMD_TXPOWER`) is the power after the PA. The daemon follows RNode_Firmware's `setTXPower()` on a
+board with a PA (`HAS_LORA_PA`):
+
+1. It clamps the request to `max_output_dbm`, or to [`max_tx_power_dbm`](#radio) if that is lower.
+2. While the radio is on, it sets the SX1262 to the modem output whose power after the PA, the
+   modem output plus its gain, reaches the request (`map_target_power_to_modem_output()`).
+3. It reports to the host the power that this modem output gives after the PA
+   (`map_modem_output_to_target_power()`), and `CMD_CONF_SAVE` saves that power.
+
+Through the GC1109, for example:
+
+| Host asks for | SX1262 set to | Host is told |
+| --- | --- | --- |
+| 0 dBm | −9 dBm, its minimum (the table gives −11 dBm) | 11 dBm |
+| 10 dBm | −1 dBm | 11 dBm |
+| 11 dBm | 0 dBm | 11 dBm |
+| 17 dBm | 6 dBm | 17 dBm |
+| 22 dBm | 11 dBm | 22 dBm |
+| 27 dBm | 17 dBm | 27 dBm |
+| 28 dBm or more | 19 dBm | 28 dBm |
+
+**What the host is told** is the power the modem output gives after the PA, as the firmware's
+`kiss_indicate_txpower()` reports it, not always the power the host asked for:
+
+- Below the PA's minimum, its output at a modem output of 0 dBm (11 dBm through the GC1109, 13 dBm
+  through the KCT8103L), the SX1262 is set below 0 dBm, down to its −9 dBm minimum, and the host
+  is told the minimum. Reticulum then sees a different power than its `txpower` and does not bring
+  the interface up: give it at least the PA's minimum.
+- While the radio is off, the daemon reports the request as clamped, before the mapping, as the
+  firmware maps only when it programs the modem. Once the radio is on, it reports the mapped power.
+- If the SX1262 does not take a TX power, the daemon keeps the modem output it last took and
+  reports the power that gives; the `radio set_tx_power(…)` warning names modem outputs (see
+  [Warnings](#warnings)).
+
+The `radio online` and `radio settings changed` lines show the power after the PA. At `debug`,
+each TX power the daemon programs gets a line with the modem output. From a simulated daemon with
+`model = "gc1109"`, whose host turned the radio on at 17 dBm and then asked for 0 dBm:
+
+```text
+[2026-10-23T06:37:13Z DEBUG rnode_core::node] TX power 17 dBm through the external PA: modem output 6 dBm, reported as 17 dBm
+[2026-10-23T06:37:13Z INFO  rnode_core::node] radio online (host request): 914.875 MHz, 125 kHz, SF7, CR 4/5, 17 dBm
+[2026-10-23T06:37:13Z DEBUG rnode_core::node] TX power 0 dBm through the external PA: modem output -11 dBm, -9 dBm in use, reported as 11 dBm
+[2026-10-23T06:37:13Z INFO  rnode_core::node] radio settings changed: 914.875 MHz, 125 kHz, SF7, CR 4/5, 11 dBm
+```
+
+**A `custom` table** gives the gain at modem outputs 0, 1, 2, … dBm. To measure one, leave
+`[radio.pa]` out, so that the host's TX power is the SX1262's output, and set
+[`max_tx_power_dbm`](#radio) to the highest output you want to measure: the board then puts out up
+to the PA's gain more than that. Measure the power after the PA at each TX power from 0 dBm up with
+a power meter or a calibrated SDR, into a dummy load and within the limits that apply to you. Each
+entry is the measured power minus the TX power. The rule that each gain equals the one before or is
+1 dB lower keeps the PA's output rising by 1 or 0 dB per step, as in the firmware's tables: the
+firmware's mapping, which the daemon follows, gets some powers wrong otherwise.
+
+**The LNA.** `lna_gain_db` is subtracted from every RSSI the SX1262 driver reads, as firmware
+`currentRssi()` and `packetRssi()` subtract `lora_lna_gain`, so that RSSI, noise floor and the
+packet RSSI the host gets refer to the antenna. With a gain above 0, the daemon also leaves RSSI
+samples more than 12 dB below the noise floor out of it (firmware `LORA_LNA_GVT`), as the firmware
+does because the LNA's gain varies while it re-calibrates. The firmware's ESP32 builds, the Heltec
+V4 among them, report the packet RSSI without subtracting the gain; see
+[Differences from RNode_Firmware](#differences-from-rnode_firmware).
+
+**With `driver = "sim"`** the daemon maps the TX power the same way, so you can try a configuration
+without hardware. `lna_gain_db` has no effect there: the simulated radio reports `rssi_dbm` as
+configured.
+
+**Not ported** from the firmware's Heltec V4 support, because it is specific to that board:
+
+- telling the GC1109 from the KCT8103L by reading a pin (`LORA_PA_CSD`): set `model` instead;
+- the PA's enable lines `LORA_PA_PWR_EN`, `LORA_PA_CSD` and `LORA_PA_CPS`, which the firmware
+  drives high once the radio starts and low when the board goes to sleep: [`[gpio] power`](#gpio)
+  can hold one supply line on while the daemon runs;
+- the KCT8103L's TX enable line `LORA_PA_CTX`, which the firmware drives high for each transmission;
+- the V4's interference rule, which compares the RSSI with −89 dBm (`LNA_GD_LIMIT`) instead of the
+  noise floor while the noise floor is at or below −109 dBm (`LNA_GD_THRSHLD`).
 
 ### `[radio.sim]`
 
@@ -756,7 +887,11 @@ The radio then stays off after a restart or a `CMD_RESET` until a host configure
 - `radio.driver = "sx1262"` and `[spi]` or `[gpio]` is missing, or `tcxo_voltage` is not one of the
   listed voltages;
 - `radio.driver = "sim"` and `loss` is outside 0.0–1.0;
-- `radio.max_tx_power_dbm` is outside 0–22;
+- `radio.max_tx_power_dbm` is outside 0–22, or with `[radio.pa]` outside 0 to its `max_output_dbm`;
+- `[radio.pa]` names no or an unknown `model`, has `gain_db` with a named model, lacks `gain_db` or
+  `max_output_dbm` with `"custom"`, or has a `gain_db`, `max_output_dbm` or `lna_gain_db` outside
+  the rules of [`[radio.pa]`](#radiopa). These come as `failed to parse …`, with the line of
+  `[radio.pa]` and the reason;
 - `spi.speed_hz` is 0;
 - `pty.mode` is not an octal permission string, sets setuid, setgid or sticky, or takes read or
   write access away from the owner;
@@ -791,7 +926,10 @@ it and renames it into place, with mode `0600`, and creates missing parent direc
 file means nothing is saved; a corrupt one is ignored with a `WARN` line.
 
 `tx_power` is in dBm, 0 or more. A value above 22 dBm, or above [`max_tx_power_dbm`](#radio), is
-lowered to that limit when the file is loaded. Builds before the fix for issue #75 read the host's
+lowered to that limit when the file is loaded; with [`[radio.pa]`](#radiopa) the limit is its
+`max_output_dbm`. With `[radio.pa]`, `tx_power` is the power after the PA, and `CMD_CONF_SAVE`
+saves the power the daemon reported, as the firmware's EEPROM gets the power its `setTXPower()`
+mapped. Builds before the fix for issue #75 read the host's
 power as signed, and saved −9…−2 dBm as 247…254; read as unsigned, those would mean the highest
 power allowed. So the daemon ignores a file whose `tx_power` is 128 to 254, logs a `WARN` line, and
 leaves the radio off until a host configures it:
@@ -848,6 +986,9 @@ spreading factor.
   and aborts with "the reported radio parameters did not match your configuration".
 - `txpower` may be at most 22 dBm, the SX1262 limit, or the daemon's
   [`max_tx_power_dbm`](#radio) if that is lower. Higher values are clamped and abort the same way.
+  With [`[radio.pa]`](#radiopa), `txpower` is the power after the PA: from the PA's minimum
+  (11 dBm through the GC1109, 13 dBm through the KCT8103L) up to its `max_output_dbm`. Below the
+  minimum, the daemon reports the minimum, as the firmware does, and Reticulum aborts the same way.
 - `airtime_limit_short` and `airtime_limit_long` work as with any RNode.
 - Start the daemon before Reticulum, or let Reticulum retry: it tries to reopen the port every
   5 seconds.
@@ -1018,6 +1159,8 @@ Daemon B came up from its saved settings, without a host:
 - `radio settings changed` appears when a host retunes the radio while it is on. It is logged
   100 ms after the first configuration command of a burst, once per burst, and only if the
   settings differ from the last line, so Reticulum's whole reconfiguration gives one line.
+- With [`[radio.pa]`](#radiopa), the TX power in these lines is the power after the PA; a `debug`
+  line gives the modem output.
 
 ### Packets at `debug`
 
@@ -1163,7 +1306,9 @@ running the daemon in the foreground with its log in a private file that you del
   value to the host. The host thus sees the mismatch: Reticulum does not bring the interface up
   when the frequency, bandwidth, TX power or spreading factor the radio reports differ from its
   configuration. `radio set_bandwidth(125 kHz) failed while restoring it: …` follows if setting the
-  old value back failed too.
+  old value back failed too. With [`[radio.pa]`](#radiopa), `set_tx_power` shows modem outputs,
+  before the PA: `radio set_tx_power(19 dBm) failed: …; keeping 6 dBm` through the GC1109 means
+  that a host asked for 28 dBm and the daemon kept 17 dBm.
 - `dropping host output because the PTY is not draining`: nobody reads the PTY, which is expected
   while no host is attached. It is logged once per stall, and again only after the PTY has taken a
   whole frame:
@@ -1432,6 +1577,10 @@ behaviour, except for these deliberate differences:
 - A received frame that fails its CRC is dropped as in the firmware, but the driver then reads its
   packet status (`GetPacketStatus`), a transaction the firmware does not make, for the
   [debug log](#packets-at-debug).
+- With an LNA ([`[radio.pa] lna_gain_db`](#radiopa)), the packet RSSI the host gets has the LNA's
+  gain taken out, like the channel RSSI and the noise floor. The firmware's ESP32 builds, the
+  Heltec V4 with its LNA among them, read the packet RSSI with `packetRssi(uint8_t)`, which leaves
+  the gain in, so a V4 reports received packets that much stronger.
 
 Some firmware behaviour that surprises people is the same in rnode-linux: `CMD_STAT_RSSI` before
 the first received packet reports −36 dBm (the firmware's −292 dBm placeholder after the RSSI
@@ -1447,11 +1596,15 @@ never answered on request; and data frames over 508 bytes are dropped without an
 - **SX1262 only.** Other modems need a driver; see [DRIVERS.md](DRIVERS.md).
 - **One modem per daemon.** For several modems, run one daemon per modem, each with its own config,
   PTY and settings file.
-- **TX power tops out at 22 dBm**, the SX1262 without an external amplifier;
-  [`max_tx_power_dbm`](#radio) sets a lower ceiling. Boards with an external amplifier, which need
-  the firmware's per-amplifier gain tables, are not supported yet (issue #73).
+- **TX power above 22 dBm needs a power amplifier, and that is untested.** Without one, TX power
+  tops out at the SX1262's 22 dBm. [`[radio.pa]`](#radiopa) maps the host's power through a PA's
+  gain table as the firmware does, up to its `max_output_dbm` (28 dBm for the Heltec V4's front
+  ends), but no board with a PA has run it yet. [`max_tx_power_dbm`](#radio) sets a lower ceiling.
+- **The firmware's board-specific PA control is not ported:** PA model detection and the Heltec
+  V4's enable lines and interference rule; see [`[radio.pa]`](#radiopa).
 - **One GPIO chip.** All of a modem's GPIO lines must be on the chip named by `[gpio] chip`.
-- **No TXEN line.** The RF switch is driven by DIO2, optionally with an RX-enable GPIO.
+- **No TXEN line.** The RF switch is driven by DIO2, optionally with an RX-enable GPIO. A PA's
+  TX-enable input, such as the KCT8103L's, cannot be driven from a host GPIO yet.
 - **Hardware support needs Linux;** other systems can only run the simulator.
 - **One host at a time.** The PTY is a serial port, so only one program can use it.
 
@@ -1460,7 +1613,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | Symptom | Cause and fix |
 | --- | --- |
 | `fatal: load config.toml: failed to read config.toml: No such file or directory (os error 2)` | No config in the working directory. Pass `--config /etc/rnode-linux.toml` |
-| ``fatal: load …: … unknown field `frequency`, expected one of `driver`, `avoid_interference`, `max_tx_power_dbm`, `sx1262`, `sim` `` | Link parameters do not belong in the config; the host sets them. Other unknown fields are usually typos |
+| ``fatal: load …: … unknown field `frequency`, expected one of `driver`, `avoid_interference`, `max_tx_power_dbm`, `sx1262`, `sim`, `pa` `` | Link parameters do not belong in the config; the host sets them. Other unknown fields are usually typos |
 | `fatal: load …: invalid config: [spi] is required when radio.driver = "sx1262"` | `driver` defaults to `"sx1262"`. Add `[spi]` and `[gpio]`, or set `driver = "sim"` |
 | `fatal: load …: invalid config: pty.group "…" is not a known group` | Create the group, or fix the name |
 | `fatal: sx1262 hardware daemon runs only on Linux` | Use the `sim` driver on other systems |
@@ -1476,7 +1629,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | `WARN … radio DCD failed: …`, `radio RSSI failed: …`, `radio RX service failed: …` | The modem stopped answering while the radio was on: power, wiring or SPI. Repeats are summarised every 10 s; an `INFO … recovered after …` line follows once the calls work again |
 | `WARN … modem timed out during TX` | The modem never reported TX done. Check `tcxo_voltage`, the power supply and `tx_timeout_ms`. The node resets after each timeout |
 | `WARN … ignoring saved radio settings: TX power 247 is out of range …` | An earlier build saved a negative power. Set `tx_power` in the settings file to the power you want, or delete the file (see [Saved radio settings](#saved-radio-settings)) |
-| Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm, or at most `max_tx_power_dbm` if you set it (see [Running with Reticulum](#running-with-reticulum)). If the daemon logged `radio set_… failed`, the modem rejected the setting; see [Warnings](#warnings) |
+| Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm, or at most `max_tx_power_dbm` if you set it (see [Running with Reticulum](#running-with-reticulum)). With `[radio.pa]`, use a `txpower` from the PA's minimum to its `max_output_dbm` (see [`[radio.pa]`](#radiopa)). If the daemon logged `radio set_… failed`, the modem rejected the setting; see [Warnings](#warnings) |
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
 | `rnodeconf`: "Could not download EEPROM from device" | rnode-linux has no EEPROM; see [Using rnodeconf](#using-rnodeconf) |

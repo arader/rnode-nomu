@@ -16,9 +16,10 @@ pub struct RadioSettings {
     pub spreading_factor: u8,
     /// Coding rate denominator (5–8).
     pub coding_rate: u8,
-    /// TX power in dBm as the host sent it, an unsigned byte; 0xFF means none was set. The node
-    /// ignores saved settings with a power from 128 to 254, which earlier builds wrote for
-    /// −9…−2 dBm (see [`crate::Node::boot`]).
+    /// TX power in dBm as the node reports it to the host, an unsigned byte: the host's request,
+    /// clamped and, with an external PA, mapped through its gain table (firmware `lora_txp`); 0xFF
+    /// means none was set. The node ignores saved settings with a power from 128 to 254, which
+    /// earlier builds wrote for −9…−2 dBm (see [`crate::Node::boot`]).
     pub tx_power: u8,
 }
 

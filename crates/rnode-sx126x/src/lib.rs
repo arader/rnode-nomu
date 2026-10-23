@@ -8,6 +8,13 @@
 //! SF12 and narrow bandwidths. This driver treats [`Config::tx_timeout_ms`] as a floor and scales
 //! the effective wait with the current packet airtime. The wait loop counts 1 ms delay iterations,
 //! so real wall time is somewhat longer than the nominal limit.
+//!
+//! On a board with an LNA in front of the modem, [`Config::lna_gain_db`] is subtracted from every
+//! RSSI the driver reads, as firmware `currentRssi()` and `packetRssi()` subtract `lora_lna_gain`
+//! with `HAS_LORA_LNA`. That includes the packet RSSI of received frames, where the firmware's
+//! ESP32 builds, the Heltec V4 with its LNA among them, call `packetRssi(uint8_t)`, which leaves
+//! the gain in. This driver deliberately compensates both, so that the packet RSSI the host gets
+//! and the channel RSSI and noise floor are measured at the same point, the antenna.
 
 use core::convert::Infallible;
 use core::fmt;
@@ -91,6 +98,11 @@ pub struct Config {
     /// that by waiting for `max(tx_timeout_ms, 2 × airtime + 1000)`; the loop counts 1 ms delay
     /// iterations, so wall-clock time is somewhat longer than the nominal value.
     pub tx_timeout_ms: u32,
+    /// Gain in dB of an LNA between the antenna and the modem, subtracted from every RSSI the
+    /// driver reads: [`Radio::current_rssi`], the packet RSSI of [`Radio::poll_rx`] and that of
+    /// frames dropped for a CRC error (firmware `lora_lna_gain`: `LORA_LNA_GAIN`, 17 dB, or
+    /// `LORA_LNA_KCT8103L_GAIN`, 21 dB, on the Heltec V4). 0 for boards without one.
+    pub lna_gain_db: u8,
 }
 
 impl Default for Config {
@@ -101,6 +113,7 @@ impl Default for Config {
             ocp: 0x28,
             busy_timeout_ms: 100,
             tx_timeout_ms: 20_000,
+            lna_gain_db: 0,
         }
     }
 }
@@ -483,12 +496,13 @@ where
         Ok(out)
     }
 
-    /// Firmware `sx126x::packetRssi()` and `packetSnrRaw()`, from one `GetPacketStatus` read.
+    /// Firmware `sx126x::packetRssi()` and `packetSnrRaw()`, from one `GetPacketStatus` read:
+    /// RssiPkt / 2, less [`Config::lna_gain_db`] (see the crate docs).
     fn packet_signal(&mut self) -> Result<RxSignal, Error<SPI::Error>> {
         let mut status = [0u8; 3];
         self.execute_opcode_read(OP_PACKET_STATUS, &mut status)?;
         Ok(RxSignal {
-            rssi_dbm: -(status[0] as i16) / 2,
+            rssi_dbm: -(status[0] as i16) / 2 - i16::from(self.config.lna_gain_db),
             snr_raw: status[1],
         })
     }
@@ -758,11 +772,11 @@ where
         Ok(carrier_detected)
     }
 
-    /// Firmware `sx126x::currentRssi()`.
+    /// Firmware `sx126x::currentRssi()`: RssiInst / 2, less [`Config::lna_gain_db`].
     fn current_rssi(&mut self) -> Result<i16, Self::Error> {
         let mut out = [0u8];
         self.execute_opcode_read(OP_CURRENT_RSSI, &mut out)?;
-        Ok(-(out[0] as i16) / 2)
+        Ok(-(out[0] as i16) / 2 - i16::from(self.config.lna_gain_db))
     }
 
     fn set_dcd_timing(&mut self, preamble_ms: u32, header_ms: u32) {

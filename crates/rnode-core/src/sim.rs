@@ -8,6 +8,7 @@ use crate::radio::{Radio, RxCrcErrors, RxFrame, RxSignal, TxOutcome};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +168,7 @@ impl SimMedium {
             preamble_calls: 0,
             tx_preambles: Vec::new(),
             crc_errors: RxCrcErrors::default(),
+            tx_power_range: i8::MIN..=i8::MAX,
         }
     }
 }
@@ -192,6 +194,7 @@ pub struct SimRadio {
     preamble_calls: usize,
     tx_preambles: Vec<u16>,
     crc_errors: RxCrcErrors,
+    tx_power_range: RangeInclusive<i8>,
 }
 
 impl SimRadio {
@@ -247,6 +250,13 @@ impl SimRadio {
     /// modem takes the preamble length.
     pub fn inject_preamble_length_errors(&mut self, count: usize) {
         self.preamble_failures = count;
+    }
+
+    /// Test aid: clamp the TX power [`Radio::set_tx_power`] sets to `range`, as a modem does, for
+    /// example to the SX1262's −9..=22 dBm (firmware `sx126x::setTxPower()`). By default any power
+    /// is taken as it is.
+    pub fn set_tx_power_range(&mut self, range: RangeInclusive<i8>) {
+        self.tx_power_range = range;
     }
 
     /// Test aid: the preamble length in symbols of each frame transmitted so far.
@@ -401,6 +411,7 @@ impl Radio for SimRadio {
         self.with_ep(|e| e.cr)
     }
     fn set_tx_power(&mut self, dbm: i8) -> Result<(), Self::Error> {
+        let dbm = dbm.clamp(*self.tx_power_range.start(), *self.tx_power_range.end());
         self.with_ep_mut(|e| e.tx_power = dbm);
         self.setter_result(Setter::TxPower)
     }

@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use nix::unistd::{Gid, Group};
 use rnode_core::NodeConfig;
-use rnode_linux::config::{Config, ConfigError, RadioDriver, Sx1262Config, TCXO_VOLTAGES};
+use rnode_core::pa::ExternalPa;
+use rnode_linux::config::{Config, ConfigError, PaModel, RadioDriver, Sx1262Config, TCXO_VOLTAGES};
 use rnode_linux::pty::PtyPermissions;
 use rnode_sx126x::TcxoVoltage;
 
@@ -247,6 +248,7 @@ fn sx1262_driver_config_inherits_driver_timeouts_when_unset() {
             ocp: 0x18,
             busy_timeout_ms: 250,
             tx_timeout_ms: 12_345,
+            lna_gain_db: 0,
         }
     );
 }
@@ -405,5 +407,252 @@ fn pty_permissions_that_defeat_their_purpose_warn() {
         warnings[0].contains("pty.group is set without pty.mode"),
         "{}",
         warnings[0]
+    );
+}
+
+/// A config with the `sx1262` driver, or the `sim` one, and `radio` appended: `[radio]` keys, then
+/// tables such as `[radio.pa]`.
+fn config_with_radio(driver: RadioDriver, radio: &str) -> Result<Config, ConfigError> {
+    let hardware = match driver {
+        RadioDriver::Sx1262 => "[spi]\ndevice = \"/dev/spidev0.0\"\n[gpio]\nreset = 1\nbusy = 2\ndio1 = 3\n",
+        RadioDriver::Sim => "",
+    };
+    Config::from_toml(&format!("{hardware}[radio]\ndriver = \"{driver}\"\n{radio}"))
+}
+
+/// The firmware's two Heltec V4 front ends: their tables (`Boards.h` `PA_GC1109_VALUES`,
+/// `PA_KCT8103L_VALUES`), `PA_MAX_OUTPUT` of 28 dBm, and the LNA gains `LORA_LNA_GAIN` (17 dB) and
+/// `LORA_LNA_KCT8103L_GAIN` (21 dB).
+#[test]
+fn radio_pa_models_take_the_firmware_tables_and_gains() {
+    for (model, name, pa, lna_gain_db) in [
+        (PaModel::Gc1109, "gc1109", ExternalPa::gc1109(), 17),
+        (PaModel::Kct8103l, "kct8103l", ExternalPa::kct8103l(), 21),
+    ] {
+        let cfg = config_with_radio(RadioDriver::Sx1262, &format!("[radio.pa]\nmodel = \"{name}\"\n")).unwrap();
+        let pa_config = cfg.radio.pa.as_ref().unwrap();
+        assert_eq!(pa_config.model(), model);
+        assert_eq!(pa_config.max_output_dbm(), 28, "{name}");
+        assert_eq!(pa_config.lna_gain_db(), lna_gain_db, "{name}");
+        assert_eq!(cfg.radio.tx_power_limit_dbm(), 28, "{name}");
+        assert_eq!(
+            cfg.node_config(),
+            NodeConfig {
+                max_tx_power: 28,
+                external_pa: Some(pa.clone()),
+                external_lna: true,
+                ..NodeConfig::default()
+            },
+            "{name}"
+        );
+        assert_eq!(
+            cfg.radio.sx1262_driver_config().unwrap(),
+            rnode_sx126x::Config {
+                lna_gain_db,
+                ..rnode_sx126x::Config::default()
+            },
+            "{name}"
+        );
+
+        // A lower maximum output, a ceiling below it, and no LNA.
+        let cfg = config_with_radio(
+            RadioDriver::Sx1262,
+            &format!("max_tx_power_dbm = 20\n[radio.pa]\nmodel = \"{name}\"\nmax_output_dbm = 25\nlna_gain_db = 0\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.node_config(),
+            NodeConfig {
+                max_tx_power: 20,
+                external_pa: Some(ExternalPa::new(pa.gain_db(), 25).unwrap()),
+                ..NodeConfig::default()
+            },
+            "{name}"
+        );
+        assert_eq!(cfg.radio.sx1262_driver_config().unwrap().lna_gain_db, 0, "{name}");
+    }
+    // Without [radio.pa], neither changes.
+    let cfg = config_with_radio(RadioDriver::Sx1262, "").unwrap();
+    assert_eq!(cfg.node_config(), NodeConfig::default());
+    assert_eq!(
+        cfg.radio.sx1262_driver_config().unwrap(),
+        rnode_sx126x::Config::default()
+    );
+}
+
+#[test]
+fn radio_pa_custom_takes_its_table_and_maximum() {
+    let cfg = config_with_radio(
+        RadioDriver::Sx1262,
+        "[radio.pa]\nmodel = \"custom\"\ngain_db = [12, 12, 12, 11, 11, 10]\nmax_output_dbm = 15\n",
+    )
+    .unwrap();
+    let pa = ExternalPa::new([12, 12, 12, 11, 11, 10], 15).unwrap();
+    assert_eq!(cfg.radio.pa.as_ref().unwrap().model(), PaModel::Custom);
+    assert_eq!(
+        cfg.node_config(),
+        NodeConfig {
+            max_tx_power: 15,
+            external_pa: Some(pa.clone()),
+            ..NodeConfig::default()
+        },
+        "no LNA by default"
+    );
+    assert_eq!(cfg.radio.sx1262_driver_config().unwrap().lna_gain_db, 0);
+
+    // The longest table, at the highest gains, reaching its highest output; an LNA.
+    let cfg = config_with_radio(
+        RadioDriver::Sx1262,
+        &format!(
+            "[radio.pa]\nmodel = \"custom\"\ngain_db = {:?}\nmax_output_dbm = 40\nlna_gain_db = 30\n",
+            [
+                40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18
+            ]
+        ),
+    )
+    .unwrap();
+    let pa_config = cfg.radio.pa.as_ref().unwrap();
+    assert_eq!(pa_config.external_pa().gain_db().len(), 23);
+    assert_eq!(pa_config.max_output_dbm(), 40);
+    assert!(cfg.node_config().external_lna);
+    assert_eq!(cfg.radio.sx1262_driver_config().unwrap().lna_gain_db, 30);
+}
+
+/// With the `sim` driver the node maps TX power through the PA as with the SX1262, but the LNA
+/// does not apply: the simulated radio reports `rssi_dbm` as it is configured.
+#[test]
+fn radio_pa_with_the_sim_driver_maps_tx_power_without_the_lna() {
+    let cfg = config_with_radio(RadioDriver::Sim, "[radio.pa]\nmodel = \"gc1109\"\n").unwrap();
+    assert_eq!(
+        cfg.node_config(),
+        NodeConfig {
+            max_tx_power: 28,
+            external_pa: Some(ExternalPa::gc1109()),
+            external_lna: false,
+            ..NodeConfig::default()
+        }
+    );
+}
+
+#[test]
+fn radio_pa_rejects_what_it_cannot_map() {
+    let rejected = [
+        (
+            "model = \"gc1110\"",
+            "radio.pa.model must be \"gc1109\", \"kct8103l\" or \"custom\"",
+        ),
+        ("max_output_dbm = 20", "missing field `model`"),
+        (
+            "model = \"gc1109\"\nmax_ouput_dbm = 20",
+            "unknown field `max_ouput_dbm`",
+        ),
+        (
+            "model = \"gc1109\"\ngain_db = [11]",
+            "radio.pa.gain_db is only for model = \"custom\"; model = \"gc1109\" uses the firmware's gain table",
+        ),
+        (
+            "model = \"custom\"\nmax_output_dbm = 20",
+            "radio.pa.gain_db is required for model = \"custom\"",
+        ),
+        (
+            "model = \"custom\"\ngain_db = [11]",
+            "radio.pa.max_output_dbm is required for model = \"custom\"",
+        ),
+        (
+            "model = \"custom\"\ngain_db = []\nmax_output_dbm = 0",
+            "radio.pa.gain_db must have 1 to 23 entries, the gain in dB at modem outputs from 0 dBm up; it has 0",
+        ),
+        (
+            &format!("model = \"custom\"\ngain_db = {:?}\nmax_output_dbm = 20", [10; 24]),
+            "radio.pa.gain_db must have 1 to 23 entries, the gain in dB at modem outputs from 0 dBm up; it has 24",
+        ),
+        (
+            "model = \"custom\"\ngain_db = [11, -1]\nmax_output_dbm = 11",
+            "radio.pa.gain_db[1] = -1 is out of range: 0 to 40 dB",
+        ),
+        (
+            "model = \"custom\"\ngain_db = [41]\nmax_output_dbm = 20",
+            "radio.pa.gain_db[0] = 41 is out of range: 0 to 40 dB",
+        ),
+        (
+            "model = \"custom\"\ngain_db = [11, 12]\nmax_output_dbm = 13",
+            "radio.pa.gain_db[1] = 12 after 11: each gain must equal the one before or be 1 dB lower",
+        ),
+        (
+            "model = \"custom\"\ngain_db = [11, 11, 9]\nmax_output_dbm = 11",
+            "radio.pa.gain_db[2] = 9 after 11: each gain must equal the one before or be 1 dB lower",
+        ),
+        (
+            "model = \"gc1109\"\nmax_output_dbm = 29",
+            "radio.pa.max_output_dbm = 29 is out of range: 0 to 28 dBm, the highest output of the gc1109 gain table",
+        ),
+        (
+            "model = \"kct8103l\"\nmax_output_dbm = -1",
+            "radio.pa.max_output_dbm = -1 is out of range: 0 to 28 dBm, the highest output of the kct8103l gain table",
+        ),
+        (
+            "model = \"custom\"\ngain_db = [12, 12, 11]\nmax_output_dbm = 14",
+            "radio.pa.max_output_dbm = 14 is out of range: 0 to 13 dBm, the highest output of the custom gain table",
+        ),
+        (
+            "model = \"gc1109\"\nlna_gain_db = 31",
+            "radio.pa.lna_gain_db = 31 is out of range: 0 to 30 dB",
+        ),
+        (
+            "model = \"gc1109\"\nlna_gain_db = -17",
+            "radio.pa.lna_gain_db = -17 is out of range: 0 to 30 dB",
+        ),
+    ];
+    for driver in [RadioDriver::Sx1262, RadioDriver::Sim] {
+        for (table, message) in &rejected {
+            let err = config_with_radio(driver, &format!("[radio.pa]\n{table}\n")).unwrap_err();
+            assert!(matches!(err, ConfigError::Parse { .. }), "{driver} {table:?}: {err}");
+            assert!(err.to_string().contains(message), "{driver} {table:?}: {err}");
+        }
+    }
+}
+
+/// Firmware `serial_callback()` clamps `CMD_TXPOWER` to `PA_MAX_OUTPUT` with `HAS_LORA_PA`: with
+/// `[radio.pa]`, its `max_output_dbm` is the default and the upper bound of `max_tx_power_dbm`.
+#[test]
+fn max_tx_power_dbm_with_a_pa_goes_up_to_its_maximum_output() {
+    for driver in [RadioDriver::Sx1262, RadioDriver::Sim] {
+        for (pa, limit) in [
+            ("model = \"gc1109\"", 28),
+            ("model = \"gc1109\"\nmax_output_dbm = 24", 24),
+            ("model = \"custom\"\ngain_db = [11, 11, 11]\nmax_output_dbm = 13", 13),
+        ] {
+            let cfg = config_with_radio(driver, &format!("[radio.pa]\n{pa}\n")).unwrap();
+            assert_eq!(cfg.node_config().max_tx_power, limit, "{driver} {pa:?}");
+            for dbm in [0, 10, limit] {
+                let cfg = config_with_radio(driver, &format!("max_tx_power_dbm = {dbm}\n[radio.pa]\n{pa}\n")).unwrap();
+                assert_eq!(cfg.node_config().max_tx_power, dbm, "{driver} {pa:?}");
+            }
+            let pa_model = cfg.radio.pa.as_ref().unwrap().model();
+            for dbm in [i64::from(limit) + 1, -1, 128] {
+                let err =
+                    config_with_radio(driver, &format!("max_tx_power_dbm = {dbm}\n[radio.pa]\n{pa}\n")).unwrap_err();
+                assert!(matches!(err, ConfigError::Invalid(_)), "{driver} {pa:?} {dbm}: {err}");
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "invalid config: radio.max_tx_power_dbm = {dbm} is out of range; with the {pa_model} PA of \
+                         [radio.pa] it allows 0 to {limit} dBm, its max_output_dbm"
+                    )
+                );
+            }
+        }
+    }
+    // An unvalidated ceiling stays within the PA's maximum too.
+    let mut cfg = config_with_radio(
+        RadioDriver::Sim,
+        "[radio.pa]\nmodel = \"custom\"\ngain_db = [11, 11]\nmax_output_dbm = 12\n",
+    )
+    .unwrap();
+    cfg.radio.max_tx_power_dbm = Some(30);
+    assert_eq!(cfg.node_config().max_tx_power, 12);
+    assert_eq!(
+        cfg.node_config().external_pa,
+        Some(ExternalPa::new([11, 11], 12).unwrap())
     );
 }

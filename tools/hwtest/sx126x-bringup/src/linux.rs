@@ -178,6 +178,7 @@ fn open_radio(args: &Args) -> Result<RadioDev> {
         ocp: 0x28,
         busy_timeout_ms: 250,
         tx_timeout_ms: 30_000,
+        lna_gain_db: 0, // The AIO V2 has no LNA in front of the SX1262.
     };
     Ok(Sx126x::new(spi, busy, reset, None, StdDelay, config))
 }

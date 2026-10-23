@@ -19,6 +19,7 @@ drivers in the workspace serve as worked examples:
 - [Error handling](#error-handling)
 - [Interrupts and the event loop](#interrupts-and-the-event-loop)
 - [Carrier detect and DCD timing](#carrier-detect-and-dcd-timing)
+- [External amplifiers](#external-amplifiers)
 - [Worked example: rnode-sx126x](#worked-example-rnode-sx126x)
 - [Worked example: rnode-sim](#worked-example-rnode-sim)
 - [Testing a driver](#testing-a-driver)
@@ -48,8 +49,8 @@ rnode-linux uses the same split:
 
 | Layer | Where | Owns | Leaves alone |
 | --- | --- | --- | --- |
-| RNode logic | `rnode_core::Node` | KISS host protocol, TX queue, split framing, CSMA/CA, airtime, PHY parameters (preamble length, DCD timing), statistics, saved settings | Anything chip-specific |
-| Radio driver | a crate implementing `rnode_core::Radio` | Chip commands and registers, bandwidth quantisation, power and SF ranges, low-data-rate bit, RSSI and SNR conversion, TX-done wait, IRQ flags, carrier detect | Protocol, queueing, retries, persistence |
+| RNode logic | `rnode_core::Node` | KISS host protocol, TX queue, split framing, CSMA/CA, airtime, PHY parameters (preamble length, DCD timing), an external power amplifier's TX power mapping, statistics, saved settings | Anything chip-specific |
+| Radio driver | a crate implementing `rnode_core::Radio` | Chip commands and registers, bandwidth quantisation, power and SF ranges, low-data-rate bit, RSSI and SNR conversion (including an LNA's gain), TX-done wait, IRQ flags, carrier detect | Protocol, queueing, retries, persistence |
 | Platform | `rnode-linux` | Config file, opening spidev and GPIO lines, IRQ file descriptors, PTY, settings file, event loop, choosing the driver | Protocol and chip decisions |
 
 A new modem therefore needs one new crate and a few lines of daemon wiring. Nothing in
@@ -245,16 +246,16 @@ The methods mirror the parts of the firmware's modem classes that `RNode_Firmwar
 | `set_bandwidth(hz)` / `bandwidth()` | Radio start, `CMD_BANDWIDTH` while on | `setSignalBandwidth()` / `getSignalBandwidth()` | Round up to the nearest supported bandwidth; update the low-data-rate bit; the getter returns the rounded value |
 | `set_spreading_factor(sf)` / `spreading_factor()` | Radio start, `CMD_SF` while on | `setSpreadingFactor()` | Clamp to the chip's range (`Node` already limits it to 5–12); update the low-data-rate bit |
 | `set_coding_rate(den)` / `coding_rate()` | Radio start, `CMD_CR` while on | `setCodingRate4()` | Coding rate 4/`den`, `den` from 5 to 8 |
-| `set_tx_power(dbm)` / `tx_power()` | Radio start, `CMD_TXPOWER` while on | `setTxPower()` | Clamp to the chip's or board's range. `Node` passes 0 dBm up to `NodeConfig::max_tx_power` (22 by default), since the host's power byte is unsigned as in the firmware; the parameter stays signed for modems that go lower. The getter returns the power in use |
+| `set_tx_power(dbm)` / `tx_power()` | Radio start, `CMD_TXPOWER` while on | `setTxPower()` | Clamp to the chip's or board's range. `Node` passes 0 dBm up to `NodeConfig::max_tx_power` (22 by default), since the host's power byte is unsigned as in the firmware. With an external PA it passes the modem output the PA's gain table gives, which can be negative; see [External amplifiers](#external-amplifiers). The getter returns the power in use |
 | `set_preamble_length(symbols)` | After every bandwidth, SF or CR change; after a failure, again before each transmission and each `receive()` until it succeeds | `setPreambleLength()` | Program the preamble length that `rnode_core::phy::PhyParams` computed from the modulation (firmware `updateBitrate()`) |
 | `set_crc(enabled)` | Radio start, always with `true` | `enableCrc()` / `disableCrc()` | Payload CRC on or off |
 | `low_data_rate()` | When charging airtime after each frame | global `lora_low_datarate`, set by `handleLowDataRate()` | Whether low-data-rate optimisation is on. Decide it with `rnode_core::phy::low_data_rate()`, the firmware's integer expression, and program the same value into the chip |
 | `receive(implicit_len)` | Radio start, after every TX burst, `CMD_PROMISC`, `CMD_IMPLICIT` | `receive()` | Enter continuous receive. `None` selects explicit headers; `Some(n)` implicit headers with payload length `n` (only used in promiscuous mode) |
 | `transmit(frame, implicit)` | For each LoRa frame when CSMA/CA allows | `beginPacket()`, `write()`, `endPacket()` | Send one frame of at most 255 bytes, RNode header included, and block until TX done or the driver's timeout. Leave the modem in standby; `Node` calls `receive()` afterwards |
-| `poll_rx()` | After every IRQ, and on every event-loop iteration while the radio is on | `handleDio0Rise()` and the reads in `receive_callback()` | If a packet arrived, read it with its RSSI and SNR, clear the interrupt and return it. Drop CRC failures as `Ok(None)` and count them for `take_rx_crc_errors()`. With nothing pending, return `Ok(None)` without side effects |
+| `poll_rx()` | After every IRQ, and on every event-loop iteration while the radio is on | `handleDio0Rise()` and the reads in `receive_callback()` | If a packet arrived, read it with its RSSI and SNR, clear the interrupt and return it. Drop CRC failures as `Ok(None)` and count them for `take_rx_crc_errors()`. With nothing pending, return `Ok(None)` without side effects. Report the RSSI at the antenna: less the gain of an LNA before the modem, if the board has one |
 | `take_rx_crc_errors()` | After each `poll_rx()` loop | none: `handleDio0Rise()` drops CRC failures without a trace | Return how many frames `poll_rx()` dropped for a failed CRC since the last call, with the RSSI and SNR of the last one if you read them, and reset the count. `Node` logs them at `debug`. Optional: the default reports none |
 | `dcd(now_ms)` | Every 3 ms while on, and before each TX decision | `dcd()` | Whether a LoRa preamble or header is being received right now |
-| `current_rssi()` | Every 3 ms while on, and before each TX decision | `currentRssi()` | Channel RSSI in dBm |
+| `current_rssi()` | Every 3 ms while on, and before each TX decision | `currentRssi()` | Channel RSSI in dBm at the antenna: less the gain of an LNA before the modem, if the board has one |
 | `set_dcd_timing(preamble_ms, header_ms)` | After every bandwidth, SF or CR change | globals `lora_preamble_time_ms`, `lora_header_time_ms` | Timing for expiring stale preamble detections; see [below](#carrier-detect-and-dcd-timing). Ignore it if your carrier detect does not need it |
 
 Two details that are easy to get wrong:
@@ -461,6 +462,38 @@ carrier detect is a live status rather than a latched flag can ignore the timing
 derives carrier detect from the carrier records of other simulated radios. Both implement
 `set_dcd_timing()` as a no-op.
 
+## External amplifiers
+
+Some boards put a power amplifier (PA) between the modem and the antenna, and a low-noise amplifier
+(LNA) in front of the modem on receive; RNode_Firmware calls them `HAS_LORA_PA` and `HAS_LORA_LNA`.
+The work splits as it does in the firmware:
+
+| Part | Where | Firmware |
+| --- | --- | --- |
+| Mapping the host's TX power, the power after the PA, to a modem output, and the modem output back to the power reported to the host | `rnode_core::pa::ExternalPa`, applied by `Node` when `NodeConfig::external_pa` is set | `map_target_power_to_modem_output()`, `map_modem_output_to_target_power()` and `setTXPower()` in `Utilities.h`, common code |
+| Clamping `CMD_TXPOWER` to the PA's maximum output | `Node`, with `NodeConfig::max_tx_power` | `serial_callback()`: `PA_MAX_OUTPUT` |
+| Subtracting the LNA's gain from every RSSI | the driver: `rnode_sx126x::Config::lna_gain_db` | `sx126x::currentRssi()`, `packetRssi()`: `lora_lna_gain` |
+| Leaving RSSI samples more than 12 dB below the noise floor out of it | `Node`, when `NodeConfig::external_lna` is set | `update_noise_floor()`: `LORA_LNA_GVT` |
+
+For a driver this means:
+
+- **`set_tx_power()` gets modem outputs.** With a PA, `Node` passes the modem output the gain table
+  maps the host's power to. Below the PA's minimum that is negative (−11 dBm for 0 dBm through the
+  GC1109), and it can lie outside your modem's range: clamp it, as for any request, and report the
+  clamped value from `tx_power()`. `Node` maps the value it reads back to the power after the PA, so
+  a clamp at the modem's limit shows up in what the host is told. The firmware maps back the modem
+  output it asked for; the two agree whenever the gain table has no entry beyond the modem's limit,
+  as for the SX1262 with the firmware's tables.
+- **RSSI is measured at the antenna.** If the board has an LNA, subtract its gain from the channel
+  RSSI, the packet RSSI and the signal of CRC-failed frames, as `rnode-sx126x` does with
+  `Config::lna_gain_db`. The SNR is a ratio and stays as it is.
+- **The rest is board wiring.** PA enable lines, and telling one PA from another as the firmware
+  does on the Heltec V4, belong to the platform or to the driver's configuration; the daemon
+  ports neither.
+
+The daemon fills all of this from `[radio.pa]`, described in
+[README.md](README.md#radiopa), which also lists what is not ported.
+
 ## Worked example: rnode-sx126x
 
 [`crates/rnode-sx126x/src/lib.rs`](crates/rnode-sx126x/src/lib.rs) is the template for hardware
@@ -486,11 +519,12 @@ pub struct Config {
     pub ocp: u8,                   // firmware OCP_TUNED
     pub busy_timeout_ms: u32,      // firmware waitOnBusy()
     pub tx_timeout_ms: u32,        // floor for the TX-done wait, firmware LORA_MODEM_TIMEOUT_MS
+    pub lna_gain_db: u8,           // LNA before the modem, firmware lora_lna_gain
 }
 ```
 
 Boards without an RX-enable line pass `None::<NoPin>`. The daemon fills `Config` from
-`[radio.sx1262]` with `Sx1262Config::driver_config()`.
+`[radio.sx1262]`, and `lna_gain_db` from `[radio.pa]`, with `RadioConfig::sx1262_driver_config()`.
 
 **Bus access.** Every SPI transaction first waits for BUSY to go low, as the firmware's
 `waitOnBusy()` does, and a few helpers wrap the command formats: `execute_opcode()`,
@@ -528,6 +562,9 @@ sequenceDiagram
 - `poll_rx()` reads the packet status (`GetPacketStatus`) of a frame that failed its CRC, for
   `take_rx_crc_errors()`; the firmware reads nothing more for such a frame. Good frames get no
   extra transaction.
+- With `lna_gain_db`, the packet RSSI is compensated like the channel RSSI. The firmware's ESP32
+  builds, the Heltec V4 among them, read it with `packetRssi(uint8_t)`, which leaves the LNA's gain
+  in.
 
 **Tests.** [`crates/rnode-sx126x/src/tests.rs`](crates/rnode-sx126x/src/tests.rs) checks the
 exact bytes of every command against the firmware with a mocked bus; see
@@ -557,7 +594,8 @@ hardware at all, which shows how little of the trait is about SPI:
 `sim` feature. It runs on a virtual clock (`SimMedium::advance_ms()`) and can inject failures and
 frames: `inject_begin_failures()`, `inject_next_tx_error()`, `inject_next_timeout()`,
 `inject_dcd_errors()`, `inject_rssi_errors()`, `inject_rx_errors()`, `inject_setter_errors()`,
-`inject_preamble_length_errors()`, `inject_rx()` and `inject_rx_crc_error()`. Each injected failure
+`inject_preamble_length_errors()`, `inject_rx()` and `inject_rx_crc_error()`, and it can clamp the
+TX power like a modem with `set_tx_power_range()`. Each injected failure
 is the worst case for `Node`: a setter failure from `inject_setter_errors()` applies the value
 before it fails, so `Node` has to put the old one back, while a preamble-length failure leaves the
 old length, so `Node` has to try again. Use it to test how `Node` reacts to driver behaviour

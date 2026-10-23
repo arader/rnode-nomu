@@ -199,3 +199,39 @@ fn channel_stats_payload_uses_firmware_offsets_and_no_interference_marker() {
     assert_eq!(payload[8], 57);
     assert_eq!(payload[10], 57);
 }
+
+/// Firmware `update_noise_floor()` with `HAS_LORA_LNA`: a sample more than `LORA_LNA_GVT` (12 dB)
+/// below the noise floor is discarded before it reaches the 128-sample buffer, so a floor of
+/// -100 dBm ignores -113 dBm and takes -112 dBm. Without an LNA both count, as before.
+#[test]
+fn an_external_lna_discards_samples_more_than_12_db_below_the_noise_floor() {
+    fn sample_floor(csma: &mut Csma, start_ms: u64, rssi_dbm: i16) -> i16 {
+        for i in 0..NOISE_FLOOR_SAMPLES as u64 {
+            csma.observe(start_ms + i * STATUS_INTERVAL_MS, false, rssi_dbm);
+            csma.status_tick(start_ms + i * STATUS_INTERVAL_MS);
+        }
+        csma.channel_stats().noise_floor
+    }
+    assert_eq!(LORA_LNA_GVT, 12);
+
+    let mut lna = Csma::new();
+    assert!(!lna.external_lna());
+    lna.set_external_lna(true);
+    assert!(lna.external_lna());
+    let mut no_lna = Csma::new();
+
+    // The -292 dBm boot sentinel discards nothing.
+    assert_eq!(sample_floor(&mut lna, 0, -100), -100);
+    assert_eq!(sample_floor(&mut no_lna, 0, -100), -100);
+
+    assert_eq!(sample_floor(&mut lna, 1_000, -113), -100);
+    assert_eq!(sample_floor(&mut no_lna, 1_000, -113), -113);
+
+    assert_eq!(sample_floor(&mut lna, 2_000, -112), -112);
+    // The Heltec V4's own interference rule, which at a floor of -109 dBm or less compares with
+    // -89 dBm instead, is not ported: interference still starts more than 11 dB above the floor.
+    lna.observe(3_000, false, -101);
+    assert!(!lna.channel_stats().interference);
+    lna.observe(3_003, false, -100);
+    assert!(lna.channel_stats().interference);
+}

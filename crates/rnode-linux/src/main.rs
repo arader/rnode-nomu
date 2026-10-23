@@ -140,7 +140,7 @@ fn run_sx1262(
         .gpio
         .as_ref()
         .context("[gpio] is required when radio.driver = \"sx1262\"")?;
-    let radio_config = config.radio.sx1262.driver_config().context("radio.sx1262")?;
+    let radio_config = config.radio.sx1262_driver_config().context("radio.sx1262")?;
 
     let recorder = spilog.map(SpiRecorder::create).transpose().context("open SPI log")?;
     let spi = LinuxSpiDevice::open(&spi_config.device, spi_config.speed_hz, recorder)
