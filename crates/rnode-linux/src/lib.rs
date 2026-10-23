@@ -20,6 +20,7 @@ pub mod cli;
 pub mod config;
 pub mod delay;
 pub mod event_loop;
+pub mod power;
 pub mod pty;
 pub mod spi;
 pub mod storage;

@@ -289,6 +289,11 @@ was on the air at SF11, and the daemon exited 1.1 s later:
 RNode_Firmware sends every queued packet once a burst starts; stopping between packets is one of
 the [deliberate differences](#differences-from-rnode_firmware).
 
+With `power_off_on_exit = true`, the daemon switches the modem off last: it drives NRESET low, then
+RXEN if the board has it, and only then the power line, so that no line is left driving the
+unpowered modem. [`[gpio]`](#gpio) lists the state each line is left in, with and without the
+setting.
+
 #### How long a stop takes
 
 A stop waits for at most one packet on the air, up to two 255-byte LoRa frames, and then takes a
@@ -329,14 +334,14 @@ If a supervisor sends SIGKILL during a transmission, after a stop timeout that w
 - The modem then idles in standby, neither receiving nor transmitting, until the daemon starts
   again and resets it.
 - The daemon's cleanup does not run: the queued packets are dropped without log lines, the radio is
-  not put to sleep, `power_off_on_exit` is not applied and the PTY symlink stays behind, pointing
-  to a PTY that no longer exists. The next start replaces it; under the systemd unit, systemd
-  removes `/run/rnode`, symlink included, when the unit stops.
+  not put to sleep, `power_off_on_exit` does not switch the modem off, and the PTY symlink stays
+  behind, pointing to a PTY that no longer exists. The next start replaces it; under the systemd
+  unit, systemd removes `/run/rnode`, symlink included, when the unit stops.
 - The kernel releases the GPIO lines, as on any exit. Raspberry Pi kernels keep released outputs
   as they were (the `persist_gpio_outputs` option of their RP1 and BCM2835 GPIO drivers, on by
-  default), so on the uConsole the modem keeps power and is not reset. A GPIO driver that switches
-  released lines back to inputs can instead cut the modem's power or hold it in reset, which ends
-  the frame early.
+  default), so on the uConsole the modem keeps power and is not reset: the power line and NRESET
+  stay high, even with `power_off_on_exit = true`. A GPIO driver that switches released lines back
+  to inputs can instead cut the modem's power or hold it in reset, which ends the frame early.
 - systemd logs `State 'stop-sigterm' timed out. Killing.` and marks the unit failed, with result
   `timeout`.
 
@@ -386,11 +391,11 @@ flowchart LR
 | Modem signal | Host side | Config key | How the daemon uses it |
 | --- | --- | --- | --- |
 | SCK, MOSI, MISO, NSS | spidev device; the kernel drives chip select | `[spi] device`, `speed_hz` | SPI mode 0, 8-bit words |
-| NRESET | GPIO output | `[gpio] reset` | Held high; pulsed low for 10 ms by `begin()` |
+| NRESET | GPIO output | `[gpio] reset` | Held high; pulsed low for 10 ms by `begin()`; driven low on exit before `power_off_on_exit` switches the modem off |
 | BUSY | GPIO input | `[gpio] busy` | Polled before every command, up to `busy_timeout_ms` |
 | DIO1 | GPIO input with rising-edge events | `[gpio] dio1` | RX-done interrupt; wakes the event loop |
-| RXEN (optional) | GPIO output | `[gpio] rxen` | Driven high when the radio starts and on every receive, never low (firmware `rxAntEnable()`) |
-| Power enable (optional) | GPIO output | `[gpio] power` | Driven high before the other lines are requested; held while the daemon runs |
+| RXEN (optional) | GPIO output | `[gpio] rxen` | Driven high when the radio starts and on every receive, never low while the daemon runs (firmware `rxAntEnable()`); driven low on exit before `power_off_on_exit` switches the modem off |
+| Power enable (optional) | GPIO output | `[gpio] power` | Driven high before the other lines are requested; held while the daemon runs; driven low last on exit with `power_off_on_exit` |
 | DIO2 | inside the module | `[radio.sx1262] dio2_as_rf_switch` | SX1262 drives the RF switch from DIO2 |
 | DIO3 | inside the module | `[radio.sx1262] tcxo_voltage` | SX1262 powers the TCXO from DIO3 at this voltage |
 
@@ -594,10 +599,34 @@ Required when `radio.driver = "sx1262"`; ignored otherwise. Line numbers are off
 | `rxen` | integer | unset | Optional RX-enable output, driven high on receive |
 | `power` | integer | unset | Optional power-rail enable output, driven high before the other lines are requested |
 | `power_on_delay_ms` | integer | `100` | Wait after driving `power` high, before resetting the modem; only used when `power` is set |
-| `power_off_on_exit` | bool | `false` | Drive `power` low when the daemon exits. The default leaves the rail alone so restarts do not power-cycle the modem |
+| `power_off_on_exit` | bool | `false` | Switch the modem off when the daemon exits: drive `reset`, then `rxen`, then `power` low. Needs `power`. The default leaves the rail on and the lines as they are, so restarts do not power-cycle the modem; see below |
 
-The daemon holds the lines for as long as it runs. When it exits, it releases them, and what the
-lines do then depends on the kernel's GPIO driver; use `power_off_on_exit` if the rail must be off.
+The daemon holds the lines for as long as it runs and releases them when it exits. Raspberry Pi
+kernels keep a released output at its level (`persist_gpio_outputs`, on by default); other GPIO
+drivers may switch released lines back to inputs. When the daemon stops on SIGINT or SIGTERM, or
+exits on a fatal error, it leaves the lines like this:
+
+| Line | `power_off_on_exit = false` | `power_off_on_exit = true` |
+| --- | --- | --- |
+| `reset` | high | low, driven first |
+| `rxen` | low until the radio first starts, then high | low, driven next |
+| `power` | high: the modem stays on | low, driven last |
+| `busy`, `dio1` | inputs | inputs |
+
+With `power_off_on_exit = true`, a stop still puts the radio to sleep first. Then `reset` and
+`rxen` go low before `power`: a line left high would hold 3.3 V on a pin of the unpowered SX1262,
+whose datasheet allows at most VDD + 0.3 V on a digital input, and could feed the modem through
+its input protection. If a line cannot be driven low, the daemon logs a [warning](#warnings) and
+goes on with the next. Without `power`, the setting does nothing and the lines stay as in the first
+column.
+
+SIGKILL skips this: the lines stay as they were while the daemon ran, `power` and `reset` high; see
+[When the daemon is killed](#when-the-daemon-is-killed).
+
+The SPI chip select is not a `[gpio]` line: the kernel's SPI driver holds it high while the bus is
+idle, from boot on, whether or not the modem has power. On the uConsole that is GPIO18, which stays
+high while `config.txt` or `power_off_on_exit` holds the rail off. The daemon cannot change that; it
+is a matter for the device-tree overlay or the board.
 
 ### `[radio]`
 
@@ -1152,6 +1181,9 @@ running the daemon in the foreground with its log in a private file that you del
   128 to 254, probably a negative power saved by an earlier build; see
   [Saved radio settings](#saved-radio-settings). It is logged on every start and `CMD_RESET` until
   the file is fixed.
+- `power_off_on_exit: failed to drive [gpio] reset low: …`, or `rxen` or `power`: on exit, the
+  daemon could not drive that line low while switching the modem off; see [`[gpio]`](#gpio). It
+  still drives the other lines low, the power line last, so a failed `power` leaves the modem on.
 
 Logging never changes what the daemon sends to the host or the radio. Below `debug` the per-packet
 code costs only a level check.

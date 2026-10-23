@@ -11,6 +11,8 @@ chip = "gpiochip0"
 # Optional switched radio power rail enable line.
 # power = 16
 power_on_delay_ms = 100
+# Switch the rail off on exit, after driving reset and rxen low. The default, false, leaves the rail
+# on and the lines as they are, so a restart does not power-cycle the modem.
 power_off_on_exit = false
 reset = 17
 busy = 27

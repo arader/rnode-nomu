@@ -148,6 +148,9 @@ fn run_sx1262(
     let gpio = RadioGpio::open(gpio_config).context("open GPIO lines")?;
     let pty = open_pty(&config)?;
 
+    // The power guard, dropped when this function returns, after `run()` has dropped the node (on
+    // the early return above, it is dropped with the rest of `gpio`). With `power_off_on_exit` it
+    // then drives NRESET and RXEN low before the power line.
     let _power = gpio.power;
     let radio = Sx126x::new(spi, gpio.busy, gpio.reset, gpio.rxen, StdDelay, radio_config);
     let storage = TomlStorage::new(config.storage.radio_settings.clone());

@@ -47,7 +47,10 @@ pub struct GpioConfig {
     /// Delay after asserting the optional power rail, in milliseconds.
     #[serde(default = "default_power_on_delay_ms")]
     pub power_on_delay_ms: u64,
-    /// Drive the optional power rail low when the daemon exits. Defaults false to avoid power-cycling on restart.
+    /// Switch the optional power rail off when the daemon exits: drive `reset`, then `rxen`, then
+    /// `power` low, so that no line drives the unpowered modem ([`crate::power::PowerGuard`]).
+    /// Defaults false to avoid power-cycling on restart: the rail and the lines then stay as they
+    /// are.
     #[serde(default)]
     pub power_off_on_exit: bool,
     pub reset: u32,

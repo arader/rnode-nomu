@@ -2,6 +2,7 @@ use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use embedded_hal::digital::{ErrorKind, ErrorType, InputPin, OutputPin};
@@ -10,6 +11,7 @@ use gpiocdev::line::{EdgeDetection, Value};
 
 use crate::config::GpioConfig;
 use crate::event_loop::IrqSource;
+use crate::power::PowerGuard;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GpioError {
@@ -60,9 +62,12 @@ impl embedded_hal::digital::Error for GpioError {
     }
 }
 
-#[derive(Debug)]
+/// An output line. Clones drive the same line, which the kernel releases when the last clone is
+/// dropped: the radio driver drives NRESET and RXEN, and the [`PowerGuard`] keeps clones of them to
+/// drive them low before it switches the modem off.
+#[derive(Debug, Clone)]
 pub struct GpioOutputPin {
-    req: Request,
+    req: Arc<Request>,
     offset: u32,
 }
 
@@ -74,7 +79,10 @@ impl GpioOutputPin {
             .with_line(offset)
             .as_output(initial)
             .request()?;
-        Ok(Self { req, offset })
+        Ok(Self {
+            req: Arc::new(req),
+            offset,
+        })
     }
 }
 
@@ -162,23 +170,13 @@ impl IrqSource for GpioIrqLine {
     }
 }
 
-#[derive(Debug)]
-pub struct GpioPowerGuard {
-    pin: GpioOutputPin,
-    off_on_drop: bool,
-}
-
-impl Drop for GpioPowerGuard {
-    fn drop(&mut self) {
-        if self.off_on_drop {
-            let _ = self.pin.set_low();
-        }
-    }
-}
-
+/// The modem's lines, as [`RadioGpio::open`] requests them.
 #[derive(Debug)]
 pub struct RadioGpio {
-    pub power: Option<GpioPowerGuard>,
+    /// The power-enable line, if `[gpio] power` is set. It holds clones of `reset` and `rxen`, so
+    /// dropping it with `power_off_on_exit` drives them low before the power line, whether or not
+    /// the radio driver still holds them.
+    pub power: Option<PowerGuard<GpioOutputPin>>,
     pub reset: GpioOutputPin,
     pub busy: GpioInputPin,
     pub dio1: GpioIrqLine,
@@ -186,28 +184,39 @@ pub struct RadioGpio {
 }
 
 impl RadioGpio {
+    /// Request the lines: the power line first, driven high, then, `power_on_delay_ms` later,
+    /// NRESET (high), BUSY, DIO1 and RXEN (low). The power guard takes its clone of each output as
+    /// soon as it is requested, so if a later line cannot be requested, dropping the guard switches
+    /// the modem off in the same order as on exit (with `power_off_on_exit`).
     pub fn open(config: &GpioConfig) -> Result<Self, GpioError> {
         let chip = resolve_chip(&config.chip)?;
-        let power = config
+        let mut power = config
             .power
             .map(|offset| GpioOutputPin::request(&chip, offset, Value::Active, "rnode-power"))
             .transpose()?
-            .map(|pin| GpioPowerGuard {
-                pin,
-                off_on_drop: config.power_off_on_exit,
-            });
+            .map(|pin| PowerGuard::new(pin, config.power_off_on_exit));
         if power.is_some() && config.power_on_delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(config.power_on_delay_ms));
         }
+        let reset = GpioOutputPin::request(&chip, config.reset, Value::Active, "rnode-reset")?;
+        if let Some(guard) = &mut power {
+            guard.lower_on_power_off("reset", reset.clone());
+        }
+        let busy = GpioInputPin::request(&chip, config.busy, "rnode-busy")?;
+        let dio1 = GpioIrqLine::request(&chip, config.dio1, "rnode-dio1")?;
+        let rxen = config
+            .rxen
+            .map(|offset| GpioOutputPin::request(&chip, offset, Value::Inactive, "rnode-rxen"))
+            .transpose()?;
+        if let (Some(guard), Some(rxen)) = (&mut power, &rxen) {
+            guard.lower_on_power_off("rxen", rxen.clone());
+        }
         Ok(Self {
             power,
-            reset: GpioOutputPin::request(&chip, config.reset, Value::Active, "rnode-reset")?,
-            busy: GpioInputPin::request(&chip, config.busy, "rnode-busy")?,
-            dio1: GpioIrqLine::request(&chip, config.dio1, "rnode-dio1")?,
-            rxen: config
-                .rxen
-                .map(|offset| GpioOutputPin::request(&chip, offset, Value::Inactive, "rnode-rxen"))
-                .transpose()?,
+            reset,
+            busy,
+            dio1,
+            rxen,
         })
     }
 }
