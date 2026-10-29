@@ -9,8 +9,10 @@ Type=simple
 User=rnode
 Group=rnode
 # To let a host running as another user (e.g. rnsd) open the PTY, hand the slave to a group
-# both users share: uncomment this, set [pty] group = "dialout" and mode = "0660" in
-# /etc/rnode-linux.toml, and add the host's user to dialout.
+# both users share: add this account to it (usermod -aG dialout rnode), or set the line below
+# in a drop-in (systemctl edit rnode-linux), which survives reinstalling this file. Then set
+# [pty] group = "dialout" and mode = "0660" in /etc/rnode-linux.toml, and add the host's user
+# to dialout.
 # SupplementaryGroups=dialout
 ExecStart=/usr/local/bin/rnode-linux --config /etc/rnode-linux.toml
 # A stop finishes the packet on the air, both frames of a split packet, then puts the radio to

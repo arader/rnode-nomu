@@ -71,7 +71,8 @@ crc_error = 0.0
 # A symlink already at this path is replaced; any other file there makes startup fail.
 symlink = "target/rnode0"
 # Let a host running as another user (e.g. rnsd) open the PTY: hand the slave to a group the
-# daemon is a member of (systemd SupplementaryGroups=) and give that group read/write access.
+# daemon is a member of (usermod -aG, or systemd SupplementaryGroups=) and give that group
+# read/write access.
 # Avoid modes that open it to every local user, such as "0666".
 # group = "dialout"
 # mode = "0660"

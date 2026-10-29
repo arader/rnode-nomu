@@ -15,8 +15,120 @@ Behaviour follows [RNode_Firmware](https://github.com/markqvist/RNode_Firmware) 
 `56775c5`) wherever a host or another radio can observe it. The deliberate differences are listed in
 [Differences from RNode_Firmware](#differences-from-rnode_firmware).
 
+## Quick start
+
+These commands set up the reference uConsole with the AIO V2 on Raspberry Pi OS or Debian 13:
+Reticulum's `rnsd` and rnode-linux run as systemd services under their own accounts, and
+rnode-linux starts first. [Running as a systemd service](#running-as-a-systemd-service) explains
+each step. For another board, adapt the config as in
+[Setting up the LoRa hardware](#setting-up-the-lora-hardware); without hardware, see
+[Quick start without hardware](#quick-start-without-hardware).
+
+First enable SPI1 as in [step 1 of the uConsole setup](#uconsole-cm5-with-the-hackergadgets-aio-v2)
+and check that `/dev/spidev1.0` and `/dev/gpiochip15` exist.
+
+**1. Install `rnsd`** into its own Python environment:
+
+```sh
+sudo apt update
+sudo apt install -y python3-venv
+sudo python3 -m venv /opt/reticulum
+sudo /opt/reticulum/bin/pip install rns
+```
+
+**2. Install rnode-linux.** This builds it with Rust from [rustup](https://rustup.rs) (skip the
+`curl` and `.` lines if you already have Rust 1.85 or newer) and installs the binary, the config for
+the AIO V2 and the service unit. The config's `power = 16` makes the daemon switch on the AIO V2's
+LoRa power rail, GPIO16, when it starts; `config.txt` switches it off at boot.
+
+```sh
+sudo apt install -y git curl build-essential
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+git clone https://github.com/arader/rnode-nomu.git
+cd rnode-linux
+cargo build --release --locked -p rnode-linux
+sudo install -m 0755 target/release/rnode-linux /usr/local/bin/rnode-linux
+sudo install -m 0644 config.uconsole-aio-v2.toml /etc/rnode-linux.toml
+sudo install -m 0644 contrib/rnode-linux.service /etc/systemd/system/rnode-linux.service
+```
+
+**3. Create the accounts.** `rnode` runs the daemon and may use the SPI and GPIO devices; `rnsd`
+runs Reticulum. Both are in `dialout`, and the daemon hands its PTY to that group:
+
+```sh
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin rnode
+sudo usermod -aG spi,gpio,dialout rnode
+sudo useradd --system --create-home --home-dir /var/lib/rnsd --shell /usr/sbin/nologin rnsd
+sudo usermod -aG dialout rnsd
+sudo sed -i -e 's/^# group = "dialout"/group = "dialout"/' -e 's/^# mode = "0660"/mode = "0660"/' /etc/rnode-linux.toml
+grep -E '^(power|group|mode) =' /etc/rnode-linux.toml
+```
+
+The last command prints `power = 16`, `group = "dialout"` and `mode = "0660"`. Then give `rnsd` a
+Reticulum config with the PTY as its RNode. The radio settings are lab examples for the US
+902–928 MHz band: use values that are legal where you are and that match the RNodes you want to
+reach (see [Running with Reticulum](#running-with-reticulum)).
+
+```sh
+sudo -u rnsd mkdir -p /var/lib/rnsd/.reticulum
+sudo -u rnsd tee /var/lib/rnsd/.reticulum/config >/dev/null <<'EOF'
+[interfaces]
+  [[rnode-linux]]
+    type = RNodeInterface
+    enabled = yes
+    port = /run/rnode/rnode0
+    frequency = 914875000
+    bandwidth = 125000
+    txpower = 2
+    spreadingfactor = 8
+    codingrate = 5
+EOF
+```
+
+**4. Configure systemd** to start rnode-linux first, then `rnsd`. The `rnsd` unit follows
+[Reticulum's manual](https://reticulum.network/manual/using.html#systemwide-service) but logs to
+the journal. The ordering is a drop-in, a separate file, so it stays when you change `rnsd.service`:
+
+```sh
+sudo tee /etc/systemd/system/rnsd.service >/dev/null <<'EOF'
+[Unit]
+Description=Reticulum Network Stack Daemon
+After=multi-user.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=3
+User=rnsd
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/reticulum/bin/rnsd --config /var/lib/rnsd/.reticulum
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo mkdir -p /etc/systemd/system/rnsd.service.d
+printf '[Unit]\nWants=rnode-linux.service\nAfter=rnode-linux.service\n' | sudo tee /etc/systemd/system/rnsd.service.d/rnode-linux.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now rnode-linux rnsd
+```
+
+**Check it:**
+
+```sh
+pinctrl get 16
+journalctl -b -u rnode-linux -u rnsd --no-pager
+sudo -u rnsd /opt/reticulum/bin/rnstatus --config /var/lib/rnsd/.reticulum
+```
+
+`pinctrl get 16` reports `op dh` once the daemon has switched the rail on. In the journal,
+rnode-linux logs `radio online (host request): 914.875 MHz, 125 kHz, SF8, CR 4/5, 2 dBm` and `rnsd`
+logs `RNodeInterface[rnode-linux] is configured and powered up`. `rnstatus` lists the interface as
+up.
+
 ## Contents
 
+- [Quick start](#quick-start)
 - [Why rnode-linux](#why-rnode-linux)
 - [How it works](#how-it-works)
 - [Workspace layout](#workspace-layout)
@@ -480,7 +592,7 @@ has no RXEN line. The board switches its peripherals on and off with GPIOs on th
 
    [pty]
    symlink = "/run/rnode/rnode0"
-   # For an rnsd running as another user: SupplementaryGroups=dialout in the unit, then
+   # For an rnsd running as another user, add both accounts to dialout and uncomment these:
    # group = "dialout"
    # mode = "0660"
 
@@ -1027,6 +1139,9 @@ spreading factor.
   Reticulum after restarting a simulated daemon.
 - Several Reticulum programs cannot share one PTY. Run a shared `rnsd` instance and let the other
   programs connect to it.
+- rnode-linux has not been tried with `rnsd` in a container. The symlink in `/run/rnode` points
+  into the daemon's `/dev/pts`, which a container does not see by default, and the PTY gets a new
+  number every time the daemon starts.
 
 ### Using rnodeconf
 
@@ -1180,14 +1295,23 @@ with a `WARN` line, and the EEPROM reads as unprovisioned.
 
 ## Running as a systemd service
 
+rnode-linux is meant to run all the time, like a USB RNode that stays plugged in. It creates the
+PTY when it starts, so a host cannot start it by opening the port.
 [`contrib/rnode-linux.service`](contrib/rnode-linux.service) runs the daemon as an unprivileged
 `rnode` user, with a read-only file system, a private `/tmp` and access to only the listed devices.
-systemd creates `/run/rnode` (`RuntimeDirectory=`) for the PTY symlink and `/var/lib/rnode`
-(`StateDirectory=`) for the saved settings. Install the binary as in [Building](#building) and the
-config at `/etc/rnode-linux.toml`, as in the
-[uConsole steps](#uconsole-cm5-with-the-hackergadgets-aio-v2).
+systemd creates `/run/rnode` (`RuntimeDirectory=`) for the PTY symlink, and removes it when the
+daemon stops, and `/var/lib/rnode` (`StateDirectory=`) for the saved settings. Install the binary
+as in [Building](#building) and the config at `/etc/rnode-linux.toml`, as in the
+[uConsole steps](#uconsole-cm5-with-the-hackergadgets-aio-v2). The [Quick start](#quick-start) does
+all of this, and runs `rnsd` as a service too.
 
 ### Service account and device access
+
+The daemon has an account of its own so that it can use what it needs and nothing else: the SPI
+device and the GPIO chip, its two directories and its config. It reads whatever arrives on its PTY
+and over the air, and it drives a transmitter and a power rail, so a fault in it should not reach
+the rest of the system. On top of that, the unit sets `NoNewPrivileges=`, `ProtectSystem=strict`,
+`ProtectHome=` and `PrivateTmp=`, and allows only the devices in its `DeviceAllow=` lines.
 
 Create the account the unit runs as:
 
@@ -1215,20 +1339,31 @@ SUBSYSTEM=="gpio", KERNEL=="gpiochip15", GROUP="rnode", MODE="0660"
 Also check the unit's `DeviceAllow=` lines. They list the devices of the two example configs, and
 with `DevicePolicy=closed` the daemon cannot open any other spidev or GPIO chip.
 
+GPIO permissions apply to a whole chip, not to single lines: the account can drive every line of
+a chip it can open, not only the lines in its config. On the uConsole, `/dev/gpiochip15` carries
+all of the RP1's lines, the AIO V2's other power rails (GPIO 7, 23 and 27) included.
+
 ### PTY permissions for rnsd
 
-The PTY belongs to the daemon's user and, by default, only that user can read it (issue #47). If
-`rnsd` runs as a different user, share a group with it. This example uses `dialout`, the usual group
-for serial ports, which RNode users are often in already:
+The PTY belongs to the daemon's user and, by default, only that user can read it (issue #47).
+Whoever can open it can transmit, retune the radio and read everything it receives. If `rnsd` runs
+as a different user, share a group with it. This example uses `dialout`, the usual group for serial
+ports, which RNode users are often in already:
 
 1. In `/etc/rnode-linux.toml`, set `group = "dialout"` and `mode = "0660"` under `[pty]`.
-2. In the unit, uncomment `SupplementaryGroups=dialout`, so that the daemon may hand the PTY to that
-   group.
+2. Let the daemon hand the PTY to that group: add its account with
+   `sudo usermod -aG dialout rnode`, or set `SupplementaryGroups=dialout` in a drop-in
+   (`sudo systemctl edit rnode-linux`; see
+   [Keeping local changes across updates](#keeping-local-changes-across-updates)).
 3. Add the user that runs `rnsd` to the group with `sudo usermod -aG dialout <rnsd-user>`, then log
    in again or restart its service.
 
 Avoid modes such as `"0666"`, which let every local user send packets through your radio; the
 daemon warns about them.
+
+Running `rnsd` and the daemon under one account instead, such as your own, needs no group or mode:
+the PTY's owner can always open it. But the daemon then has everything that account has, and every
+program running under that account can use the SPI and GPIO devices.
 
 ### Installing the unit
 
@@ -1239,8 +1374,7 @@ sudo systemctl enable --now rnode-linux
 journalctl -u rnode-linux -f
 ```
 
-To start Reticulum after the daemon, add `After=rnode-linux.service` and
-`Wants=rnode-linux.service` to the `rnsd` unit.
+To start `rnsd` after the daemon, see [Starting rnsd after the daemon](#starting-rnsd-after-the-daemon).
 
 The unit sets `TimeoutStopSec=8min` instead of systemd's default 90 s. On stop, the daemon first
 finishes the packet on the air, which takes up to 7 min 40 s at SF12, 7.8 kHz and CR 4/8; 90 s
@@ -1254,6 +1388,104 @@ modulation they do use.
 The unit's file system is read-only apart from `/run/rnode` and `/var/lib/rnode`, so keep the
 symlink, the settings file, the EEPROM file and any `--spilog` file in those directories, for example
 `ExecStart=/usr/local/bin/rnode-linux --config /etc/rnode-linux.toml --spilog /var/lib/rnode/spi.csv`.
+
+### Running rnsd as a service
+
+Reticulum ships no unit file; [its manual](https://reticulum.network/manual/using.html#systemwide-service)
+shows one to write yourself. The [Quick start](#quick-start) follows it, with these choices:
+
+- Reticulum goes into a virtual environment of its own, `/opt/reticulum`, owned by root:
+  Raspberry Pi OS and Debian refuse `pip install` into the system's Python, and `rnsd` cannot
+  change its own code.
+- `rnsd` runs as its own account, `rnsd`. Its config, identity and caches live in
+  `/var/lib/rnsd/.reticulum`, which `--config` names, so `rnsd` depends neither on `$HOME` nor on
+  whether `/etc/reticulum` exists.
+- Reticulum's manual starts `rnsd --service`, which logs to `logfile` in the config directory.
+  Without `--service`, `rnsd` logs to standard output, which systemd sends to the journal, and
+  `PYTHONUNBUFFERED=1` makes each line arrive as it is logged.
+- Reticulum's tools find the running instance through its config directory, so run them as `rnsd`
+  with the same `--config`, for example
+  `sudo -u rnsd /opt/reticulum/bin/rnstatus --config /var/lib/rnsd/.reticulum`.
+
+Upgrade Reticulum with `sudo /opt/reticulum/bin/pip install --upgrade rns`, then
+`sudo systemctl restart rnsd`. `pip` never touches `rnsd.service`, which is a file you wrote.
+
+### Starting rnsd after the daemon
+
+The order is not essential. If `rnsd` starts first, `RNodeInterface` logs
+`Could not open serial port` and tries again every 5 seconds until the PTY appears. With the unit
+from Reticulum's manual (`After=multi-user.target`) and rnode-linux enabled, `rnsd` already starts
+after the daemon at boot, because `multi-user.target` waits for the units it starts.
+
+To make the order explicit, give `rnsd` a drop-in, as the [Quick start](#quick-start) does.
+`systemctl edit` opens an editor for one:
+
+```sh
+sudo systemctl edit rnsd
+```
+
+```ini
+[Unit]
+Wants=rnode-linux.service
+After=rnode-linux.service
+```
+
+systemd saves these lines as `/etc/systemd/system/rnsd.service.d/override.conf` and reloads
+itself; `rnsd.service` stays as it was. `Wants=` starts the daemon with `rnsd`, and `After=` makes
+`rnsd` wait for it.
+
+The drop-in does not stop the daemon when `rnsd` stops. To run the daemon only while `rnsd` runs,
+tie it to `rnsd` from its own side instead, and take it out of the boot targets:
+
+```sh
+sudo systemctl edit rnode-linux
+```
+
+```ini
+[Unit]
+Before=rnsd.service
+PartOf=rnsd.service
+```
+
+```sh
+sudo systemctl disable rnode-linux
+sudo systemctl add-wants rnsd.service rnode-linux.service
+```
+
+Starting `rnsd` then starts the daemon first, and stopping or restarting `rnsd` stops or restarts
+the daemon too; `rnsd` needs no drop-in of its own. Run `disable` before `add-wants`:
+`systemctl disable rnode-linux` removes every link to the unit, the one `add-wants` makes included.
+With [`power_off_on_exit = true`](#gpio), the AIO V2's LoRa rail is then off while `rnsd` is not
+running, and every restart of `rnsd` power-cycles the modem.
+
+This only works if `rnsd` is a system service. A user service (`systemctl --user`) cannot be
+ordered against a system unit or tied to one; only `RNodeInterface`'s retry applies.
+
+### Keeping local changes across updates
+
+Installing `contrib/rnode-linux.service` from a newer version replaces the file in
+`/etc/systemd/system`, and every change made in it. Drop-ins, in
+`/etc/systemd/system/rnode-linux.service.d/`, and the links that `systemctl enable` and
+`systemctl add-wants` make are separate files and stay. So keep local changes, such as
+`SupplementaryGroups=` or a lower `TimeoutStopSec=`, in a drop-in. To update rnode-linux:
+
+```sh
+cd rnode-linux
+git pull
+cargo build --release --locked -p rnode-linux
+sudo install -m 0755 target/release/rnode-linux /usr/local/bin/rnode-linux
+sudo install -m 0644 contrib/rnode-linux.service /etc/systemd/system/rnode-linux.service
+sudo systemctl daemon-reload
+sudo systemctl restart rnode-linux
+```
+
+`install` replaces the binary while the old one still runs, and the restart switches to the new
+one. The restart first finishes the packet on the air
+([How long a stop takes](#how-long-a-stop-takes)). `rnsd` then logs a serial port error for the
+old PTY (`[Errno 5] Input/output error`, and that the interface is offline), and about 5 seconds
+later `Reconnected port for RNodeInterface[…]`, once it has reopened the new PTY and configured the
+radio again ([Running with Reticulum](#running-with-reticulum)). `/etc/rnode-linux.toml` is your
+copy: compare it with the example configs when you update.
 
 ## Logging
 
@@ -1273,7 +1505,8 @@ so errors in it appear as `fatal:` lines on stderr.
 ### What `info` shows
 
 At the default level the daemon logs its startup, every radio state change and every retune, but
-nothing per packet. These lines come from two simulated daemons set up as in the quick start, on
+nothing per packet. These lines come from two simulated daemons set up as in the
+[quick start without hardware](#quick-start-without-hardware), on
 Linux, with a test script as the host. The script configured daemon A, toggled interference
 avoidance, sent packets, retuned the radio, turned it off and queued one more packet:
 

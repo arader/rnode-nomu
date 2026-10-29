@@ -26,7 +26,7 @@ ocp = 0x28
 
 [pty]
 symlink = "/run/rnode/rnode0"
-# For an rnsd running as another user: SupplementaryGroups=dialout in the unit, then
+# For an rnsd running as another user, add both accounts to dialout and uncomment these:
 # group = "dialout"
 # mode = "0660"
 
