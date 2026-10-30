@@ -18,9 +18,11 @@ Behaviour follows [RNode_Firmware](https://github.com/markqvist/RNode_Firmware) 
 ## Quick start
 
 These commands set up the reference uConsole with the AIO V2 on Raspberry Pi OS or Debian 13:
-Reticulum's `rnsd` and rnode-linux run as systemd services under their own accounts, and
-rnode-linux starts first. [Running as a systemd service](#running-as-a-systemd-service) explains
-each step. For another board, adapt the config as in
+Reticulum's `rnsd` and rnode-linux run as systemd services under their own accounts,
+rnode-linux starts first, and Nomad Network runs under your own account.
+[Running as a systemd service](#running-as-a-systemd-service) explains each step, and its
+subsection [Using rnsd from your own account](#using-rnsd-from-your-own-account) explains step 5.
+For another board, adapt the config as in
 [Setting up the LoRa hardware](#setting-up-the-lora-hardware); without hardware, see
 [Quick start without hardware](#quick-start-without-hardware).
 
@@ -117,7 +119,7 @@ sudo systemctl enable --now rnode-linux rnsd
 
 ```sh
 pinctrl get 16
-journalctl -b -u rnode-linux -u rnsd --no-pager
+sudo journalctl -b -u rnode-linux -u rnsd --no-pager
 sudo -u rnsd /opt/reticulum/bin/rnstatus --config /var/lib/rnsd/.reticulum
 ```
 
@@ -125,6 +127,34 @@ sudo -u rnsd /opt/reticulum/bin/rnstatus --config /var/lib/rnsd/.reticulum
 rnode-linux logs `radio online (host request): 914.875 MHz, 125 kHz, SF8, CR 4/5, 2 dBm` and `rnsd`
 logs `RNodeInterface[rnode-linux] is configured and powered up`. `rnstatus` lists the interface as
 up.
+
+**5. Run Nomad Network under your own account.** It reaches the radio through `rnsd`. To query
+`rnsd` as well, which Nomad Network's interface does at startup, a program needs `rnsd`'s RPC key.
+These commands keep the key in a file that only group `rns` can read, and give it to `rnsd` and to
+your account. They replace `~/.reticulum/config`, and expect `rnsd`'s config to have no
+`[reticulum]` section yet, as step 3 left it.
+
+```sh
+sudo /opt/reticulum/bin/pip install nomadnet
+sudo groupadd --system rns
+sudo install -m 0640 -o root -g rns /dev/null /etc/reticulum-rpc.key
+python3 -c 'import secrets; print(secrets.token_hex(32))' | sudo tee /etc/reticulum-rpc.key >/dev/null
+{ printf '\n[reticulum]\n  rpc_key = '; sudo cat /etc/reticulum-rpc.key; } | sudo -u rnsd tee -a /var/lib/rnsd/.reticulum/config >/dev/null
+sudo systemctl restart rnsd
+sudo usermod -aG rns "$USER"
+install -d -m 0700 ~/.reticulum
+install -m 0600 /dev/null ~/.reticulum/config
+{ printf '[reticulum]\n  rpc_key = '; sudo cat /etc/reticulum-rpc.key; printf '\n[interfaces]\n'; } > ~/.reticulum/config
+until /opt/reticulum/bin/rnstatus; do sleep 2; done
+/opt/reticulum/bin/nomadnet
+```
+
+The `until` line runs `rnstatus` as you until `rnsd` answers, a few seconds after its restart;
+until then `rnstatus` reports `Could not get RNS status`. Then it lists
+`RNodeInterface[rnode-linux]`. In Nomad Network, `Ctrl-P` shows your own address and `Ctrl-N`
+starts a conversation. Start it only while `rnsd` runs; see
+[Using rnsd from your own account](#using-rnsd-from-your-own-account) for this and for giving other
+accounts access.
 
 ## Contents
 
@@ -1403,9 +1433,10 @@ shows one to write yourself. The [Quick start](#quick-start) follows it, with th
 - Reticulum's manual starts `rnsd --service`, which logs to `logfile` in the config directory.
   Without `--service`, `rnsd` logs to standard output, which systemd sends to the journal, and
   `PYTHONUNBUFFERED=1` makes each line arrive as it is logged.
-- Reticulum's tools find the running instance through its config directory, so run them as `rnsd`
-  with the same `--config`, for example
-  `sudo -u rnsd /opt/reticulum/bin/rnstatus --config /var/lib/rnsd/.reticulum`.
+- Reticulum's tools need `rnsd`'s RPC key to query it. Run them as `rnsd` with the same
+  `--config`, for example
+  `sudo -u rnsd /opt/reticulum/bin/rnstatus --config /var/lib/rnsd/.reticulum`, or give your
+  account the key as in [Using rnsd from your own account](#using-rnsd-from-your-own-account).
 
 Upgrade Reticulum with `sudo /opt/reticulum/bin/pip install --upgrade rns`, then
 `sudo systemctl restart rnsd`. `pip` never touches `rnsd.service`, which is a file you wrote.
@@ -1460,6 +1491,45 @@ running, and every restart of `rnsd` power-cycles the modem.
 
 This only works if `rnsd` is a system service. A user service (`systemctl --user`) cannot be
 ordered against a system unit or tied to one; only `RNodeInterface`'s retry applies.
+
+### Using rnsd from your own account
+
+`rnsd` is Reticulum's shared instance: it opens the interfaces, and every other Reticulum program
+on the machine, such as Nomad Network, connects to it over a local socket and uses them. Each
+program has identities and addresses of its own; Nomad Network keeps its identity in
+`~/.nomadnetwork/storage/identity`, so back that file up. `rnsd` only relays the programs'
+packets, which are encrypted to their addresses.
+
+- **Any local account can use the radio.** On Linux the shared instance listens on an abstract
+  UNIX socket (`rns/default`), which has no file permissions, so every program on the machine can
+  connect and send and receive through `rnsd`. With `shared_instance_type = tcp` it listens on
+  `127.0.0.1` instead, which is just as open.
+- **Querying `rnsd` needs its RPC key.** Status, interface statistics and path tables go over RPC,
+  authenticated with a key that each instance derives from its own config directory unless
+  `rpc_key` is set. A program under another account gets `Could not get RNS status` from
+  `rnstatus`. Nomad Network 1.4.4's interface exits at startup with `digest sent was rejected`,
+  while its daemon mode (`nomadnet --daemon`) runs without the key. Reticulum reads `rpc_key`
+  only from the `[reticulum]` section of each instance's own config, so step 5 of the
+  [Quick start](#quick-start) writes the same key into `rnsd`'s config and yours. If `rnsd`'s
+  config already has a `[reticulum]` section, set `rpc_key` there instead of appending a second
+  section, with which `rnsd` does not start.
+- **Group `rns` controls who can read the key.** `/etc/reticulum-rpc.key` is readable by root and
+  group `rns`. To let another account use `rnsd`, add it with `sudo usermod -aG rns <account>`;
+  after logging in again, that account runs the three lines of step 5 that set up `~/.reticulum`,
+  with `cat` instead of `sudo cat`. Taking an account out of the group does not revoke a key it
+  has already copied: to revoke access, write a new key to the file, `rnsd`'s config and every
+  account's config, then restart `rnsd`. The commands pass the key through pipes, never as a
+  command argument, which other local users could read in the process list.
+- **Your config needs an `[interfaces]` section,** even an empty one: without it Nomad Network
+  1.4.4's interface exits with `KeyError: 'interfaces'`. Your programs use `rnsd`'s interfaces, so
+  the section can stay empty.
+- **Start programs only while `rnsd` runs.** The first Reticulum program to start becomes the
+  shared instance. If one starts before `rnsd`, `rnsd` logs
+  `connected to another shared local instance, this is probably NOT what you want!` and does not
+  open the radio. Quit the program, then run `sudo systemctl restart rnsd`. `rnsd` also answers
+  queries only once its interfaces are up, a few seconds after it starts: until then `rnstatus`
+  reports `Could not get RNS status`, and Nomad Network's interface exits with
+  `Connection refused`.
 
 ### Keeping local changes across updates
 
