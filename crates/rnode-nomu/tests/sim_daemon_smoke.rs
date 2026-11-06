@@ -1,4 +1,4 @@
-//! Two `rnode-linux` daemon processes on the simulated radio (`radio.driver = "sim"`), sharing one
+//! Two `rnode-nomu` daemon processes on the simulated radio (`radio.driver = "sim"`), sharing one
 //! air directory: KISS `CMD_DATA` frames a host writes to one daemon's PTY must reach the host on
 //! the other daemon's PTY byte for byte, across the process boundary (issue #31).
 //!
@@ -30,8 +30,8 @@ use nix::fcntl::OFlag;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use rnode_linux::config::{Config, RadioDriver};
-use rnode_linux::eeprom::{derive_serial_number, machine_id};
+use rnode_nomu::config::{Config, RadioDriver};
+use rnode_nomu::eeprom::{derive_serial_number, machine_id};
 
 // Framing.h
 const FEND: u8 = 0xC0;
@@ -527,12 +527,12 @@ impl Daemon {
         let file = |suffix: &str| run_dir.join(format!("{}{suffix}", spec.name));
         let (config_path, pty, log) = (file(".toml"), file(".pty"), file(".log"));
         let config = daemon_config(spec, &pty, &file("-settings.toml"));
-        let parsed = Config::from_toml(&config).expect("the smoke-test config must match rnode-linux's schema");
+        let parsed = Config::from_toml(&config).expect("the smoke-test config must match rnode-nomu's schema");
         assert_eq!(parsed.radio.driver, RadioDriver::Sim);
         fs::write(&config_path, config).expect("write daemon config");
         let log_file = File::create(&log).expect("create daemon log");
         let stderr = log_file.try_clone().expect("clone daemon log handle");
-        let child = Command::new(env!("CARGO_BIN_EXE_rnode-linux"))
+        let child = Command::new(env!("CARGO_BIN_EXE_rnode-nomu"))
             .arg("--config")
             .arg(&config_path)
             .current_dir(run_dir)
@@ -540,7 +540,7 @@ impl Daemon {
             .stdout(log_file)
             .stderr(stderr)
             .spawn()
-            .expect("spawn rnode-linux");
+            .expect("spawn rnode-nomu");
         Self { spec, child, pty, log }
     }
 }

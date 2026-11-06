@@ -3,7 +3,7 @@ name = "rnode-sx126x"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later AND MIT"
 repository.workspace = true
 description = "Portable embedded-hal SX1262 driver for RNode"
 

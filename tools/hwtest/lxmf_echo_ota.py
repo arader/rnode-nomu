@@ -2,7 +2,7 @@
 """Over-the-air LXMF echo round trip through an RNode, for real-RNode interoperability tests.
 
 The tool starts a Reticulum instance whose only interface is an RNodeInterface on --port (the
-PTY of an rnode-linux daemon, or a hardware RNode), with transport and instance sharing off, so
+PTY of an rnode-nomu daemon, or a hardware RNode), with transport and instance sharing off, so
 every packet it sends or receives crosses the radio. It then:
 
 1. waits for the interface to come online;
@@ -20,7 +20,7 @@ be known to the network (announced) so that the path request is answered.
 
 Every packet that crosses the RNodeInterface is printed as a WIRE line: UTC time, direction,
 length and Reticulum packet type, plus RSSI/SNR for received packets. With --daemon-log, the tool
-also checks that each of these packets appears in the rnode-linux debug log behind --port as a
+also checks that each of these packets appears in the rnode-nomu debug log behind --port as a
 TX or RX packet line, which also shows how many LoRa frames it took; the log must be on the same
 host, at log_level = "debug".
 
@@ -142,7 +142,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         epilog=__doc__.split("\n\n", 1)[1],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--port", required=True, help="serial port or PTY of the RNode, e.g. the rnode-linux symlink")
+    parser.add_argument("--port", required=True, help="serial port or PTY of the RNode, e.g. the rnode-nomu symlink")
     parser.add_argument("--frequency", type=int, required=True, help="carrier in Hz, within 902-928 MHz")
     parser.add_argument("--bandwidth", type=int, required=True, help="LoRa bandwidth in Hz")
     parser.add_argument("--sf", type=int, required=True, help="spreading factor, 5-12")
@@ -198,7 +198,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--daemon-log",
-        help="rnode-linux log (log_level = \"debug\") of the daemon behind --port, on this host: every "
+        help="rnode-nomu log (log_level = \"debug\") of the daemon behind --port, on this host: every "
         "packet the tool sends or receives must appear there as a TX or RX packet line",
     )
     parser.add_argument(
@@ -295,7 +295,7 @@ class WirePacket:
 
 @dataclass
 class DaemonPacket:
-    """A TX/RX packet line from the rnode-linux debug log."""
+    """A TX/RX packet line from the rnode-nomu debug log."""
 
     t: float
     direction: str
@@ -370,7 +370,7 @@ def instrument_rnode_interface(wire: WireLog):
 
 
 def parse_daemon_log(lines, start: float, end: float) -> list[DaemonPacket]:
-    """The TX/RX packet lines of an rnode-linux debug log with timestamps within [start, end],
+    """The TX/RX packet lines of an rnode-nomu debug log with timestamps within [start, end],
     widened by 5 s for the log's one-second resolution."""
     packets = []
     for line in lines:
@@ -835,7 +835,7 @@ class Session:
         return 0 if self.report() else 1
 
     def report_daemon_log(self) -> bool:
-        print("\nPACKETS (tool WIRE packets matched to rnode-linux TX/RX lines)")
+        print("\nPACKETS (tool WIRE packets matched to rnode-nomu TX/RX lines)")
         ok = True
         for packet in self.wire.packets:
             if packet.daemon is None:

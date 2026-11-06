@@ -1,6 +1,6 @@
 # RNS end-to-end harness
 
-`cargo xtask rns-e2e` checks rnode-linux against Reticulum itself. CI runs it: pull requests run
+`cargo xtask rns-e2e` checks rnode-nomu against Reticulum itself. CI runs it: pull requests run
 the SF7 scenario and main runs every scenario (see [In CI](#in-ci)). Run what a pull request runs
 with:
 
@@ -8,7 +8,7 @@ with:
 cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 ```
 
-Without `--scenario` it runs every scenario, as CI does on main. The harness builds `rnode-linux`,
+Without `--scenario` it runs every scenario, as CI does on main. The harness builds `rnode-nomu`,
 creates an isolated run directory under `target/rns-e2e`, starts two daemon instances with
 `radio.driver = "sim"` on a shared simulated air directory and distinct PTYs, and runs two separate
 Reticulum Python processes using `RNodeInterface`, or, in the `rnodeconf` scenario, Reticulum's
@@ -89,20 +89,20 @@ Prerequisites:
 
 ## In CI
 
-- **Pull requests:** `PR / test` (`.forgejo/workflows/pr.yml`) runs
+- **Pull requests:** `PR / test` (`.github/workflows/pr.yml`) runs
   `cargo xtask rns-e2e --fetch-reticulum --scenario sf7` after `cargo test`. Together with
   installing `uv`, it adds about a minute to the job.
-- **main:** `.forgejo/workflows/ci.yml` runs on every push to main, and on any branch from
+- **main:** `.github/workflows/ci.yml` runs on every push to main, and on any branch from
   Actions → CI → Run workflow. It runs the same checks as `PR / test`, then every scenario with
   `cargo xtask rns-e2e --fetch-reticulum`, `rnodeconf` included. Runs on main queue up rather than
   cancel each other.
 
-The CI image has Python 3.13 but no pip or `uv`. Both workflows install `uv` with the same
-"Install uv" step: a pinned release, checked against its sha256 before use. They set
-`UV_PYTHON_DOWNLOADS=never`, so the harness uses the image's Python and downloads nothing that is
-not pinned, and `UV_LINK_MODE=copy`, because uv's cache and the workspace are on different
-filesystems. `cargo test` also runs the harness's Rust-only counterpart,
-`crates/rnode-linux/tests/sim_daemon_smoke.rs`: two daemons on the simulated radio carry 1, 254,
+Both workflows run on GitHub's `ubuntu-24.04` runners, with Python 3.13 from
+`actions/setup-python` and Rust pinned in their "Toolchain" step (bump both together). They
+install `uv` with the same "Install uv" step: a pinned release, checked against its sha256 before
+use. They set `UV_PYTHON_DOWNLOADS=never`, so the harness uses that Python and downloads nothing
+that is not pinned. `cargo test` also runs the harness's Rust-only counterpart,
+`crates/rnode-nomu/tests/sim_daemon_smoke.rs`: two daemons on the simulated radio carry 1, 254,
 255 and 508-byte KISS data frames in both directions and silently drop a 509-byte frame.
 
 ## Pins
@@ -126,7 +126,7 @@ Everything the end-to-end test downloads is pinned:
   Without `--upgrade`, uv keeps the current pins where it can. A unit test checks that every
   package in the file is pinned with `==` and has sha256 hashes.
 - **uv:** the `version` and the two `sha256` values in the "Install uv" step of
-  `.forgejo/workflows/pr.yml` and `.forgejo/workflows/ci.yml`. To move it, take the hashes for
+  `.github/workflows/pr.yml` and `.github/workflows/ci.yml`. To move it, take the hashes for
   `uv-x86_64-unknown-linux-gnu.tar.gz` and `uv-aarch64-unknown-linux-gnu.tar.gz` from the release's
   `sha256.sum` (`https://github.com/astral-sh/uv/releases/download/<version>/sha256.sum`), check
   them against `sha256sum` of the downloads, and change both workflows: a unit test checks that

@@ -539,7 +539,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rnode-linux"
+name = "rnode-nomu"
 version = "0.2.0"
 dependencies = [
  "anyhow",
@@ -815,5 +815,5 @@ name = "xtask"
 version = "0.2.0"
 dependencies = [
  "rnode-core",
- "rnode-linux",
+ "rnode-nomu",
 ]

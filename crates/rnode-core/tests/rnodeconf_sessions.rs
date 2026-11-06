@@ -1,9 +1,9 @@
 //! Golden rnodeconf sessions (#66): the bytes Reticulum's `rnodeconf` 1.5.5 (`e40191b3`) wrote to
-//! an rnode-linux PTY, replayed into a node in the order they ran, with the replies RNode_Firmware
+//! an rnode-nomu PTY, replayed into a node in the order they ran, with the replies RNode_Firmware
 //! v1.86 gives to them.
 //!
 //! The writes were recorded with a logging proxy on a PTY pair between rnodeconf and simulated
-//! rnode-linux daemons, starting without saved settings: one with `[eeprom] serial_number = 42`
+//! rnode-nomu daemons, starting without saved settings: one with `[eeprom] serial_number = 42`
 //! ([`SESSIONS`]), and one with `[storage] eeprom` set and no file yet, which rnodeconf signed with
 //! a throwaway key ([`SIGNING_SESSIONS`]). Each write is listed with when it was made, in ms after
 //! rnodeconf started; one write can hold several frames, and the 156 writes of `--rom` are listed

@@ -43,7 +43,7 @@ const RNODECONF_SF: u8 = 8;
 const RNODECONF_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// The Reticulum that `--fetch-reticulum` tests and CI runs: 1.5.5-1-ge40191b3 (`RNS.__version__`
-/// 1.5.5). Every validation of rnode-linux against Reticulum so far used this commit.
+/// 1.5.5). Every validation of rnode-nomu against Reticulum so far used this commit.
 /// crates/xtask/README.md explains how to move the pin.
 const RETICULUM_REPO: &str = "https://github.com/markqvist/Reticulum.git";
 const RETICULUM_COMMIT: &str = "e40191b3d193b46b7f2d8a44424a594cd758839b";
@@ -108,7 +108,7 @@ fn usage() -> String {
     format!(
         "usage: cargo xtask rns-e2e [--scenario NAME]... [--reticulum PATH | --fetch-reticulum] [--keep-logs]
 
-Runs Reticulum's RNodeInterface against two simulated rnode-linux daemons, and rnodeconf against
+Runs Reticulum's RNodeInterface against two simulated rnode-nomu daemons, and rnodeconf against
 simulated daemons (crates/xtask/README.md).
 
   --scenario NAME    run only this scenario ({names}); repeat it to run several. Default: all
@@ -219,7 +219,7 @@ fn rns_e2e(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     run(
         &root,
-        Command::new(cargo).args(["build", "--locked", "-p", "rnode-linux", "--bin", "rnode-linux"]),
+        Command::new(cargo).args(["build", "--locked", "-p", "rnode-nomu", "--bin", "rnode-nomu"]),
     )?;
     let daemon = daemon_binary()?;
 
@@ -231,7 +231,7 @@ fn rns_e2e(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     let uv = find_uv()?;
     let venv = e2e_dir.join("venv");
     let requirements = root.join(REQUIREMENTS);
-    let requirements_marker = venv.join(".rnode-linux-e2e-requirements");
+    let requirements_marker = venv.join(".rnode-nomu-e2e-requirements");
     let requirements_fingerprint = requirements_fingerprint(&fs::read(&requirements)?);
     if !venv.join("pyvenv.cfg").exists() {
         run(
@@ -820,7 +820,7 @@ fn write_daemon_config(node: &NodePaths, air_dir: &Path, rssi: i16, snr: f32, ee
     )
 }
 
-/// An rnode-linux config for the simulated radio (see `crates/rnode-linux/src/config.rs`).
+/// An rnode-nomu config for the simulated radio (see `crates/rnode-nomu/src/config.rs`).
 fn daemon_config(
     air_dir: &Path,
     node_name: &str,
@@ -890,7 +890,7 @@ panic_on_interface_error = Yes
 loglevel = 6
 
 [interfaces]
-  [[rnode-linux-sim]]
+  [[rnode-nomu-sim]]
     type = RNodeInterface
     enabled = Yes
     port = {}
@@ -1066,7 +1066,7 @@ if __name__ == '__main__':
 const SERVER_PY: &str = r#"
 import hashlib, pathlib, sys, time, traceback
 import RNS
-APP='rnode_linux_e2e'
+APP='rnode_nomu_e2e'
 latest=None
 packets=[]
 resources=[]
@@ -1125,7 +1125,7 @@ raise SystemExit('server timed out')
 const CLIENT_PY: &str = r#"
 import hashlib, json, pathlib, sys, time, traceback
 import RNS
-APP='rnode_linux_e2e'
+APP='rnode_nomu_e2e'
 run=pathlib.Path(sys.argv[2])
 received=[]
 resource_done=False
@@ -1361,12 +1361,12 @@ fn daemon_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let daemon = xtask
         .parent()
         .ok_or("the xtask executable has no parent directory")?
-        .join("rnode-linux");
+        .join("rnode-nomu");
     if daemon.is_file() {
         Ok(daemon)
     } else {
         Err(format!(
-            "rnode-linux was not built next to xtask: {} is missing",
+            "rnode-nomu was not built next to xtask: {} is missing",
             daemon.display()
         )
         .into())

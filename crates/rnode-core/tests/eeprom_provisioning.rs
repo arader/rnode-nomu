@@ -90,7 +90,7 @@ fn info_blocks_are_checked_like_the_firmware_checks_them_at_boot() {
                 product: 0x03,
                 model: 0xFE,
             },
-            "product 0x03 and model 0xFE are not the homebrew RNode (0xF0, 0xFE) that rnode-linux is",
+            "product 0x03 and model 0xFE are not the homebrew RNode (0xF0, 0xFE) that rnode-nomu is",
         ),
         (
             changed(0x01, 0xFF),
@@ -98,7 +98,7 @@ fn info_blocks_are_checked_like_the_firmware_checks_them_at_boot() {
                 product: 0xF0,
                 model: 0xFF,
             },
-            "product 0xF0 and model 0xFF are not the homebrew RNode (0xF0, 0xFE) that rnode-linux is",
+            "product 0xF0 and model 0xFF are not the homebrew RNode (0xF0, 0xFE) that rnode-nomu is",
         ),
         (
             changed(0x02, 0x00),
@@ -246,7 +246,7 @@ fn an_invalid_info_block_is_not_locked() {
         [(
             Level::Warn,
             "refusing to lock the EEPROM: product 0x03 and model 0xA9 are not the homebrew RNode (0xF0, 0xFE) that \
-             rnode-linux is; it stays unprovisioned; sent ERROR_EEPROM_LOCKED"
+             rnode-nomu is; it stays unprovisioned; sent ERROR_EEPROM_LOCKED"
         )]
     );
     assert_eq!(n.storage().info(), &StoredInfo::Empty);

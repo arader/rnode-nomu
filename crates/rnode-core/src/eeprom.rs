@@ -6,7 +6,7 @@
 //! `rnodeconf` reads them before almost everything it does, and gives up if no reply comes, if the
 //! info lock byte is not [`INFO_LOCK_BYTE`], or if the checksum does not match.
 //!
-//! rnode-linux has no EEPROM, so the node builds an image from what it has: an info block with
+//! rnode-nomu has no EEPROM, so the node builds an image from what it has: an info block with
 //! the device information, and the TNC settings and interference-avoidance setting the node keeps
 //! elsewhere ([`image`]). The built-in info block ([`InfoBlock::unsigned`]) identifies a homebrew
 //! RNode ([`PRODUCT_HMBRW`], [`MODEL_FE`]). Both codes are in rnodeconf's tables, and neither names
@@ -85,7 +85,7 @@ pub const MODEL_FE: u8 = 0xFE;
 /// Hardware revision in the built-in info block. The firmware accepts any revision but `0x00` and
 /// `0xFF` (`eeprom_hwrev_valid()`).
 pub const HW_REV: u8 = 0x01;
-/// Manufacturing time in the built-in info block: 2026-10-22 00:00:00 UTC, when rnode-linux began
+/// Manufacturing time in the built-in info block: 2026-10-22 00:00:00 UTC, when rnode-nomu began
 /// to emulate the EEPROM. It is the same on every installation; there is no manufacturing to
 /// record.
 pub const MANUFACTURED: u32 = 1_792_627_200;
@@ -107,7 +107,7 @@ pub struct DeviceInfo {
 }
 
 impl DeviceInfo {
-    /// The device information rnode-linux reports by default: a homebrew RNode ([`PRODUCT_HMBRW`],
+    /// The device information rnode-nomu reports by default: a homebrew RNode ([`PRODUCT_HMBRW`],
     /// [`MODEL_FE`], revision [`HW_REV`]) with this serial number, made at [`MANUFACTURED`].
     pub const fn homebrew(serial: u32) -> Self {
         Self {
@@ -166,7 +166,7 @@ impl fmt::Display for InfoError {
             Self::Device { product, model } => write!(
                 f,
                 "product {product:#04X} and model {model:#04X} are not the homebrew RNode \
-                 ({PRODUCT_HMBRW:#04X}, {MODEL_FE:#04X}) that rnode-linux is"
+                 ({PRODUCT_HMBRW:#04X}, {MODEL_FE:#04X}) that rnode-nomu is"
             ),
             Self::HwRev(rev) => write!(f, "hardware revision {rev:#04X} is not valid"),
             Self::Checksum => f.write_str("its checksum is not the MD5 of its device information"),
@@ -227,7 +227,7 @@ impl InfoBlock {
         }
     }
 
-    /// Whether the block is provisioned and one rnode-linux reports: locked with
+    /// Whether the block is provisioned and one rnode-nomu reports: locked with
     /// [`INFO_LOCK_BYTE`], for the homebrew RNode ([`PRODUCT_HMBRW`], [`MODEL_FE`]), with a hardware
     /// revision the firmware accepts and a correct checksum, as firmware `validate_status()` checks
     /// at boot (`eeprom_lock_set()`, `eeprom_product_valid()`, `eeprom_model_valid()`,

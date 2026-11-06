@@ -1,10 +1,11 @@
-# rnode-linux
+# rnode-noµ
 
-rnode-linux turns a Linux computer with a LoRa modem on its SPI bus into an
-[RNode](https://unsigned.io/rnode/). The daemon drives the modem directly and exposes a
-pseudo-terminal (PTY) that speaks the RNode KISS host protocol. Reticulum's `RNodeInterface`, or
-any other RNode host, uses that PTY exactly like the serial port of a USB-attached RNode running
-RNode_Firmware. On the air, rnode-linux interoperates with real RNodes.
+rnode-noµ (written `rnode-nomu`, pronounced "R-node no-mew") is an RNode with no µC: it turns a
+Linux computer with a LoRa modem on its SPI bus into an [RNode](https://unsigned.io/rnode/), with
+no microcontroller in between. The daemon drives the modem directly and exposes a pseudo-terminal
+(PTY) that speaks the RNode KISS host protocol. Reticulum's `RNodeInterface`, or any other RNode
+host, uses that PTY exactly like the serial port of a USB-attached RNode running RNode_Firmware. On
+the air, rnode-nomu interoperates with real RNodes.
 
 The supported modem is the Semtech SX1262, optionally with a power amplifier after it (not yet
 tested on such hardware). The reference platform is the Clockwork uConsole (CM5) with the
@@ -18,8 +19,8 @@ Behaviour follows [RNode_Firmware](https://github.com/markqvist/RNode_Firmware) 
 ## Quick start
 
 These commands set up the reference uConsole with the AIO V2 on Raspberry Pi OS or Debian 13:
-Reticulum's `rnsd` and rnode-linux run as systemd services under their own accounts,
-rnode-linux starts first, and Nomad Network runs under your own account.
+Reticulum's `rnsd` and rnode-nomu run as systemd services under their own accounts,
+rnode-nomu starts first, and Nomad Network runs under your own account.
 [Running as a systemd service](#running-as-a-systemd-service) explains each step, and its
 subsection [Using rnsd from your own account](#using-rnsd-from-your-own-account) explains step 5.
 For another board, adapt the config as in
@@ -38,7 +39,7 @@ sudo python3 -m venv /opt/reticulum
 sudo /opt/reticulum/bin/pip install rns
 ```
 
-**2. Install rnode-linux.** This builds it with Rust from [rustup](https://rustup.rs) (skip the
+**2. Install rnode-nomu.** This builds it with Rust from [rustup](https://rustup.rs) (skip the
 `curl` and `.` lines if you already have Rust 1.85 or newer) and installs the binary, the config for
 the AIO V2 and the service unit. The config's `power = 16` makes the daemon switch on the AIO V2's
 LoRa power rail, GPIO16, when it starts; `config.txt` switches it off at boot.
@@ -48,11 +49,11 @@ sudo apt install -y git curl build-essential
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 . "$HOME/.cargo/env"
 git clone https://github.com/arader/rnode-nomu.git
-cd rnode-linux
-cargo build --release --locked -p rnode-linux
-sudo install -m 0755 target/release/rnode-linux /usr/local/bin/rnode-linux
-sudo install -m 0644 config.uconsole-aio-v2.toml /etc/rnode-linux.toml
-sudo install -m 0644 contrib/rnode-linux.service /etc/systemd/system/rnode-linux.service
+cd rnode-nomu
+cargo build --release --locked -p rnode-nomu
+sudo install -m 0755 target/release/rnode-nomu /usr/local/bin/rnode-nomu
+sudo install -m 0644 config.uconsole-aio-v2.toml /etc/rnode-nomu.toml
+sudo install -m 0644 contrib/rnode-nomu.service /etc/systemd/system/rnode-nomu.service
 ```
 
 **3. Create the accounts.** `rnode` runs the daemon and may use the SPI and GPIO devices; `rnsd`
@@ -63,8 +64,8 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin rnode
 sudo usermod -aG spi,gpio,dialout rnode
 sudo useradd --system --create-home --home-dir /var/lib/rnsd --shell /usr/sbin/nologin rnsd
 sudo usermod -aG dialout rnsd
-sudo sed -i -e 's/^# group = "dialout"/group = "dialout"/' -e 's/^# mode = "0660"/mode = "0660"/' /etc/rnode-linux.toml
-grep -E '^(power|group|mode) =' /etc/rnode-linux.toml
+sudo sed -i -e 's/^# group = "dialout"/group = "dialout"/' -e 's/^# mode = "0660"/mode = "0660"/' /etc/rnode-nomu.toml
+grep -E '^(power|group|mode) =' /etc/rnode-nomu.toml
 ```
 
 The last command prints `power = 16`, `group = "dialout"` and `mode = "0660"`. Then give `rnsd` a
@@ -76,7 +77,7 @@ reach (see [Running with Reticulum](#running-with-reticulum)).
 sudo -u rnsd mkdir -p /var/lib/rnsd/.reticulum
 sudo -u rnsd tee /var/lib/rnsd/.reticulum/config >/dev/null <<'EOF'
 [interfaces]
-  [[rnode-linux]]
+  [[rnode-nomu]]
     type = RNodeInterface
     enabled = yes
     port = /run/rnode/rnode0
@@ -88,7 +89,7 @@ sudo -u rnsd tee /var/lib/rnsd/.reticulum/config >/dev/null <<'EOF'
 EOF
 ```
 
-**4. Configure systemd** to start rnode-linux first, then `rnsd`. The `rnsd` unit follows
+**4. Configure systemd** to start rnode-nomu first, then `rnsd`. The `rnsd` unit follows
 [Reticulum's manual](https://reticulum.network/manual/using.html#systemwide-service) but logs to
 the journal. The ordering is a drop-in, a separate file, so it stays when you change `rnsd.service`:
 
@@ -110,22 +111,22 @@ ExecStart=/opt/reticulum/bin/rnsd --config /var/lib/rnsd/.reticulum
 WantedBy=multi-user.target
 EOF
 sudo mkdir -p /etc/systemd/system/rnsd.service.d
-printf '[Unit]\nWants=rnode-linux.service\nAfter=rnode-linux.service\n' | sudo tee /etc/systemd/system/rnsd.service.d/rnode-linux.conf >/dev/null
+printf '[Unit]\nWants=rnode-nomu.service\nAfter=rnode-nomu.service\n' | sudo tee /etc/systemd/system/rnsd.service.d/rnode-nomu.conf >/dev/null
 sudo systemctl daemon-reload
-sudo systemctl enable --now rnode-linux rnsd
+sudo systemctl enable --now rnode-nomu rnsd
 ```
 
 **Check it:**
 
 ```sh
 pinctrl get 16
-sudo journalctl -b -u rnode-linux -u rnsd --no-pager
+sudo journalctl -b -u rnode-nomu -u rnsd --no-pager
 sudo -u rnsd /opt/reticulum/bin/rnstatus --config /var/lib/rnsd/.reticulum
 ```
 
 `pinctrl get 16` reports `op dh` once the daemon has switched the rail on. In the journal,
-rnode-linux logs `radio online (host request): 914.875 MHz, 125 kHz, SF8, CR 4/5, 2 dBm` and `rnsd`
-logs `RNodeInterface[rnode-linux] is configured and powered up`. `rnstatus` lists the interface as
+rnode-nomu logs `radio online (host request): 914.875 MHz, 125 kHz, SF8, CR 4/5, 2 dBm` and `rnsd`
+logs `RNodeInterface[rnode-nomu] is configured and powered up`. `rnstatus` lists the interface as
 up.
 
 **5. Run Nomad Network under your own account.** It reaches the radio through `rnsd`. To query
@@ -151,7 +152,7 @@ until /opt/reticulum/bin/rnstatus; do sleep 2; done
 
 The `until` line runs `rnstatus` as you until `rnsd` answers, a few seconds after its restart;
 until then `rnstatus` reports `Could not get RNS status`. Then it lists
-`RNodeInterface[rnode-linux]`. In Nomad Network, `Ctrl-P` shows your own address and `Ctrl-N`
+`RNodeInterface[rnode-nomu]`. In Nomad Network, `Ctrl-P` shows your own address and `Ctrl-N`
 starts a conversation. Start it only while `rnsd` runs; see
 [Using rnsd from your own account](#using-rnsd-from-your-own-account) for this and for giving other
 accounts access.
@@ -159,7 +160,7 @@ accounts access.
 ## Contents
 
 - [Quick start](#quick-start)
-- [Why rnode-linux](#why-rnode-linux)
+- [Why rnode-nomu](#why-rnode-nomu)
 - [How it works](#how-it-works)
 - [Workspace layout](#workspace-layout)
 - [Safety and radio regulations](#safety-and-radio-regulations)
@@ -177,14 +178,15 @@ accounts access.
 - [Differences from RNode_Firmware](#differences-from-rnode_firmware)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
+- [How this was made](#how-this-was-made)
 - [Contributing](#contributing)
 - [License](#license)
 
-## Why rnode-linux
+## Why rnode-nomu
 
 An RNode is usually a microcontroller board with a LoRa modem, connected to the computer running
 Reticulum over USB serial or Bluetooth. Many single-board computers and handhelds already have a
-LoRa modem wired straight to their SPI bus, with no microcontroller in between. rnode-linux lets
+LoRa modem wired straight to their SPI bus, with no microcontroller in between. rnode-nomu lets
 that modem act as an RNode:
 
 - **No extra hardware.** The Linux host drives the modem itself; there is no microcontroller, no
@@ -192,14 +194,14 @@ that modem act as an RNode:
 - **Unchanged host software.** Reticulum's `RNodeInterface` opens the PTY as if it were a serial
   RNode. Reticulum needs no patches or plugins.
 - **Interoperability.** On-air framing, modulation parameters, sync word, preamble length,
-  low-data-rate optimisation and CSMA/CA follow the firmware, so real RNodes hear rnode-linux and
-  rnode-linux hears them.
+  low-data-rate optimisation and CSMA/CA follow the firmware, so real RNodes hear rnode-nomu and
+  rnode-nomu hears them.
 - **Linux tooling.** Configuration lives in a TOML file, the daemon runs under systemd, logs go to
   the journal with optional per-packet detail, and an SPI recorder captures every modem transaction.
 - **Testability.** The RNode logic is a pure Rust library tested against values derived from the
   firmware. A simulated radio runs the whole daemon in CI, under real Reticulum too.
 
-rnode-linux is not a Reticulum interface and not a new protocol: it is the modem side of the
+rnode-nomu is not a Reticulum interface and not a new protocol: it is the modem side of the
 existing RNode protocol, running on Linux instead of a microcontroller.
 
 ## How it works
@@ -210,7 +212,7 @@ flowchart LR
         RNS["Reticulum<br/>RNodeInterface"]
     end
     PTY["PTY<br/>e.g. /run/rnode/rnode0 → /dev/pts/3"]
-    subgraph Daemon["rnode-linux daemon (crates/rnode-linux)"]
+    subgraph Daemon["rnode-nomu daemon (crates/rnode-nomu)"]
         Loop["poll() event loop"]
         Node["Node&lt;R, S&gt;<br/>crates/rnode-core"]
         Store["TomlStorage<br/>saved radio settings"]
@@ -283,12 +285,12 @@ is off, the loop waits for at most 50 ms between checks.
 | [`crates/rnode-core`](crates/rnode-core) | Hardware-independent RNode logic: KISS host protocol, TX queue, split framing, PHY timing, CSMA/CA, the `Node<R, S>` state machine, and the `Radio` and `Storage` traits. No I/O; time and randomness are passed in, so tests are deterministic. |
 | [`crates/rnode-sx126x`](crates/rnode-sx126x) | SX1262 driver over `embedded-hal` 1.0 that mirrors RNode_Firmware `sx126x.cpp`. |
 | [`crates/rnode-sim`](crates/rnode-sim) | Simulated LoRa radio. Daemons on one host share an "air" directory of Unix datagram sockets. |
-| [`crates/rnode-linux`](crates/rnode-linux) | The daemon: config, GPIO character device, spidev, PTY, saved settings and event loop. |
+| [`crates/rnode-nomu`](crates/rnode-nomu) | The daemon: config, GPIO character device, spidev, PTY, saved settings and event loop. |
 | [`crates/xtask`](crates/xtask) | Repository automation: `cargo xtask rns-e2e` runs two simulated daemons under two Reticulum instances. |
 | [`tests/e2e/kiss_probe.py`](tests/e2e/kiss_probe.py) | Standalone KISS probe for a daemon PTY. |
 | [`tools/hwtest`](tools/hwtest) | Hardware bring-up for the uConsole AIO V2, RTL-SDR capture, LoRa burst analysis and an over-the-air LXMF echo test against a real RNode. Outside the Cargo workspace. |
 | [`config.example.toml`](config.example.toml), [`config.uconsole-aio-v2.toml`](config.uconsole-aio-v2.toml) | Example daemon configurations. |
-| [`contrib/rnode-linux.service`](contrib/rnode-linux.service) | Hardened systemd unit. |
+| [`contrib/rnode-nomu.service`](contrib/rnode-nomu.service) | Hardened systemd unit. |
 | [`DRIVERS.md`](DRIVERS.md) | How radio drivers work and how to add one. |
 | [`AGENTS.md`](AGENTS.md) | Rules for changing this repository. |
 
@@ -298,7 +300,7 @@ is off, the loop waits for at most 50 ms between checks.
   be legal where you operate. The examples in this repository use 914.875 MHz, 125 kHz and 2 dBm,
   which suits the 902–928 MHz ISM band of the US and some other countries in ITU region 2. They are
   illegal in other regions: Europe, for example, uses 863–870 MHz with duty-cycle limits.
-- **rnode-linux enforces no regional rules.** The host (Reticulum) chooses the frequency,
+- **rnode-nomu enforces no regional rules.** The host (Reticulum) chooses the frequency,
   bandwidth, spreading factor, coding rate and TX power over KISS, or they come from the saved
   settings file. The daemon only caps TX power at the SX1262's 22 dBm, or with a power amplifier
   at its [`max_output_dbm`](#radiopa), or at a lower ceiling you set with
@@ -321,7 +323,7 @@ The `sim` driver replaces the modem with a simulated one, so you can try the dae
 or macOS machine. Build it:
 
 ```sh
-cargo build --release --locked -p rnode-linux
+cargo build --release --locked -p rnode-nomu
 ```
 
 Save this as `sim-a.toml`:
@@ -349,15 +351,15 @@ both daemons from the repository root; relative paths resolve against the daemon
 directory:
 
 ```sh
-target/release/rnode-linux --config sim-a.toml &
-target/release/rnode-linux --config sim-b.toml &
+target/release/rnode-nomu --config sim-a.toml &
+target/release/rnode-nomu --config sim-b.toml &
 ```
 
 Each daemon logs its PTY and creates the symlink:
 
 ```text
-[2026-10-13T19:23:46Z INFO  rnode_linux] loaded config from sim-a.toml
-[2026-10-13T19:23:46Z INFO  rnode_linux] PTY slave: /dev/pts/1
+[2026-10-13T19:23:46Z INFO  rnode_nomu] loaded config from sim-a.toml
+[2026-10-13T19:23:46Z INFO  rnode_nomu] PTY slave: /dev/pts/1
 ```
 
 Now point two Reticulum instances at `target/rnode-a` and `target/rnode-b`, as described in
@@ -381,8 +383,8 @@ and send test packets; see [Simulation and tests](#simulation-and-tests). Stop t
 You need Rust 1.85 or newer (the workspace uses edition 2024).
 
 ```sh
-cargo build --release --locked -p rnode-linux
-sudo install -m 0755 target/release/rnode-linux /usr/local/bin/rnode-linux
+cargo build --release --locked -p rnode-nomu
+sudo install -m 0755 target/release/rnode-nomu /usr/local/bin/rnode-nomu
 ```
 
 The `sx1262` driver needs Linux: it uses spidev and the GPIO character device
@@ -390,10 +392,10 @@ The `sx1262` driver needs Linux: it uses spidev and the GPIO character device
 reference uConsole builds the daemon natively.
 
 ```text
-$ rnode-linux --help
-RNode Linux daemon
+$ rnode-nomu --help
+Linux userspace RNode daemon
 
-Usage: rnode-linux [OPTIONS]
+Usage: rnode-nomu [OPTIONS]
 
 Options:
   -c, --config <CONFIG>  Path to the TOML configuration file [default: config.toml]
@@ -401,8 +403,8 @@ Options:
   -h, --help             Print help
   -V, --version          Print version
 
-$ rnode-linux --version
-rnode-linux 0.2.0 (reports RNode firmware 1.86 to hosts)
+$ rnode-nomu --version
+rnode-nomu 0.2.0 (reports RNode firmware 1.86 to hosts)
 ```
 
 - `--config` defaults to `config.toml` in the working directory.
@@ -634,7 +636,7 @@ has no RXEN line. The board switches its peripherals on and off with GPIOs on th
    ```
 
    ```sh
-   sudo install -m 0644 config.uconsole-aio-v2.toml /etc/rnode-linux.toml
+   sudo install -m 0644 config.uconsole-aio-v2.toml /etc/rnode-nomu.toml
    ```
 
 5. **Try it in the foreground.** The config puts the symlink in `/run/rnode` and the saved settings
@@ -643,7 +645,7 @@ has no RXEN line. The board switches its peripherals on and off with GPIOs on th
 
    ```sh
    sudo install -d -o "$USER" /run/rnode /var/lib/rnode
-   rnode-linux --config /etc/rnode-linux.toml
+   rnode-nomu --config /etc/rnode-nomu.toml
    ```
 
    Your user needs read/write access to `/dev/spidev1.0` and `/dev/gpiochip15` (see
@@ -658,7 +660,7 @@ The [hardware test tools](#hardware-test-tools) can check the modem, the TCXO an
 before you involve the daemon; [`tools/hwtest/README.md`](tools/hwtest/README.md) describes the
 procedure.
 
-**Validation status.** On 2026-10-13 the daemon from `main` (commit `7bfb6f7`) passed a validation
+**Validation status.** On 2026-10-13 the daemon from `main` (commit `29018b7`) passed a validation
 run on the reference uConsole AIO V2 at 914.875 MHz, 2 dBm, 125 kHz, SF7, CR 4/5:
 
 - KISS detection, configuration, statistics and status pushes behaved as on an RNode;
@@ -669,7 +671,7 @@ run on the reference uConsole AIO V2 at 914.875 MHz, 2 dBm, 125 kHz, SF7, CR 4/5
 - an RTL-SDR capture showed 24-symbol preambles, sync word `0x12` and frame durations within
   0.34 ms of the Semtech time on air.
 
-A later run of `main` (commit `d001f7e`) exchanged LXMF messages over the air with a hardware
+A later run of `main` (commit `afe9882`) exchanged LXMF messages over the air with a hardware
 RNode on a live Reticulum network (914.875 MHz, 125 kHz, SF8, CR 4/5, 2 dBm). The path request
 was answered, and opportunistic and direct messages and a 2 KB resource transfer completed in
 both directions, with two-frame split packets each way; one link packet was lost once and LXMF
@@ -719,7 +721,7 @@ resent it. Every packet showed up in the daemon's debug log.
    Use the TCXO voltage from the module's datasheet: a missing or wrong `tcxo_voltage` leaves the
    modem without a working reference clock, and too high a voltage can damage the TCXO.
 
-5. **Check it** with `RUST_LOG=debug rnode-linux --config config.toml --spilog spi.csv` and a host,
+5. **Check it** with `RUST_LOG=debug rnode-nomu --config config.toml --spilog spi.csv` and a host,
    and see [Troubleshooting](#troubleshooting) if `begin()` fails.
 
 ## Configuration reference
@@ -812,7 +814,7 @@ than 11 dB above the measured noise floor and no LoRa carrier is detected (firmw
   starts or resets every transmission waits. After that, TX is deferred for as long as the
   interference lasts, which on a noisy host can be indefinitely.
 - The host can change the running value with `CMD_DIS_IA`, as `rnodeconf --ia-enable` and
-  `--ia-disable` do. Unlike the firmware, which stores the value in EEPROM and reboots, rnode-linux
+  `--ia-disable` do. Unlike the firmware, which stores the value in EEPROM and reboots, rnode-nomu
   keeps it until the daemon exits (including across `CMD_RESET`) and logs it at `INFO`. The config
   file stays the persistent setting.
 
@@ -833,7 +835,7 @@ power:
   the daemon at startup:
 
   ```text
-  fatal: load /etc/rnode-linux.toml: invalid config: radio.max_tx_power_dbm = 30 is out of range; the sx1262 driver allows 0 to 22 dBm
+  fatal: load /etc/rnode-nomu.toml: invalid config: radio.max_tx_power_dbm = 30 is out of range; the sx1262 driver allows 0 to 22 dBm
   ```
 
 - With [`[radio.pa]`](#radiopa), the TX power is the power after the amplifier, and the range and
@@ -841,7 +843,7 @@ power:
   on a board with an amplifier:
 
   ```text
-  fatal: load /etc/rnode-linux.toml: invalid config: radio.max_tx_power_dbm = 30 is out of range; with the gc1109 PA of [radio.pa] it allows 0 to 28 dBm, its max_output_dbm
+  fatal: load /etc/rnode-nomu.toml: invalid config: radio.max_tx_power_dbm = 30 is out of range; with the gc1109 PA of [radio.pa] it allows 0 to 28 dBm, its max_output_dbm
   ```
 
 - The ceiling limits the power the modem is set to. Antenna gain comes on top of it, so check the
@@ -981,7 +983,7 @@ Options of the simulated radio, used when `driver = "sim"`.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `air_dir` | path | `"target/rnode-air"` | Directory shared by all simulated radios that should hear each other. It must be private: mode `0700`, owned by the daemon's user and not a symlink. The daemon creates it if it is missing |
-| `node_name` | string | `"rnode-linux"` | Unique name of this radio; its socket is `<air_dir>/<node_name>.sock`. No `/`, not empty, not `.` or `..` |
+| `node_name` | string | `"rnode-nomu"` | Unique name of this radio; its socket is `<air_dir>/<node_name>.sock`. No `/`, not empty, not `.` or `..` |
 | `rssi_dbm` | integer | `-70` | RSSI reported for received packets, and as the channel RSSI while a matching transmission is on the air. The idle channel reads −110 dBm |
 | `snr_db` | float | `7.0` | SNR reported for received packets, in 0.25 dB steps |
 | `loss` | float | `0.0` | Probability, from 0.0 to 1.0, that this radio drops an otherwise good frame. Validated when `driver = "sim"` |
@@ -1013,7 +1015,7 @@ fatal: open PTY: refusing to replace /run/rnode/rnode0 with the PTY symlink: it 
 If another program replaces the symlink while the daemon runs, the daemon leaves it alone on exit:
 
 ```text
-[2026-10-13T19:24:02Z WARN  rnode_linux::pty] leaving /run/rnode/rnode0 in place: it is no longer the symlink to this daemon's PTY /dev/pts/0
+[2026-10-13T19:24:02Z WARN  rnode_nomu::pty] leaving /run/rnode/rnode0 in place: it is no longer the symlink to this daemon's PTY /dev/pts/0
 ```
 
 ### `[storage]`
@@ -1026,7 +1028,7 @@ If another program replaces the symlink while the daemon runs, the daemon leaves
 Without `radio_settings`, `CMD_CONF_SAVE` stores nothing, and the daemon says so at startup:
 
 ```text
-[2026-10-13T19:24:02Z WARN  rnode_linux] storage.radio_settings is not set: radio settings the host saves with CMD_CONF_SAVE are not kept, so they are lost on restart and on CMD_RESET
+[2026-10-13T19:24:02Z WARN  rnode_nomu] storage.radio_settings is not set: radio settings the host saves with CMD_CONF_SAVE are not kept, so they are lost on restart and on CMD_RESET
 ```
 
 The radio then stays off after a restart or a `CMD_RESET` until a host configures it again.
@@ -1052,7 +1054,7 @@ serial_number = 0x0000002A
 
 ### Validation and startup warnings
 
-`rnode-linux` refuses to start, with `fatal: load <file>: …`, when:
+`rnode-nomu` refuses to start, with `fatal: load <file>: …`, when:
 
 - the file is not valid TOML, or has an unknown section or key;
 - `radio.driver` is neither `"sx1262"` nor `"sim"`;
@@ -1125,7 +1127,7 @@ your `rnsd`) with the PTY symlink as its port:
 
 ```text
 [interfaces]
-  [[rnode-linux]]
+  [[rnode-nomu]]
     type = RNodeInterface
     enabled = yes
     port = /run/rnode/rnode0
@@ -1138,16 +1140,16 @@ your `rnsd`) with the PTY symlink as its port:
 
 The radio values are lab examples for the US 902–928 MHz band; use values that are legal where you
 are. Use Reticulum's own key names: `spreadingfactor` and `codingrate`, without underscores.
-Without `enabled = yes`, `rnsd` skips the interface (`Skipping disabled interface "rnode-linux"`);
+Without `enabled = yes`, `rnsd` skips the interface (`Skipping disabled interface "rnode-nomu"`);
 with `spreading_factor` or `coding_rate` it logs `Invalid spreading factor configured …` and
 `Invalid coding rate configured …`, and exits. This block, with only `port` changed, brings the
 interface up with `rnsd` 1.5.5 and the sim driver:
 
 ```text
-[Notice]   RNodeInterface[rnode-linux] is configured and powered up
+[Notice]   RNodeInterface[rnode-nomu] is configured and powered up
 ```
 
-When Reticulum opens the port it detects the RNode (rnode-linux reports firmware version 1.86),
+When Reticulum opens the port it detects the RNode (rnode-nomu reports firmware version 1.86),
 sends the frequency, bandwidth, TX power, spreading factor and coding rate, turns the radio on and
 checks the values the daemon reports back. The daemon logs `radio online (host request): …` with
 the settings it applied. RNodes that should hear each other need the same frequency, bandwidth and
@@ -1169,15 +1171,15 @@ spreading factor.
   Reticulum after restarting a simulated daemon.
 - Several Reticulum programs cannot share one PTY. Run a shared `rnsd` instance and let the other
   programs connect to it.
-- rnode-linux has not been tried with `rnsd` in a container. The symlink in `/run/rnode` points
+- rnode-nomu has not been tried with `rnsd` in a container. The symlink in `/run/rnode` points
   into the daemon's `/dev/pts`, which a container does not see by default, and the PTY gets a new
   number every time the daemon starts.
 
 ### Using rnodeconf
 
-`rnodeconf`, Reticulum's tool for setting up RNodes, works with rnode-linux for the jobs that apply
+`rnodeconf`, Reticulum's tool for setting up RNodes, works with rnode-nomu for the jobs that apply
 to it: device info, TNC and normal mode, and interference avoidance. Before almost anything else it
-reads the RNode's EEPROM with `CMD_ROM_READ`. rnode-linux has no EEPROM, so it answers with an image
+reads the RNode's EEPROM with `CMD_ROM_READ`. rnode-nomu has no EEPROM, so it answers with an image
 in the firmware's layout (`ROM.h`), built from what the daemon keeps:
 
 - the device information of a homebrew RNode: product `0xF0` and model `0xFE`, the firmware's codes
@@ -1236,13 +1238,13 @@ $ rnodeconf /run/rnode/rnode0 --info
 [23:20:51]        On-air bitrate   : 3.12 kbps
 ```
 
-`f0:fe:60` are the product, the model and the board rnode-linux reports; "Hombrew" is rnodeconf's
+`f0:fe:60` are the product, the model and the board rnode-nomu reports; "Hombrew" is rnodeconf's
 spelling. The modem chip, frequency range and maximum TX power are what rnodeconf lists for model
 `0xFE`. They limit nothing: the daemon accepts up to 22 dBm, or what
 [`max_tx_power_dbm`](#radio) and [`[radio.pa]`](#radiopa) allow. rnodeconf shows the
 manufacturing time in local time.
 
-| `rnodeconf` option | With rnode-linux |
+| `rnodeconf` option | With rnode-nomu |
 | --- | --- |
 | `--info` (`-i`) | The device info above. Without saved settings, `Device mode : Normal (host-controlled)` |
 | `--config` (`-c`) | Bluetooth and Wi-Fi disabled, interference avoidance as the daemon runs it, display defaults |
@@ -1251,7 +1253,7 @@ manufacturing time in local time.
 | `--ia-enable` (`-x`), `--ia-disable` (`-X`) | Interference avoidance with `CMD_DIS_IA`, until the daemon exits; [`[radio] avoid_interference`](#radio) applies again after a restart |
 | `--eeprom-dump`, `--eeprom-backup` | Print the image, or save it under `~/.config/rnodeconf/` |
 | `--eeprom-wipe` | Refused. rnodeconf prints `hardware error (code 03)` and sends `CMD_RESET` 13 s later, which resets the node; the saved settings and a signed info block stay. Use `--normal` to delete the settings |
-| `--update` (`-u`) | Fetches the firmware release list, finds no firmware for model `0xFE` and stops without flashing anything. Update rnode-linux by installing a new build |
+| `--update` (`-u`) | Fetches the firmware release list, finds no firmware for model `0xFE` and stops without flashing anything. Update rnode-nomu by installing a new build |
 | `--rom` (`-r`) | Signs the device with your own key, if [`[storage] eeprom`](#storage) is set and the EEPROM is unprovisioned; see [Signing with your own key](#signing-with-your-own-key). Otherwise rnodeconf refuses: "a valid EEPROM was already present" |
 | `--sign` (`-S`), `--firmware-hash` (`-H`) | Change nothing: `--sign` finds no device hash to sign, and the daemon ignores the hash `--firmware-hash` sends, with a `WARN` line, although rnodeconf prints "Firmware hash set" |
 | `--get-target-firmware-hash` (`-K`), `--get-firmware-hash` (`-L`) | rnodeconf stops with an `AttributeError`: it does not handle a device without firmware hashes |
@@ -1262,11 +1264,11 @@ starts a flasher, avrdude unless `--platform` names another, on the port before 
 is no bootloader behind the PTY, and the flasher's bytes go to the daemon. `--autoinstall` looks the
 port up among the serial ports, where a PTY never appears, and stops with "Could not find specified
 port"; `--extract` fails the same lookup with an `UnboundLocalError`. No other option starts a
-flasher: rnode-linux reports its own platform, `0x60`, for which rnodeconf has none.
+flasher: rnode-nomu reports its own platform, `0x60`, for which rnodeconf has none.
 
 **The "NOT verifiable" warning.** rnodeconf checks the signature in the EEPROM against the RNode
 vendor's keys and the user's own, and prints the warning above on every run when none verifies. An
-image rnode-linux makes up can never carry the vendor's signature. rnodeconf refuses nothing because
+image rnode-nomu makes up can never carry the vendor's signature. rnodeconf refuses nothing because
 of it: every option above works the same. The `--autoinstall` it suggests does not apply; signing
 the device with your own key, as homebrew RNodes are, removes the warning.
 
@@ -1281,7 +1283,7 @@ With [`[storage] eeprom`](#storage) set, the daemon keeps an EEPROM info block i
 unprovisioned: rnodeconf says "EEPROM is invalid, no further information available" for `--info`,
 and refuses `--tnc` and `--normal` until you have signed it. To sign it:
 
-1. Add the file to `/etc/rnode-linux.toml`, in `/var/lib/rnode`, which the
+1. Add the file to `/etc/rnode-nomu.toml`, in `/var/lib/rnode`, which the
    [systemd unit](#running-as-a-systemd-service) lets the daemon write, and restart the daemon:
 
    ```toml
@@ -1325,13 +1327,13 @@ with a `WARN` line, and the EEPROM reads as unprovisioned.
 
 ## Running as a systemd service
 
-rnode-linux is meant to run all the time, like a USB RNode that stays plugged in. It creates the
+rnode-nomu is meant to run all the time, like a USB RNode that stays plugged in. It creates the
 PTY when it starts, so a host cannot start it by opening the port.
-[`contrib/rnode-linux.service`](contrib/rnode-linux.service) runs the daemon as an unprivileged
+[`contrib/rnode-nomu.service`](contrib/rnode-nomu.service) runs the daemon as an unprivileged
 `rnode` user, with a read-only file system, a private `/tmp` and access to only the listed devices.
 systemd creates `/run/rnode` (`RuntimeDirectory=`) for the PTY symlink, and removes it when the
 daemon stops, and `/var/lib/rnode` (`StateDirectory=`) for the saved settings. Install the binary
-as in [Building](#building) and the config at `/etc/rnode-linux.toml`, as in the
+as in [Building](#building) and the config at `/etc/rnode-nomu.toml`, as in the
 [uConsole steps](#uconsole-cm5-with-the-hackergadgets-aio-v2). The [Quick start](#quick-start) does
 all of this, and runs `rnsd` as a service too.
 
@@ -1358,7 +1360,7 @@ account to those groups:
 sudo usermod -aG spi,gpio rnode
 ```
 
-On other distributions, add a udev rule such as `/etc/udev/rules.d/60-rnode-linux.rules`, adjusted
+On other distributions, add a udev rule such as `/etc/udev/rules.d/60-rnode-nomu.rules`, adjusted
 to your devices, and reload the rules with `sudo udevadm control --reload && sudo udevadm trigger`:
 
 ```text
@@ -1380,10 +1382,10 @@ Whoever can open it can transmit, retune the radio and read everything it receiv
 as a different user, share a group with it. This example uses `dialout`, the usual group for serial
 ports, which RNode users are often in already:
 
-1. In `/etc/rnode-linux.toml`, set `group = "dialout"` and `mode = "0660"` under `[pty]`.
+1. In `/etc/rnode-nomu.toml`, set `group = "dialout"` and `mode = "0660"` under `[pty]`.
 2. Let the daemon hand the PTY to that group: add its account with
    `sudo usermod -aG dialout rnode`, or set `SupplementaryGroups=dialout` in a drop-in
-   (`sudo systemctl edit rnode-linux`; see
+   (`sudo systemctl edit rnode-nomu`; see
    [Keeping local changes across updates](#keeping-local-changes-across-updates)).
 3. Add the user that runs `rnsd` to the group with `sudo usermod -aG dialout <rnsd-user>`, then log
    in again or restart its service.
@@ -1398,10 +1400,10 @@ program running under that account can use the SPI and GPIO devices.
 ### Installing the unit
 
 ```sh
-sudo install -m 0644 contrib/rnode-linux.service /etc/systemd/system/
+sudo install -m 0644 contrib/rnode-nomu.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now rnode-linux
-journalctl -u rnode-linux -f
+sudo systemctl enable --now rnode-nomu
+journalctl -u rnode-nomu -f
 ```
 
 To start `rnsd` after the daemon, see [Starting rnsd after the daemon](#starting-rnsd-after-the-daemon).
@@ -1412,12 +1414,12 @@ would kill it in the middle of such a packet (see [How long a stop takes](#how-l
 and [When the daemon is killed](#when-the-daemon-is-killed)). At common settings the daemon still
 stops within seconds: the timeout only limits how long a daemon that does not exit can hold up a
 stop or a reboot. If your hosts never use such slow settings, you can lower it in a drop-in
-(`sudo systemctl edit rnode-linux`) to a little more than the table's time for the slowest
+(`sudo systemctl edit rnode-nomu`) to a little more than the table's time for the slowest
 modulation they do use.
 
 The unit's file system is read-only apart from `/run/rnode` and `/var/lib/rnode`, so keep the
 symlink, the settings file, the EEPROM file and any `--spilog` file in those directories, for example
-`ExecStart=/usr/local/bin/rnode-linux --config /etc/rnode-linux.toml --spilog /var/lib/rnode/spi.csv`.
+`ExecStart=/usr/local/bin/rnode-nomu --config /etc/rnode-nomu.toml --spilog /var/lib/rnode/spi.csv`.
 
 ### Running rnsd as a service
 
@@ -1445,7 +1447,7 @@ Upgrade Reticulum with `sudo /opt/reticulum/bin/pip install --upgrade rns`, then
 
 The order is not essential. If `rnsd` starts first, `RNodeInterface` logs
 `Could not open serial port` and tries again every 5 seconds until the PTY appears. With the unit
-from Reticulum's manual (`After=multi-user.target`) and rnode-linux enabled, `rnsd` already starts
+from Reticulum's manual (`After=multi-user.target`) and rnode-nomu enabled, `rnsd` already starts
 after the daemon at boot, because `multi-user.target` waits for the units it starts.
 
 To make the order explicit, give `rnsd` a drop-in, as the [Quick start](#quick-start) does.
@@ -1457,8 +1459,8 @@ sudo systemctl edit rnsd
 
 ```ini
 [Unit]
-Wants=rnode-linux.service
-After=rnode-linux.service
+Wants=rnode-nomu.service
+After=rnode-nomu.service
 ```
 
 systemd saves these lines as `/etc/systemd/system/rnsd.service.d/override.conf` and reloads
@@ -1469,7 +1471,7 @@ The drop-in does not stop the daemon when `rnsd` stops. To run the daemon only w
 tie it to `rnsd` from its own side instead, and take it out of the boot targets:
 
 ```sh
-sudo systemctl edit rnode-linux
+sudo systemctl edit rnode-nomu
 ```
 
 ```ini
@@ -1479,13 +1481,13 @@ PartOf=rnsd.service
 ```
 
 ```sh
-sudo systemctl disable rnode-linux
-sudo systemctl add-wants rnsd.service rnode-linux.service
+sudo systemctl disable rnode-nomu
+sudo systemctl add-wants rnsd.service rnode-nomu.service
 ```
 
 Starting `rnsd` then starts the daemon first, and stopping or restarting `rnsd` stops or restarts
 the daemon too; `rnsd` needs no drop-in of its own. Run `disable` before `add-wants`:
-`systemctl disable rnode-linux` removes every link to the unit, the one `add-wants` makes included.
+`systemctl disable rnode-nomu` removes every link to the unit, the one `add-wants` makes included.
 With [`power_off_on_exit = true`](#gpio), the AIO V2's LoRa rail is then off while `rnsd` is not
 running, and every restart of `rnsd` power-cycles the modem.
 
@@ -1533,20 +1535,20 @@ packets, which are encrypted to their addresses.
 
 ### Keeping local changes across updates
 
-Installing `contrib/rnode-linux.service` from a newer version replaces the file in
+Installing `contrib/rnode-nomu.service` from a newer version replaces the file in
 `/etc/systemd/system`, and every change made in it. Drop-ins, in
-`/etc/systemd/system/rnode-linux.service.d/`, and the links that `systemctl enable` and
+`/etc/systemd/system/rnode-nomu.service.d/`, and the links that `systemctl enable` and
 `systemctl add-wants` make are separate files and stay. So keep local changes, such as
-`SupplementaryGroups=` or a lower `TimeoutStopSec=`, in a drop-in. To update rnode-linux:
+`SupplementaryGroups=` or a lower `TimeoutStopSec=`, in a drop-in. To update rnode-nomu:
 
 ```sh
-cd rnode-linux
+cd rnode-nomu
 git pull
-cargo build --release --locked -p rnode-linux
-sudo install -m 0755 target/release/rnode-linux /usr/local/bin/rnode-linux
-sudo install -m 0644 contrib/rnode-linux.service /etc/systemd/system/rnode-linux.service
+cargo build --release --locked -p rnode-nomu
+sudo install -m 0755 target/release/rnode-nomu /usr/local/bin/rnode-nomu
+sudo install -m 0644 contrib/rnode-nomu.service /etc/systemd/system/rnode-nomu.service
 sudo systemctl daemon-reload
-sudo systemctl restart rnode-linux
+sudo systemctl restart rnode-nomu
 ```
 
 `install` replaces the binary while the old one still runs, and the restart switches to the new
@@ -1554,7 +1556,7 @@ one. The restart first finishes the packet on the air
 ([How long a stop takes](#how-long-a-stop-takes)). `rnsd` then logs a serial port error for the
 old PTY (`[Errno 5] Input/output error`, and that the interface is offline), and about 5 seconds
 later `Reconnected port for RNodeInterface[…]`, once it has reopened the new PTY and configured the
-radio again ([Running with Reticulum](#running-with-reticulum)). `/etc/rnode-linux.toml` is your
+radio again ([Running with Reticulum](#running-with-reticulum)). `/etc/rnode-nomu.toml` is your
 copy: compare it with the example configs when you update.
 
 ## Logging
@@ -1581,8 +1583,8 @@ Linux, with a test script as the host. The script configured daemon A, toggled i
 avoidance, sent packets, retuned the radio, turned it off and queued one more packet:
 
 ```text
-[2026-10-13T19:23:46Z INFO  rnode_linux] loaded config from sim-a.toml
-[2026-10-13T19:23:46Z INFO  rnode_linux] PTY slave: /dev/pts/1
+[2026-10-13T19:23:46Z INFO  rnode_nomu] loaded config from sim-a.toml
+[2026-10-13T19:23:46Z INFO  rnode_nomu] PTY slave: /dev/pts/1
 [2026-10-13T19:23:48Z INFO  rnode_core::node] radio online (host request): 914.875 MHz, 125 kHz, SF7, CR 4/5, 2 dBm
 [2026-10-13T19:23:49Z INFO  rnode_core::node] host enabled interference avoidance (CMD_DIS_IA) until the process exits
 [2026-10-13T19:23:49Z INFO  rnode_core::node] host disabled interference avoidance (CMD_DIS_IA) until the process exits
@@ -1713,7 +1715,7 @@ end up in the journal, which keeps them until it is rotated away. For a debuggin
 running the daemon in the foreground with its log in a private file that you delete afterwards:
 
 ```sh
-(umask 077; RUST_LOG=trace rnode-linux --config /etc/rnode-linux.toml 2> trace.log)
+(umask 077; RUST_LOG=trace rnode-nomu --config /etc/rnode-nomu.toml 2> trace.log)
 ```
 
 ### Warnings
@@ -1759,7 +1761,7 @@ running the daemon in the foreground with its log in a private file that you del
   whole frame:
 
   ```text
-  [2026-10-13T19:17:58Z WARN  rnode_linux::pty] dropping host output because the PTY is not draining
+  [2026-10-13T19:17:58Z WARN  rnode_nomu::pty] dropping host output because the PTY is not draining
   ```
 
 - `leaving <path> in place: it is no longer the symlink to this daemon's PTY …`: something replaced
@@ -1785,7 +1787,7 @@ running the daemon in the foreground with its log in a private file that you del
   for example with `rnodeconf --eeprom-wipe`. Nothing changed; see
   [Using rnodeconf](#using-rnodeconf).
 - `ignoring CMD_FW_UPD: …`, `ignoring CMD_FW_HASH: …` and `ignoring CMD_DEV_SIG: …`: a host tried to
-  update the firmware or sign the device, which do not apply to rnode-linux.
+  update the firmware or sign the device, which do not apply to rnode-nomu.
 - `refusing to lock the EEPROM: …; it stays unprovisioned` and `refusing CMD_ROM_WRITE to EEPROM
   address 0x9C: only the info block, 0x00 to 0x9B, can be written`: `rnodeconf --rom` wrote an info
   block the daemon would not load, such as another product or model, or wrote beyond the info block;
@@ -1806,7 +1808,7 @@ file, which helps when bringing up a new board. It works only with the `sx1262` 
 `radio.driver = "sim"` the daemon refuses to start:
 
 ```sh
-rnode-linux --config /etc/rnode-linux.toml --spilog /var/lib/rnode/spi.csv
+rnode-nomu --config /etc/rnode-nomu.toml --spilog /var/lib/rnode/spi.csv
 ```
 
 ```text
@@ -1872,7 +1874,7 @@ The three `uv` lines are one check: CI makes the venv in a fresh temporary direc
 `--clear` here replaces the one an earlier run left. `--no-build` makes a missing numpy wheel fail
 the install instead of compiling numpy from source.
 The last one is the SF7 scenario of the [Reticulum end-to-end test](#reticulum-end-to-end-test).
-After every merge, CI on `main` ([`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml)) runs the
+After every merge, CI on `main` ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 same steps with every scenario of that test, so every commit on `main` is checked with all of them.
 
 - `rnode-core` checks the KISS protocol, framing, CSMA/CA, PHY timing and logging against values
@@ -1881,14 +1883,14 @@ same steps with every scenario of that test, so every commit on `main` is checke
   EEPROM included, and checks the replies.
 - `rnode-sx126x` checks the exact SPI bytes the driver sends against a mocked bus.
 - `rnode-sim` runs simulated radios against each other.
-- `rnode-linux` covers config parsing, storage, the PTY and its symlink, the GPIO chip lookup, the
+- `rnode-nomu` covers config parsing, storage, the PTY and its symlink, the GPIO chip lookup, the
   SPI recorder, the command line and the event loop, including shutdown during a TX burst, and
   checks that the systemd unit's `TimeoutStopSec=` covers the slowest packet, computed with
   rnode-core's airtime. Its
   `docs_examples` test parses every daemon config in this README and in [DRIVERS.md](DRIVERS.md)
   with the real config loader, checks the option names of the Reticulum example and the relative
   links in both, so the documentation cannot drift from the code.
-- The smoke test [`crates/rnode-linux/tests/sim_daemon_smoke.rs`](crates/rnode-linux/tests/sim_daemon_smoke.rs)
+- The smoke test [`crates/rnode-nomu/tests/sim_daemon_smoke.rs`](crates/rnode-nomu/tests/sim_daemon_smoke.rs)
   starts two daemon processes on the simulated radio. It checks that KISS data frames of 1, 254,
   255 and 508 bytes travel between their PTYs in both directions, that a 509-byte frame is
   dropped, and that each daemon's EEPROM image has the serial number derived for it. It is part of
@@ -2005,7 +2007,7 @@ tools/hwtest/sx126x-bringup/target/debug/sx126x-bringup --mode bringup
 
 ## Differences from RNode_Firmware
 
-rnode-linux matches RNode_Firmware v1.86 wherever a host or another radio can observe the
+rnode-nomu matches RNode_Firmware v1.86 wherever a host or another radio can observe the
 behaviour, except for these deliberate differences:
 
 **Host protocol** (most of these are listed in the module docs of `rnode_core::node`):
@@ -2028,7 +2030,7 @@ behaviour, except for these deliberate differences:
   that, as the firmware echoes the value it reads back, so the host sees that its setting did not
   take; see [Warnings](#warnings).
 - A shutdown request cuts a burst of transmissions short. The firmware's `flush_queue()` sends
-  every queued packet once a burst starts. rnode-linux stops between packets, never between the two
+  every queued packet once a burst starts. rnode-nomu stops between packets, never between the two
   frames of a split packet, and drops the packets still queued; see
   [Stopping the daemon](#stopping-the-daemon).
 - `CMD_RESET` resets the node's state and reloads the saved settings without restarting the
@@ -2072,7 +2074,7 @@ behaviour, except for these deliberate differences:
   Heltec V4 with its LNA among them, read the packet RSSI with `packetRssi(uint8_t)`, which leaves
   the gain in, so a V4 reports received packets that much stronger.
 
-Some firmware behaviour that surprises people is the same in rnode-linux: `CMD_STAT_RSSI` before
+Some firmware behaviour that surprises people is the same in rnode-nomu: `CMD_STAT_RSSI` before
 the first received packet reports −36 dBm (the firmware's −292 dBm placeholder after the RSSI
 offset wraps); `CMD_STAT_CHTM`, `CMD_STAT_PHYPRM` and `CMD_STAT_CSMA` are only pushed by the node,
 never answered on request; and data frames over 508 bytes are dropped without an error.
@@ -2080,7 +2082,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 ## Limitations
 
 - **`rnodeconf` calls the device not verifiable,** unless you
-  [sign it with your own key](#signing-with-your-own-key): the EEPROM image rnode-linux makes up
+  [sign it with your own key](#signing-with-your-own-key): the EEPROM image rnode-nomu makes up
   carries no signature. rnodeconf works anyway; [Using rnodeconf](#using-rnodeconf) lists what it
   can do.
 - **Commands for microcontroller boards are ignored:** display, framebuffer, Bluetooth, Wi-Fi, LEDs,
@@ -2102,7 +2104,7 @@ never answered on request; and data frames over 508 bytes are dropped without an
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `fatal: load config.toml: failed to read config.toml: No such file or directory (os error 2)` | No config in the working directory. Pass `--config /etc/rnode-linux.toml` |
+| `fatal: load config.toml: failed to read config.toml: No such file or directory (os error 2)` | No config in the working directory. Pass `--config /etc/rnode-nomu.toml` |
 | ``fatal: load …: … unknown field `frequency`, expected one of `driver`, `avoid_interference`, `max_tx_power_dbm`, `sx1262`, `sim`, `pa` `` | Link parameters do not belong in the config; the host sets them. Other unknown fields are usually typos |
 | `fatal: load …: invalid config: [spi] is required when radio.driver = "sx1262"` | `driver` defaults to `"sx1262"`. Add `[spi]` and `[gpio]`, or set `driver = "sim"` |
 | `fatal: load …: invalid config: pty.group "…" is not a known group` | Create the group, or fix the name |
@@ -2122,12 +2124,12 @@ never answered on request; and data frames over 508 bytes are dropped without an
 | Reticulum: "the reported radio parameters did not match your configuration" | Use an SX1262 bandwidth and at most 22 dBm, or at most `max_tx_power_dbm` if you set it (see [Running with Reticulum](#running-with-reticulum)). With `[radio.pa]`, use a `txpower` from the PA's minimum to its `max_output_dbm` (see [`[radio.pa]`](#radiopa)). If the daemon logged `radio set_… failed`, the modem rejected the setting; see [Warnings](#warnings) |
 | Reticulum: `Invalid spreading factor configured`, or `Skipping disabled interface` | Use the keys `spreadingfactor` and `codingrate`, and add `enabled = yes` (see [Running with Reticulum](#running-with-reticulum)) |
 | Reticulum: "Could not open serial port", or permission denied | The daemon is not running, `port` is not the symlink, or the PTY permissions do not let the `rnsd` user in (see [PTY permissions for rnsd](#pty-permissions-for-rnsd)) |
-| `rnodeconf`: "Could not download EEPROM from device" | Another program, such as `rnsd`, has the PTY open and took the reply: stop it first. rnode-linux builds without EEPROM emulation never reply; update. See [Using rnodeconf](#using-rnodeconf) |
+| `rnodeconf`: "Could not download EEPROM from device" | Another program, such as `rnsd`, has the PTY open and took the reply: stop it first. rnode-nomu builds without EEPROM emulation never reply; update. See [Using rnodeconf](#using-rnodeconf) |
 | `rnodeconf`: "WARNING! This device is NOT verifiable" | Expected: the EEPROM image carries no signature. rnodeconf works anyway; [sign the device with your own key](#signing-with-your-own-key) to remove the warning |
 | `rnodeconf`: "EEPROM is invalid, no further information available", or "This device contains a valid firmware, but EEPROM is invalid" | [`[storage] eeprom`](#storage) is set and the file does not exist, or is not a valid info block: sign the device with `rnodeconf --rom` (see [Signing with your own key](#signing-with-your-own-key)), or unset `eeprom` |
 | `rnodeconf --rom`: "a valid EEPROM was already present" | The device is signed already, or `[storage] eeprom` is unset. To sign it again, delete the EEPROM file |
 | `rnodeconf --rom`: "EEPROM was written, but validation failed" | The daemon refused the info block; its `WARN` line says why. Use `--product f0 --model fe --hwrev 1` |
-| `rnodeconf --eeprom-wipe`: "hardware error (code 03)" | rnode-linux refuses the wipe and keeps the saved settings. `rnodeconf --normal` deletes them |
+| `rnodeconf --eeprom-wipe`: "hardware error (code 03)" | rnode-nomu refuses the wipe and keeps the saved settings. `rnodeconf --normal` deletes them |
 | Two RNodes do not hear each other | They must share frequency, bandwidth and spreading factor. With `RUST_LOG=debug`, a `TX packet` line on one side and no `RX packet` line on the other points at RF: antenna, distance or power. A `CRC error` line instead means the frame was heard but corrupted: interference, a collision or a weak signal |
 | `WARN … dropping host output because the PTY is not draining` | No host is reading the PTY. Harmless while none is attached |
 | The daemon takes long to stop | It finishes the packet on the air, which takes seconds at high spreading factors and minutes at SF12 with the narrowest bandwidths; see [How long a stop takes](#how-long-a-stop-takes) |
@@ -2137,14 +2139,45 @@ For a closer look, run the daemon in the foreground with `RUST_LOG=trace` and `-
 compare the SPI log with the sequence `begin()` sends in
 [`crates/rnode-sx126x/src/lib.rs`](crates/rnode-sx126x/src/lib.rs).
 
+## How this was made
+
+Most of rnode-nomu's code, tests and documentation were written by AI coding agents
+(GitHub Copilot), following the rules in [AGENTS.md](AGENTS.md) and using RNode_Firmware and
+Reticulum's `RNodeInterface` as references. From October 2026, changes went through pull requests:
+CI ran on each, and AI review agents (code, security and QA) reviewed them before they were
+merged. The first commits carry `Co-authored-by: Copilot` trailers; the later ones are
+squash-merged pull requests whose messages are the agents' own descriptions of the change and how
+it was tested.
+
+Throughout development I have tested rnode-nomu on a ClockworkPi uConsole running a Raspberry Pi
+CM5 with the HackerGadgets AIO V2 add-on. With this hardware I've been communicating with a 2nd
+Raspberry Pi connected to a Heltec v3. Each set of changes was reviewed with an agent's assistance.
+Decisions were made to promote sane layering of concerns through Rust crates, such that different
+layers can be swapped out. Different drivers, SPI libraries, and more, are all meant to be
+replaceable for maximum compatibility.
+
+The project started on a private Forgejo instance, under the name rnode-linux, and moved here as
+rnode-nomu in November 2026. Before the move, its history was rewritten to replace private
+hostnames, and to give every commit one author and committer: Andrew Rader, with GitHub's no-reply
+address. Commit dates, co-author trailers and code are otherwise unchanged, and so are commit
+messages, apart from the IDs of the commits they cite. References such as `#3` or `(#94)` in older
+commit messages, code comments and documentation point to issues and pull requests on that
+instance, not to this repository.
+
 ## Contributing
 
-Changes go through pull requests on Forgejo (`infra/rnode-linux`), and CI runs the six
-[test steps](#tests) on each, the last of them the SF7 Reticulum end-to-end test; `main` gets every
-scenario after the merge. [AGENTS.md](AGENTS.md) has the rules: test layout, firmware
-references, and tests for every behaviour change. New radio drivers start with
-[DRIVERS.md](DRIVERS.md).
+Changes go through pull requests on GitHub, and CI runs the six [test steps](#tests) on each, the
+last of them the SF7 Reticulum end-to-end test; `main` gets every scenario after the merge.
+[AGENTS.md](AGENTS.md) has the rules: test layout, firmware references, and tests for every
+behaviour change. New radio drivers start with [DRIVERS.md](DRIVERS.md).
 
 ## License
 
-GPL-3.0-or-later; see the `license` field in [`Cargo.toml`](Cargo.toml).
+rnode-nomu is free software under the GNU General Public License, version 3 or (at your option)
+any later version: see [LICENSE](LICENSE).
+
+Much of it is a Rust translation of [RNode_Firmware](https://github.com/markqvist/RNode_Firmware):
+`rnode-core` follows the firmware's main program and utilities (Copyright (C) 2024, Mark Qvist,
+GPL-3.0-or-later), and `rnode-sx126x` follows its SX126x modem driver (Copyright Sandeep Mistry,
+Mark Qvist and Jacob Eva, MIT license). [NOTICE.md](NOTICE.md) lists what comes from where, with
+the notices those licenses require.

@@ -1,3 +1,7 @@
+// Translated from RNode_Firmware's sx126x.cpp (https://github.com/markqvist/RNode_Firmware),
+// Copyright Sandeep Mistry, Mark Qvist and Jacob Eva, under the MIT license; distributed as part
+// of rnode-nomu under GPL-3.0-or-later. See LICENSE and NOTICE.md.
+
 //! Firmware-exact SX1262 driver over `embedded-hal` 1.0.
 //!
 //! The command order, register values and packet handling mirror RNode_Firmware v1.86

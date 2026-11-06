@@ -12,7 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{Gid, Group};
-use rnode_linux::config::Config;
+use rnode_nomu::config::Config;
 
 const DOCS: &[&str] = &["README.md", "DRIVERS.md"];
 
@@ -145,7 +145,7 @@ fn check_toml_blocks(doc: &str, text: &str) -> usize {
         let merged = toml::to_string(&config).unwrap();
         if let Err(e) = Config::from_toml(&merged) {
             panic!(
-                "{doc}:{}: not a valid rnode-linux config: {e}\n\
+                "{doc}:{}: not a valid rnode-nomu config: {e}\n\
                  (fence TOML that is not a daemon config as ```toml ignore)",
                 block.line
             );

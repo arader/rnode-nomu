@@ -888,11 +888,11 @@ impl<R: Radio, S: Storage> Node<R, S> {
                 );
                 self.reply_error(kiss::ERROR_EEPROM_LOCKED);
             }
-            kiss::CMD_FW_UPD => log::warn!("ignoring CMD_FW_UPD: firmware updates do not apply to rnode-linux"),
+            kiss::CMD_FW_UPD => log::warn!("ignoring CMD_FW_UPD: firmware updates do not apply to rnode-nomu"),
             kiss::CMD_FW_HASH => log::warn!(
-                "ignoring CMD_FW_HASH: firmware updates do not apply to rnode-linux, which has no firmware hash"
+                "ignoring CMD_FW_HASH: firmware updates do not apply to rnode-nomu, which has no firmware hash"
             ),
-            kiss::CMD_DEV_SIG => log::warn!("ignoring CMD_DEV_SIG: device signing does not apply to rnode-linux"),
+            kiss::CMD_DEV_SIG => log::warn!("ignoring CMD_DEV_SIG: device signing does not apply to rnode-nomu"),
             // Display, Bluetooth and Wi-Fi commands are irrelevant for a Linux modem process, and
             // so are the device and firmware hashes, which the firmware only has on ESP32 and nRF52
             // (`CMD_DEV_HASH`, `CMD_HASHES`): the node ignores them, as the firmware ignores

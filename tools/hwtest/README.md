@@ -160,7 +160,8 @@ origin/main + origin/feat/core-csma + origin/fix/tx-timeout-scaling
 + origin/feat/sim-radio + origin/feat/core-protocol + origin/feat/linux-daemon
 ```
 
-On 2026-10-13 that branch built on the uConsole with:
+On 2026-10-13, when the project was still called rnode-linux, that branch built on the uConsole
+with:
 
 ```sh
 cargo build --release -p rnode-linux
@@ -199,7 +200,7 @@ IQ files are intentionally not committed.
 
 ## Over-the-air LXMF echo with a real RNode
 
-`lxmf_echo_ota.py` checks that rnode-linux interoperates over the air with a
+`lxmf_echo_ota.py` checks that rnode-nomu interoperates over the air with a
 hardware RNode, using an LXMF echo peer on an existing Reticulum network: any
 LXMF destination that answers each message with the same title and content.  The
 tool starts a Reticulum instance whose only interface is an `RNodeInterface` on
@@ -261,9 +262,10 @@ a radio nor Reticulum; see [Unit tests](#unit-tests).
 
 Setup:
 
-- DUT: uConsole CM5 / AIO V2 running rnode-linux from `main` at `d001f7e` with
-  the uConsole config (debug log, run-directory paths), and the tool with
-  rns 1.1.2 and lxmf 0.9.3, the peer's versions.
+- DUT: uConsole CM5 / AIO V2 running rnode-linux (as the project was then
+  called) from `main` at `afe9882` with the uConsole config (debug log,
+  run-directory paths), and the tool with rns 1.1.2 and lxmf 0.9.3, the
+  peer's versions.
 - Peer: an LXMF echo bot on the owner's Reticulum network (rns 1.1.2,
   lxmf 0.9.3), behind a transport node with a hardware RNode on 914.875 MHz,
   125 kHz, SF8, CR 4/5, 7 dBm; the echo is two hops from the DUT.

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Multi-process simulated LoRa radio for rnode-linux tests"
+description = "Multi-process simulated LoRa radio for rnode-nomu tests"
 
 [lints]
 workspace = true

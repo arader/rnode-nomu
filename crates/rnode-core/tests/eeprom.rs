@@ -355,7 +355,7 @@ fn eeprom_wipe_is_refused_and_keeps_the_saved_settings() {
     assert_eq!(read_image(&mut n), before);
 }
 
-/// Firmware updates and device signing do not apply to rnode-linux: `CMD_FW_UPD`, `CMD_FW_HASH`
+/// Firmware updates and device signing do not apply to rnode-nomu: `CMD_FW_UPD`, `CMD_FW_HASH`
 /// and `CMD_DEV_SIG` get no reply and one warning each, when the firmware would act on them
 /// (`CMD_FW_HASH` at `DEV_HASH_LEN`, 32 bytes, `CMD_DEV_SIG` at `DEV_SIG_LEN`, 64). The device and
 /// firmware hash queries stay unanswered, as on firmware without them, and are not logged.
@@ -374,15 +374,15 @@ fn firmware_update_and_signing_commands_are_ignored_with_a_warning() {
         [
             (
                 Level::Warn,
-                "ignoring CMD_FW_UPD: firmware updates do not apply to rnode-linux"
+                "ignoring CMD_FW_UPD: firmware updates do not apply to rnode-nomu"
             ),
             (
                 Level::Warn,
-                "ignoring CMD_FW_HASH: firmware updates do not apply to rnode-linux, which has no firmware hash"
+                "ignoring CMD_FW_HASH: firmware updates do not apply to rnode-nomu, which has no firmware hash"
             ),
             (
                 Level::Warn,
-                "ignoring CMD_DEV_SIG: device signing does not apply to rnode-linux"
+                "ignoring CMD_DEV_SIG: device signing does not apply to rnode-nomu"
             ),
         ]
     );

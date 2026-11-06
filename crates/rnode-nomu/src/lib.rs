@@ -6,10 +6,10 @@
 //! # Manual SX1262 smoke test
 //!
 //! On a Linux host with the radio wired, install the daemon, copy `config.uconsole-aio-v2.toml` to
-//! `/etc/rnode-linux.toml`, then run:
+//! `/etc/rnode-nomu.toml`, then run:
 //!
 //! ```text
-//! RUST_LOG=info rnode-linux --config /etc/rnode-linux.toml --spilog spi.csv
+//! RUST_LOG=info rnode-nomu --config /etc/rnode-nomu.toml --spilog spi.csv
 //! ```
 //!
 //! Open the configured PTY symlink from Reticulum as an RNode interface. Confirm that the daemon

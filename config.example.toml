@@ -1,4 +1,4 @@
-# Generic rnode-linux configuration.
+# Generic rnode-nomu configuration.
 # For simulation set radio.driver = "sim" and omit [spi]/[gpio].
 
 [spi]
@@ -60,7 +60,7 @@ ocp = 0x28
 
 [radio.sim]
 air_dir = "target/rnode-air"
-node_name = "rnode-linux"
+node_name = "rnode-nomu"
 rssi_dbm = -70
 snr_db = 7.0
 loss = 0.0

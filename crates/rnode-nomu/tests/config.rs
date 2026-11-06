@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{Gid, Group};
 use rnode_core::NodeConfig;
 use rnode_core::pa::ExternalPa;
-use rnode_linux::config::{Config, ConfigError, PaModel, RadioDriver, Sx1262Config, TCXO_VOLTAGES};
-use rnode_linux::pty::PtyPermissions;
+use rnode_nomu::config::{Config, ConfigError, PaModel, RadioDriver, Sx1262Config, TCXO_VOLTAGES};
+use rnode_nomu::pty::PtyPermissions;
 use rnode_sx126x::TcxoVoltage;
 
 use common::test_dir;
@@ -314,13 +314,13 @@ fn config_load_reports_real_paths() {
     let dir = test_dir("config-load");
     let missing = dir.join("missing.toml");
     let err = Config::load(&missing).unwrap_err();
-    assert!(matches!(err, rnode_linux::config::ConfigError::Read { .. }));
+    assert!(matches!(err, rnode_nomu::config::ConfigError::Read { .. }));
 
     let invalid = dir.join("invalid.toml");
     fs::write(&invalid, "[radio\n").unwrap();
     let err = Config::load(&invalid).unwrap_err();
     match err {
-        rnode_linux::config::ConfigError::Parse { path, .. } => assert_eq!(path, invalid),
+        rnode_nomu::config::ConfigError::Parse { path, .. } => assert_eq!(path, invalid),
         other => panic!("unexpected error: {other:?}"),
     }
 }
@@ -385,11 +385,11 @@ fn pty_mode_and_group_validation_errors() {
         assert!(message.contains(why), "{text:?}: {message}");
     }
 
-    let err = sim_config_with_pty("group = \"rnode-linux-no-such-group\"\nmode = \"0660\"\n").unwrap_err();
+    let err = sim_config_with_pty("group = \"rnode-nomu-no-such-group\"\nmode = \"0660\"\n").unwrap_err();
     assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
     assert!(
         err.to_string()
-            .contains("pty.group \"rnode-linux-no-such-group\" is not a known group"),
+            .contains("pty.group \"rnode-nomu-no-such-group\" is not a known group"),
         "{err}"
     );
 }
