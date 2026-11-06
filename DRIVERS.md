@@ -770,8 +770,7 @@ embedded-hal = "1.0"
 rnode-core = { path = "../rnode-core" }
 ```
 
-Keep dependencies small: the CI runner has little memory, and the crate should stay usable on
-small boards.
+Keep dependencies small: the crate should stay usable on small boards.
 
 ### 3. Define the board configuration and the error type
 

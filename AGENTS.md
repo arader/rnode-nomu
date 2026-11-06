@@ -49,10 +49,9 @@ we deliberately differ, say so in a doc comment.
   when you change `tools/hwtest` (its README shows how; the bring-up tool's build only on Linux),
   and the end-to-end test (it needs `uv`) before pushing changes to rnode-core, rnode-linux,
   rnode-sim or the harness (`crates/xtask`, `tests/e2e`). After each merge, CI on `main`
-  (`.forgejo/workflows/ci.yml`) runs the full suite: the same checks and every end-to-end
+  (`.github/workflows/ci.yml`) runs the full suite: the same checks and every end-to-end
   scenario.
-- Commit `Cargo.lock` whenever dependencies change. The CI runner has little memory: prefer small
-  dependencies.
+- Commit `Cargo.lock` whenever dependencies change. Prefer small dependencies.
 - Every behaviour change comes with tests. Prefer golden values derived from the firmware over
   round-trip tests against our own code (a self-consistent but incompatible implementation is how
   the split-framing bug, #3, went unnoticed).
@@ -60,7 +59,9 @@ we deliberately differ, say so in a doc comment.
 - Update README.md and DRIVERS.md with behaviour they describe (config keys, CLI flags, log
   formats, the `Radio` contract). `crates/rnode-linux/tests/docs_examples.rs` loads their config
   examples with the real parser and checks their links.
-- Never commit `.forgejo/token` or other secrets.
+- Code translated from RNode_Firmware keeps its attribution: when you port from a file
+  [NOTICE.md](NOTICE.md) does not list yet, add it there with its copyright and license.
+- Never commit secrets: tokens, keys, private hostnames or addresses.
 
 ## Test layout
 
@@ -75,10 +76,9 @@ we deliberately differ, say so in a doc comment.
 
 ## Workflow
 
-- `main` only changes through pull requests on Forgejo (`infra/rnode-linux`), squash-merged.
-- CI runs `PR / test`, then the `agent-actions` reviewers (pr-agent, security-agent, qa-agent);
-  findings at **high** or above block. Reply to every review comment with what you are doing
-  about it, then push the fix.
+- `main` only changes through pull requests on GitHub (`arader/rnode-nomu`), squash-merged.
+- CI runs `PR / test`; it must pass before a merge. Reply to every review comment with what you
+  are doing about it, then push the fix.
 - Reference issues in PRs (`Fixes #n`); open an issue for every bug you find that is out of
   scope for your change.
 

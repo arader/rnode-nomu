@@ -1,40 +1,47 @@
-name: CI
+name: PR
 
-# Verifies main after every merge, and any branch on demand (Actions → CI → Run workflow): the
-# checks of pr.yml's test job, then the Reticulum end-to-end test with every scenario. Pull requests
-# run only its SF7 scenario; SF11 adds Reticulum's timing against slow modulation. No agent
-# reviews: changes reach main through reviewed pull requests.
+# The merge gate for pull requests. Require the `test` check of this workflow on main (Settings →
+# Rules). It runs cargo fmt --check, cargo build --all-targets, cargo clippy --all-targets
+# -D warnings, cargo test, the unit tests of tools/hwtest (Python, without and with numpy, and the
+# bring-up tool's), and the SF7 scenario of the Reticulum end-to-end test (cargo xtask rns-e2e).
+# It is kept quick: of the end-to-end test it runs only the SF7 scenario, about a minute; ci.yml
+# runs every scenario on main.
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  pull_request:
 
-# Runs for the same ref queue up instead of cancelling each other: by default Forgejo cancels a
-# push run when the next push arrives, and every commit on main should get a complete run.
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ forgejo.ref }}
-  cancel-in-progress: false
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    runs-on: builder-node24
-    # About seven minutes, most of it SF11 airtime. The end-to-end test's own timeouts and retries
-    # end it within about three quarters of an hour even when downloads stall and every scenario
-    # hangs.
-    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    # A few minutes. The end-to-end test's own timeouts and retries end it within about a quarter
+    # of an hour even when downloads stall and the scenario hangs.
+    timeout-minutes: 30
     env:
-      # The runner has little memory and runs one job at a time (see infra/forgejo-runners), so keep
-      # rustc's peak memory down. These change how the code is compiled, not what is checked.
-      CARGO_BUILD_JOBS: "4"
+      # Smaller and faster CI builds. These change how the code is compiled, not what is checked.
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The Python of the hardware test tools' unit tests and the end-to-end harness: the lock
+      # files in tools/hwtest and tests/e2e are compiled for 3.13.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # A pinned Rust, so that a new release's lints cannot fail CI by themselves. ci.yml has the
+      # same step: bump both together.
       - name: Toolchain
         run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.0
           cargo --version
           cargo fmt --version
           cargo clippy --version
@@ -46,9 +53,9 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
         run: cargo test --locked
-      # The hardware test tools' Python unit tests: standard library only, so the image's Python
-      # runs them as it is. The capture analyzer's signal-processing tests need numpy, which the
-      # image lacks, so they are skipped here and run after uv is installed, below.
+      # The hardware test tools' Python unit tests: standard library only. The capture analyzer's
+      # signal-processing tests need numpy, which is not installed, so they are skipped here and
+      # run after uv is installed, below.
       - name: Python unit tests (tools/hwtest)
         run: python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
       # The bring-up tool's unit tests. The tool is outside the workspace, with its own lock file
@@ -56,9 +63,9 @@ jobs:
       # and SPI crates once more: about five seconds.
       - name: Bring-up unit tests (tools/hwtest/sx126x-bringup)
         run: cargo test --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml --locked
-      # uv runs the Reticulum end-to-end test's Python; the image has no uv or pip. The release is
-      # pinned and verified against the sha256 in its sha256.sum. pr.yml has the same step: bump
-      # both together (crates/xtask/README.md).
+      # uv runs the Reticulum end-to-end test's Python. The release is pinned and verified against
+      # the sha256 in its sha256.sum. ci.yml has the same step: bump both together
+      # (crates/xtask/README.md).
       - name: Install uv
         run: |
           set -euo pipefail
@@ -81,18 +88,15 @@ jobs:
           tar -xzf "$dir/uv.tar.gz" -C "$dir" --strip-components=1 --no-same-owner
           rm "$dir/uv.tar.gz"
           "$dir/uv" --version
-          echo "$dir" >> "$FORGEJO_PATH"
+          echo "$dir" >> "$GITHUB_PATH"
       # The hardware test tools' Python unit tests again, now with numpy for the capture analyzer's
       # signal-processing tests: the release tools/hwtest/requirements-test.txt pins with hashes
-      # (requirements-test.in says how to regenerate it), in a venv on the image's Python.
+      # (requirements-test.in says how to regenerate it), in a venv on the Python set up above.
       # HWTEST_REQUIRE_NUMPY makes a numpy that does not import an error, not skipped tests.
       - name: Python unit tests with numpy (tools/hwtest)
         env:
-          # The image's Python, never a downloaded one.
+          # The Python set up above, never a downloaded one.
           UV_PYTHON_DOWNLOADS: never
-          # uv's cache and the workspace are on different filesystems, so it copies instead of
-          # hardlinking; say so, rather than have it warn.
-          UV_LINK_MODE: copy
           HWTEST_REQUIRE_NUMPY: "1"
         run: |
           set -euo pipefail
@@ -101,14 +105,10 @@ jobs:
           uv pip install --python "$venv/bin/python" --require-hashes --no-build \
             -r tools/hwtest/requirements-test.txt
           "$venv/bin/python" -m unittest discover -s tools/hwtest -p 'test_*.py' -v
-      # Every scenario of the Reticulum end-to-end test, with the pinned Reticulum and Python
-      # packages: SF7 and SF11 run Reticulum's RNodeInterface against two simulated daemons, and
-      # rnodeconf runs Reticulum's rnodeconf against them, signing with a throwaway local key.
-      - name: RNS end-to-end (all scenarios)
+      # Reticulum's RNodeInterface against two simulated daemons, with the pinned Reticulum and
+      # Python packages. SF11, which takes about four minutes more, runs on main (ci.yml).
+      - name: RNS end-to-end (SF7)
         env:
-          # The image's Python, never a downloaded one.
+          # The Python set up above, never a downloaded one.
           UV_PYTHON_DOWNLOADS: never
-          # uv's cache and the workspace are on different filesystems, so it copies instead of
-          # hardlinking; say so, rather than have it warn.
-          UV_LINK_MODE: copy
-        run: cargo xtask rns-e2e --fetch-reticulum
+        run: cargo xtask rns-e2e --fetch-reticulum --scenario sf7

@@ -353,8 +353,8 @@ fn the_venv_marker_changes_with_the_requirements() {
     );
 }
 
-const PR_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/pr.yml");
-const CI_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/ci.yml");
+const PR_WORKFLOW: &str = include_str!("../../../.github/workflows/pr.yml");
+const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
 
 /// The lines of the step called `name` in `workflow`, from its `- name:` line to the next step,
 /// the comment above that, or the next job.
@@ -416,7 +416,7 @@ fn pr_and_ci_workflows_install_the_same_uv() {
         "curl --fail",
         "--retry 3",
         "sha256sum --check --strict",
-        "\"$FORGEJO_PATH\"",
+        "\"$GITHUB_PATH\"",
     ] {
         assert!(script.contains(expected), "{expected:?} missing from\n{script}");
     }

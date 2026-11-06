@@ -1,0 +1,117 @@
+name: CI
+
+# Verifies main after every merge, and any branch on demand (Actions → CI → Run workflow): the
+# checks of pr.yml's test job, then the Reticulum end-to-end test with every scenario. Pull requests
+# run only its SF7 scenario; SF11 adds Reticulum's timing against slow modulation.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Runs for the same ref queue up instead of cancelling each other, so that every commit on main
+# gets a complete run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    # About seven minutes, most of it SF11 airtime. The end-to-end test's own timeouts and retries
+    # end it within about three quarters of an hour even when downloads stall and every scenario
+    # hangs.
+    timeout-minutes: 60
+    env:
+      # Smaller and faster CI builds. These change how the code is compiled, not what is checked.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # The Python of the hardware test tools' unit tests and the end-to-end harness: the lock
+      # files in tools/hwtest and tests/e2e are compiled for 3.13.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # A pinned Rust, so that a new release's lints cannot fail CI by themselves. pr.yml has the
+      # same step: bump both together.
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.0
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Build
+        run: cargo build --locked --all-targets
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+      # The hardware test tools' Python unit tests: standard library only. The capture analyzer's
+      # signal-processing tests need numpy, which is not installed, so they are skipped here and
+      # run after uv is installed, below.
+      - name: Python unit tests (tools/hwtest)
+        run: python3 -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+      # The bring-up tool's unit tests. The tool is outside the workspace, with its own lock file
+      # and target directory, so this builds rnode-core, the SX1262 driver and the tool's GPIO
+      # and SPI crates once more: about five seconds.
+      - name: Bring-up unit tests (tools/hwtest/sx126x-bringup)
+        run: cargo test --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml --locked
+      # uv runs the Reticulum end-to-end test's Python. The release is pinned and verified against
+      # the sha256 in its sha256.sum. pr.yml has the same step: bump both together
+      # (crates/xtask/README.md).
+      - name: Install uv
+        run: |
+          set -euo pipefail
+          version=0.12.17
+          case "$(uname -m)" in
+            x86_64)
+              target=x86_64-unknown-linux-gnu
+              sha256=fa82fd8dde8e8eefdecada6aa0889666556cfceb690d06e0c3bca49eb3070a63 ;;
+            aarch64)
+              target=aarch64-unknown-linux-gnu
+              sha256=d636d1b678e9e7f367ecb22b46bd1cabbed234d6bc3b4d96365d2b507f72f86c ;;
+            *)
+              echo "no pinned uv for $(uname -m)" >&2
+              exit 1 ;;
+          esac
+          dir=$(mktemp -d "$RUNNER_TEMP/uv.XXXXXX")
+          curl --fail --silent --show-error --location --retry 3 --output "$dir/uv.tar.gz" \
+            "https://github.com/astral-sh/uv/releases/download/$version/uv-$target.tar.gz"
+          echo "$sha256  $dir/uv.tar.gz" | sha256sum --check --strict
+          tar -xzf "$dir/uv.tar.gz" -C "$dir" --strip-components=1 --no-same-owner
+          rm "$dir/uv.tar.gz"
+          "$dir/uv" --version
+          echo "$dir" >> "$GITHUB_PATH"
+      # The hardware test tools' Python unit tests again, now with numpy for the capture analyzer's
+      # signal-processing tests: the release tools/hwtest/requirements-test.txt pins with hashes
+      # (requirements-test.in says how to regenerate it), in a venv on the Python set up above.
+      # HWTEST_REQUIRE_NUMPY makes a numpy that does not import an error, not skipped tests.
+      - name: Python unit tests with numpy (tools/hwtest)
+        env:
+          # The Python set up above, never a downloaded one.
+          UV_PYTHON_DOWNLOADS: never
+          HWTEST_REQUIRE_NUMPY: "1"
+        run: |
+          set -euo pipefail
+          venv="$RUNNER_TEMP/hwtest-venv"
+          uv venv --python python3 "$venv"
+          uv pip install --python "$venv/bin/python" --require-hashes --no-build \
+            -r tools/hwtest/requirements-test.txt
+          "$venv/bin/python" -m unittest discover -s tools/hwtest -p 'test_*.py' -v
+      # Every scenario of the Reticulum end-to-end test, with the pinned Reticulum and Python
+      # packages: SF7 and SF11 run Reticulum's RNodeInterface against two simulated daemons, and
+      # rnodeconf runs Reticulum's rnodeconf against them, signing with a throwaway local key.
+      - name: RNS end-to-end (all scenarios)
+        env:
+          # The Python set up above, never a downloaded one.
+          UV_PYTHON_DOWNLOADS: never
+        run: cargo xtask rns-e2e --fetch-reticulum

@@ -2,5 +2,3 @@
 target/
 lcov.info
 __pycache__/
-
-.forgejo/token

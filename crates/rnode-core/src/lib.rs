@@ -1,3 +1,6 @@
+// Translated from RNode_Firmware (https://github.com/markqvist/RNode_Firmware),
+// Copyright (C) 2024, Mark Qvist, under GPL-3.0-or-later. See LICENSE and NOTICE.md.
+
 //! Hardware-independent RNode logic.
 //!
 //! This crate holds everything that decides *what* an RNode does, with no I/O of its own:

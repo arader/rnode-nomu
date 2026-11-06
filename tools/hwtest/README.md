@@ -261,7 +261,7 @@ a radio nor Reticulum; see [Unit tests](#unit-tests).
 
 Setup:
 
-- DUT: uConsole CM5 / AIO V2 running rnode-linux from `main` at `d001f7e` with
+- DUT: uConsole CM5 / AIO V2 running rnode-linux from `main` at `afe9882` with
   the uConsole config (debug log, run-directory paths), and the tool with
   rns 1.1.2 and lxmf 0.9.3, the peer's versions.
 - Peer: an LXMF echo bot on the owner's Reticulum network (rns 1.1.2,

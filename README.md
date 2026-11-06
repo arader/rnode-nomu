@@ -177,6 +177,7 @@ accounts access.
 - [Differences from RNode_Firmware](#differences-from-rnode_firmware)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
+- [How this was made](#how-this-was-made)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -658,7 +659,7 @@ The [hardware test tools](#hardware-test-tools) can check the modem, the TCXO an
 before you involve the daemon; [`tools/hwtest/README.md`](tools/hwtest/README.md) describes the
 procedure.
 
-**Validation status.** On 2026-10-13 the daemon from `main` (commit `7bfb6f7`) passed a validation
+**Validation status.** On 2026-10-13 the daemon from `main` (commit `29018b7`) passed a validation
 run on the reference uConsole AIO V2 at 914.875 MHz, 2 dBm, 125 kHz, SF7, CR 4/5:
 
 - KISS detection, configuration, statistics and status pushes behaved as on an RNode;
@@ -669,7 +670,7 @@ run on the reference uConsole AIO V2 at 914.875 MHz, 2 dBm, 125 kHz, SF7, CR 4/5
 - an RTL-SDR capture showed 24-symbol preambles, sync word `0x12` and frame durations within
   0.34 ms of the Semtech time on air.
 
-A later run of `main` (commit `d001f7e`) exchanged LXMF messages over the air with a hardware
+A later run of `main` (commit `afe9882`) exchanged LXMF messages over the air with a hardware
 RNode on a live Reticulum network (914.875 MHz, 125 kHz, SF8, CR 4/5, 2 dBm). The path request
 was answered, and opportunistic and direct messages and a 2 KB resource transfer completed in
 both directions, with two-frame split packets each way; one link packet was lost once and LXMF
@@ -1872,7 +1873,7 @@ The three `uv` lines are one check: CI makes the venv in a fresh temporary direc
 `--clear` here replaces the one an earlier run left. `--no-build` makes a missing numpy wheel fail
 the install instead of compiling numpy from source.
 The last one is the SF7 scenario of the [Reticulum end-to-end test](#reticulum-end-to-end-test).
-After every merge, CI on `main` ([`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml)) runs the
+After every merge, CI on `main` ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the
 same steps with every scenario of that test, so every commit on `main` is checked with all of them.
 
 - `rnode-core` checks the KISS protocol, framing, CSMA/CA, PHY timing and logging against values
@@ -2137,14 +2138,40 @@ For a closer look, run the daemon in the foreground with `RUST_LOG=trace` and `-
 compare the SPI log with the sequence `begin()` sends in
 [`crates/rnode-sx126x/src/lib.rs`](crates/rnode-sx126x/src/lib.rs).
 
+## How this was made
+
+Most of rnode-linux's code, tests and documentation were written by AI coding agents
+(GitHub Copilot), following the rules in [AGENTS.md](AGENTS.md) and using RNode_Firmware and
+Reticulum's `RNodeInterface` as references. From October 2026, changes went through pull requests:
+CI ran on each, and AI review agents (code, security and QA) reviewed them before they were
+merged. The first commits carry `Co-authored-by: Copilot` trailers; the later ones are
+squash-merged pull requests whose messages are the agents' own descriptions of the change and how
+it was tested.
+
+> **TODO (Andrew):** your part, in your own words: what you decided, what you reviewed, and what
+> you tested yourself.
+
+The project started on a private Forgejo instance and moved here in November 2026. Before the move,
+its history was rewritten to replace private hostnames, and to give every commit one author and
+committer: Andrew Rader, with GitHub's no-reply address. Commit dates, co-author trailers and code
+are otherwise unchanged, and so are commit messages, apart from the IDs of the commits they cite.
+References such as `#3` or `(#94)` in older commit messages, code comments and documentation point
+to issues and pull requests on that instance, not to this repository.
+
 ## Contributing
 
-Changes go through pull requests on Forgejo (`infra/rnode-linux`), and CI runs the six
-[test steps](#tests) on each, the last of them the SF7 Reticulum end-to-end test; `main` gets every
-scenario after the merge. [AGENTS.md](AGENTS.md) has the rules: test layout, firmware
-references, and tests for every behaviour change. New radio drivers start with
-[DRIVERS.md](DRIVERS.md).
+Changes go through pull requests on GitHub, and CI runs the six [test steps](#tests) on each, the
+last of them the SF7 Reticulum end-to-end test; `main` gets every scenario after the merge.
+[AGENTS.md](AGENTS.md) has the rules: test layout, firmware references, and tests for every
+behaviour change. New radio drivers start with [DRIVERS.md](DRIVERS.md).
 
 ## License
 
-GPL-3.0-or-later; see the `license` field in [`Cargo.toml`](Cargo.toml).
+rnode-linux is free software under the GNU General Public License, version 3 or (at your option)
+any later version: see [LICENSE](LICENSE).
+
+Much of it is a Rust translation of [RNode_Firmware](https://github.com/markqvist/RNode_Firmware):
+`rnode-core` follows the firmware's main program and utilities (Copyright (C) 2024, Mark Qvist,
+GPL-3.0-or-later), and `rnode-sx126x` follows its SX126x modem driver (Copyright Sandeep Mistry,
+Mark Qvist and Jacob Eva, MIT license). [NOTICE.md](NOTICE.md) lists what comes from where, with
+the notices those licenses require.
