@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use rnode_core::eeprom::{DeviceInfo, INFO_LEN, InfoBlock};
 use rnode_core::storage::{RadioSettings, Storage, StoredInfo};
-use rnode_linux::storage::TomlStorage;
+use rnode_nomu::storage::TomlStorage;
 use serial_test::serial;
 
 use common::test_dir;
@@ -61,7 +61,7 @@ fn the_eeprom_file_keeps_the_locked_info_block() {
     assert_eq!(restarted.load_info().unwrap(), StoredInfo::Empty);
 }
 
-/// A file that is not a locked info block rnode-linux takes, whatever is wrong with it, leaves
+/// A file that is not a locked info block rnode-nomu takes, whatever is wrong with it, leaves
 /// the EEPROM unprovisioned, and stays as it is until a host locks a new info block.
 #[test]
 fn an_eeprom_file_that_is_no_valid_info_block_reads_as_unprovisioned() {

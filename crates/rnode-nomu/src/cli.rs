@@ -1,4 +1,4 @@
-//! Support for the `rnode-linux` command line.
+//! Support for the `rnode-nomu` command line.
 
 use std::error::Error;
 use std::fmt;

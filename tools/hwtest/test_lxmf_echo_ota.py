@@ -388,7 +388,7 @@ class DaemonLogVerdict(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.mkdtemp(prefix=".scratch-", dir=HERE)
         self.addCleanup(shutil.rmtree, self.scratch)
-        self.log = os.path.join(self.scratch, "rnode-linux.log")
+        self.log = os.path.join(self.scratch, "rnode-nomu.log")
 
     def shut_down(self, lines):
         """A session that saw the WIRE packets and shut down with `lines` in the daemon log, or with

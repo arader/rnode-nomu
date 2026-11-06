@@ -1,6 +1,6 @@
 # Radio drivers
 
-This guide explains why rnode-linux separates radio drivers from the rest of the code, what the
+This guide explains why rnode-nomu separates radio drivers from the rest of the code, what the
 `rnode_core::Radio` trait expects from a driver, and how to add support for a new modem. The two
 drivers in the workspace serve as worked examples:
 
@@ -45,13 +45,13 @@ power rails. RNode_Firmware handles this with one modem class per chip family (`
 `sx127x.cpp`, `sx128x.cpp`) and board definitions in `Boards.h`, all behind one interface that
 the main loop calls.
 
-rnode-linux uses the same split:
+rnode-nomu uses the same split:
 
 | Layer | Where | Owns | Leaves alone |
 | --- | --- | --- | --- |
 | RNode logic | `rnode_core::Node` | KISS host protocol, TX queue, split framing, CSMA/CA, airtime, PHY parameters (preamble length, DCD timing), an external power amplifier's TX power mapping, statistics, saved settings | Anything chip-specific |
 | Radio driver | a crate implementing `rnode_core::Radio` | Chip commands and registers, bandwidth quantisation, power and SF ranges, low-data-rate bit, RSSI and SNR conversion (including an LNA's gain), TX-done wait, IRQ flags, carrier detect | Protocol, queueing, retries, persistence |
-| Platform | `rnode-linux` | Config file, opening spidev and GPIO lines, IRQ file descriptors, PTY, settings file, event loop, choosing the driver | Protocol and chip decisions |
+| Platform | `rnode-nomu` | Config file, opening spidev and GPIO lines, IRQ file descriptors, PTY, settings file, event loop, choosing the driver | Protocol and chip decisions |
 
 A new modem therefore needs one new crate and a few lines of daemon wiring. Nothing in
 `rnode-core` changes, and the protocol behaviour that Reticulum and other RNodes see stays the
@@ -76,7 +76,7 @@ flowchart TB
         PinT[["InputPin, OutputPin"]]
         DelayT[["DelayNs"]]
     end
-    subgraph linux["rnode-linux"]
+    subgraph linux["rnode-nomu"]
         Spi["spi::LinuxSpiDevice (spidev)"]
         Gpio["gpio::GpioInputPin, GpioOutputPin (gpiocdev)"]
         Delay["delay::StdDelay"]
@@ -123,7 +123,7 @@ where
 ```
 
 The daemon chooses the driver once, at startup, from `radio.driver` in the config
-(`crates/rnode-linux/src/main.rs`):
+(`crates/rnode-nomu/src/main.rs`):
 
 ```rust
 match config.radio.driver {
@@ -377,7 +377,7 @@ Guidelines for driver authors:
 
 ## Interrupts and the event loop
 
-The daemon's event loop, [`crates/rnode-linux/src/event_loop.rs`](crates/rnode-linux/src/event_loop.rs),
+The daemon's event loop, [`crates/rnode-nomu/src/event_loop.rs`](crates/rnode-nomu/src/event_loop.rs),
 waits for three things with one `poll()`: bytes from the host on the PTY, the modem's interrupt,
 and the node's next wake-up time.
 
@@ -1141,7 +1141,7 @@ fn frequency_is_programmed_like_the_firmware() {
 
 Then run the driver through `Node` with `rnode_core::MemoryStorage`, feeding KISS bytes into
 `handle_host_input()` as the event-loop tests in
-[`crates/rnode-linux/tests/event_loop.rs`](crates/rnode-linux/tests/event_loop.rs) do with a test
+[`crates/rnode-nomu/tests/event_loop.rs`](crates/rnode-nomu/tests/event_loop.rs) do with a test
 radio, to check that startup and retuning reach your driver in the expected order.
 
 ## Wiring a driver into the daemon
@@ -1150,9 +1150,9 @@ A driver crate does nothing until the daemon can select it. Wiring an SX127x in 
 places:
 
 1. **Dependency.** Add `rnode-sx127x = { path = "../rnode-sx127x" }` to
-   [`crates/rnode-linux/Cargo.toml`](crates/rnode-linux/Cargo.toml).
+   [`crates/rnode-nomu/Cargo.toml`](crates/rnode-nomu/Cargo.toml).
 
-2. **The driver name.** In [`crates/rnode-linux/src/config.rs`](crates/rnode-linux/src/config.rs),
+2. **The driver name.** In [`crates/rnode-nomu/src/config.rs`](crates/rnode-nomu/src/config.rs),
    add a variant to `RadioDriver`, its spelling to the hand-written `Deserialize` implementation
    and its error message, and to `Display`:
 
@@ -1210,7 +1210,7 @@ places:
    `[gpio]`, and check the driver's own values. Hardware errors that config parsing cannot see
    belong in the driver.
 
-6. **Construction.** In [`crates/rnode-linux/src/main.rs`](crates/rnode-linux/src/main.rs), add
+6. **Construction.** In [`crates/rnode-nomu/src/main.rs`](crates/rnode-nomu/src/main.rs), add
    an arm to both `run_daemon()` functions (the non-Linux one returns an error, as for the SX1262)
    and a constructor next to `run_sx1262()`:
 
@@ -1238,7 +1238,7 @@ places:
 7. **Examples and tests.** Add a commented `[radio.sx127x]` section to
    [`config.example.toml`](config.example.toml), and maybe a board file like
    [`config.uconsole-aio-v2.toml`](config.uconsole-aio-v2.toml). Extend
-   [`crates/rnode-linux/tests/config.rs`](crates/rnode-linux/tests/config.rs)
+   [`crates/rnode-nomu/tests/config.rs`](crates/rnode-nomu/tests/config.rs)
    with the new defaults and validation errors.
 
 8. **Documentation.** Add the keys to the [configuration reference](README.md#configuration-reference),

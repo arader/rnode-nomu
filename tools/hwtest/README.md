@@ -199,7 +199,7 @@ IQ files are intentionally not committed.
 
 ## Over-the-air LXMF echo with a real RNode
 
-`lxmf_echo_ota.py` checks that rnode-linux interoperates over the air with a
+`lxmf_echo_ota.py` checks that rnode-nomu interoperates over the air with a
 hardware RNode, using an LXMF echo peer on an existing Reticulum network: any
 LXMF destination that answers each message with the same title and content.  The
 tool starts a Reticulum instance whose only interface is an `RNodeInterface` on

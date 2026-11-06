@@ -1,5 +1,5 @@
 [package]
-name = "rnode-linux"
+name = "rnode-nomu"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

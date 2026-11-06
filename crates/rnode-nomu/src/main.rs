@@ -7,11 +7,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use clap::Parser;
 use log::{info, warn};
-use rnode_linux::cli::ErrorChain;
-use rnode_linux::config::{Config, RadioDriver};
+use rnode_nomu::cli::ErrorChain;
+use rnode_nomu::config::{Config, RadioDriver};
 
 #[derive(Parser, Debug)]
-#[command(name = "rnode-linux", about = "RNode Linux daemon", version = version())]
+#[command(name = "rnode-nomu", about = "RNode Linux daemon", version = version())]
 struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = "config.toml")]
@@ -94,8 +94,8 @@ fn run_daemon(config: Config, spilog: Option<PathBuf>, seed: u64) -> anyhow::Res
 
 fn run_sim(config: Config, seed: u64, shutdown: &std::sync::atomic::AtomicBool) -> anyhow::Result<()> {
     use rnode_core::Node;
-    use rnode_linux::event_loop::{FdIrqSource, run};
-    use rnode_linux::storage::TomlStorage;
+    use rnode_nomu::event_loop::{FdIrqSource, run};
+    use rnode_nomu::storage::TomlStorage;
     use rnode_sim::{SimConfig, SimRadio};
     use std::os::fd::BorrowedFd;
 
@@ -125,11 +125,11 @@ fn run_sx1262(
     shutdown: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<()> {
     use rnode_core::Node;
-    use rnode_linux::delay::StdDelay;
-    use rnode_linux::event_loop::run;
-    use rnode_linux::gpio::RadioGpio;
-    use rnode_linux::spi::{LinuxSpiDevice, SpiRecorder};
-    use rnode_linux::storage::TomlStorage;
+    use rnode_nomu::delay::StdDelay;
+    use rnode_nomu::event_loop::run;
+    use rnode_nomu::gpio::RadioGpio;
+    use rnode_nomu::spi::{LinuxSpiDevice, SpiRecorder};
+    use rnode_nomu::storage::TomlStorage;
     use rnode_sx126x::Sx126x;
 
     let spi_config = config
@@ -161,14 +161,14 @@ fn run_sx1262(
 /// The node's configuration: the settings of `config`, and the serial number of this installation.
 fn node_config(config: &Config) -> rnode_core::NodeConfig {
     rnode_core::NodeConfig {
-        serial_number: config.serial_number(rnode_linux::eeprom::machine_id().as_deref()),
+        serial_number: config.serial_number(rnode_nomu::eeprom::machine_id().as_deref()),
         ..config.node_config()
     }
 }
 
-fn open_pty(config: &Config) -> anyhow::Result<rnode_linux::pty::PtyPair> {
+fn open_pty(config: &Config) -> anyhow::Result<rnode_nomu::pty::PtyPair> {
     let permissions = config.pty.slave_permissions()?;
-    let pty = rnode_linux::pty::PtyPair::open_with_permissions(config.pty.symlink.as_deref(), permissions)
+    let pty = rnode_nomu::pty::PtyPair::open_with_permissions(config.pty.symlink.as_deref(), permissions)
         .context("open PTY")?;
     info!("PTY slave: {}", pty.slave_path().display());
     Ok(pty)

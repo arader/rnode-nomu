@@ -1,6 +1,6 @@
 //! The serial number in the EEPROM image that `rnodeconf` reads (`rnode_core::eeprom`).
 //!
-//! An RNode's serial number is assigned when its EEPROM is provisioned. rnode-linux has no EEPROM,
+//! An RNode's serial number is assigned when its EEPROM is provisioned. rnode-nomu has no EEPROM,
 //! so it derives a serial number that stays the same across restarts: from the machine ID, which
 //! identifies the installation, and the PTY symlink path, which tells several daemons on one
 //! machine apart. `[eeprom] serial_number` in the config replaces it.
@@ -15,9 +15,11 @@ use md5::{Digest, Md5};
 /// systems without systemd keep (machine-id(5)).
 pub const MACHINE_ID_PATHS: [&str; 2] = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
 
-/// What the hashed data starts with, so that the serial number is specific to rnode-linux.
-/// machine-id(5) asks applications not to expose the machine ID, but to hash it with a key of
-/// their own; only 4 bytes of this MD5 digest are used, which cannot give the machine ID away.
+/// What the hashed data starts with, so that the serial number is specific to this daemon. It keeps
+/// the project's former name, rnode-linux, so that the serial numbers daemons derived before the
+/// rename stay the same. machine-id(5) asks applications not to expose the machine ID, but to hash
+/// it with a key of their own; only 4 bytes of this MD5 digest are used, which cannot give the
+/// machine ID away.
 const SERIAL_NUMBER_KEY: &[u8] = b"rnode-linux EEPROM serial number\0";
 
 /// The machine ID, from the first of [`MACHINE_ID_PATHS`] that holds one; see [`machine_id_from`].

@@ -8,16 +8,16 @@ use std::path::{Path, PathBuf};
 #[test]
 fn gpio_resolve_chip_handles_paths_and_names() {
     assert_eq!(
-        rnode_linux::gpio::resolve_chip("/dev/gpiochip15").unwrap(),
+        rnode_nomu::gpio::resolve_chip("/dev/gpiochip15").unwrap(),
         PathBuf::from("/dev/gpiochip15")
     );
     assert_eq!(
-        rnode_linux::gpio::resolve_chip("gpiochip15").unwrap(),
+        rnode_nomu::gpio::resolve_chip("gpiochip15").unwrap(),
         PathBuf::from("/dev/gpiochip15")
     );
     assert!(matches!(
-        rnode_linux::gpio::resolve_chip("definitely-not-a-gpio-label"),
-        Err(rnode_linux::gpio::GpioError::ChipNotFound { .. })
+        rnode_nomu::gpio::resolve_chip("definitely-not-a-gpio-label"),
+        Err(rnode_nomu::gpio::GpioError::ChipNotFound { .. })
     ));
 }
 
@@ -26,7 +26,7 @@ fn gpio_resolve_chip_handles_paths_and_names() {
 #[cfg(target_os = "linux")]
 #[test]
 fn gpio_chip_scan_skips_chips_whose_label_cannot_be_read() {
-    use rnode_linux::gpio::{GpioError, UnreadableChip, find_chip_by_label};
+    use rnode_nomu::gpio::{GpioError, UnreadableChip, find_chip_by_label};
 
     let chips = ["/dev/gpiochip0", "/dev/gpiochip1", "/dev/gpiochip2", "/dev/gpiochip3"].map(PathBuf::from);
     let read = std::cell::RefCell::new(Vec::new());

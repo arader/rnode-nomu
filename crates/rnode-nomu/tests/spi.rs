@@ -3,7 +3,7 @@
 mod common;
 
 use embedded_hal::spi::Operation;
-use rnode_linux::spi::{SpiRecorder, SpiSegmentKind, build_segment_plan};
+use rnode_nomu::spi::{SpiRecorder, SpiSegmentKind, build_segment_plan};
 
 use common::test_dir;
 

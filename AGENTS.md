@@ -4,7 +4,7 @@ Guidance for anyone (human or agent) changing this repository.
 
 ## What this is
 
-rnode-linux is a Linux daemon that turns a LoRa modem on a host's SPI bus into an RNode: it
+rnode-nomu is a Linux daemon that turns a LoRa modem on a host's SPI bus into an RNode: it
 exposes a PTY speaking the RNode KISS host protocol, so Reticulum's `RNodeInterface` (and other
 RNode hosts) can use it exactly like an RNode_Firmware device. On the air it must interoperate
 with real RNodes.
@@ -14,7 +14,7 @@ with real RNodes.
 - `crates/rnode-core` — hardware-independent RNode logic (KISS host protocol, TX queue, split
   framing, PHY/CSMA, the `Node` state machine) plus the `Radio` and `Storage` traits. No I/O;
   time is passed in as `now_ms` and randomness comes from a seed, so tests are deterministic.
-- `crates/rnode-linux` — the daemon on top of `rnode-core` (config, GPIO, SPI, PTY, saved
+- `crates/rnode-nomu` — the daemon on top of `rnode-core` (config, GPIO, SPI, PTY, saved
   settings, event loop).
 - Modem drivers implement `rnode_core::Radio` in their own crates: `crates/rnode-sx126x` for the
   SX1262, `crates/rnode-sim` for the simulated radio. DRIVERS.md explains the contract.
@@ -47,7 +47,7 @@ we deliberately differ, say so in a doc comment.
   `cargo xtask rns-e2e --fetch-reticulum --scenario sf7`; all eight must pass (this is the CI
   gate). Run the four cargo commands locally before every push, the `tools/hwtest` unit tests
   when you change `tools/hwtest` (its README shows how; the bring-up tool's build only on Linux),
-  and the end-to-end test (it needs `uv`) before pushing changes to rnode-core, rnode-linux,
+  and the end-to-end test (it needs `uv`) before pushing changes to rnode-core, rnode-nomu,
   rnode-sim or the harness (`crates/xtask`, `tests/e2e`). After each merge, CI on `main`
   (`.github/workflows/ci.yml`) runs the full suite: the same checks and every end-to-end
   scenario.
@@ -57,7 +57,7 @@ we deliberately differ, say so in a doc comment.
   the split-framing bug, #3, went unnoticed).
 - New code is `unsafe`-free (workspace lint `unsafe_code = "forbid"`).
 - Update README.md and DRIVERS.md with behaviour they describe (config keys, CLI flags, log
-  formats, the `Radio` contract). `crates/rnode-linux/tests/docs_examples.rs` loads their config
+  formats, the `Radio` contract). `crates/rnode-nomu/tests/docs_examples.rs` loads their config
   examples with the real parser and checks their links.
 - Code translated from RNode_Firmware keeps its attribution: when you port from a file
   [NOTICE.md](NOTICE.md) does not list yet, add it there with its copyright and license.

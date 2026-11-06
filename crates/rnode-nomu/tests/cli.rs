@@ -11,15 +11,15 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use rnode_linux::cli::ErrorChain;
-use rnode_linux::config::Config;
-use rnode_linux::spi::SpiRecorder;
+use rnode_nomu::cli::ErrorChain;
+use rnode_nomu::config::Config;
+use rnode_nomu::spi::SpiRecorder;
 
 use common::test_dir;
 
-/// Run the `rnode-linux` binary with `args`; fail if it is still running after 10 s.
-fn rnode_linux(args: &[&OsStr]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rnode-linux"))
+/// Run the `rnode-nomu` binary with `args`; fail if it is still running after 10 s.
+fn rnode_nomu(args: &[&OsStr]) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rnode-nomu"))
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -32,7 +32,7 @@ fn rnode_linux(args: &[&OsStr]) -> Output {
             child.kill().unwrap();
             let output = child.wait_with_output().unwrap();
             panic!(
-                "rnode-linux {args:?} did not exit; stderr: {}",
+                "rnode-nomu {args:?} did not exit; stderr: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -84,7 +84,7 @@ fn error_chain_names_each_cause_once() {
 fn fatal_errors_name_each_cause_once() {
     let dir = test_dir("cli-fatal");
     let missing = dir.join("missing.toml");
-    let output = rnode_linux(&["--config".as_ref(), missing.as_os_str()]);
+    let output = rnode_nomu(&["--config".as_ref(), missing.as_os_str()]);
     assert_eq!(output.status.code(), Some(1));
     let path = missing.display();
     assert_eq!(
@@ -96,13 +96,13 @@ fn fatal_errors_name_each_cause_once() {
 #[test]
 fn version_names_the_firmware_version_reported_to_hosts() {
     for flag in ["--version", "-V"] {
-        let output = rnode_linux(&[flag.as_ref()]);
+        let output = rnode_nomu(&[flag.as_ref()]);
         assert!(output.status.success(), "{flag}: {output:?}");
         // Firmware `Config.h`: MAJ_VERS 0x01, MIN_VERS 0x56.
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
             format!(
-                "rnode-linux {} (reports RNode firmware 1.86 to hosts)\n",
+                "rnode-nomu {} (reports RNode firmware 1.86 to hosts)\n",
                 env!("CARGO_PKG_VERSION")
             ),
             "{flag}"
@@ -116,7 +116,7 @@ fn spilog_is_refused_with_the_simulated_radio() {
     let config = dir.join("sim.toml");
     fs::write(&config, "[radio]\ndriver = \"sim\"\n").unwrap();
     let csv = dir.join("spi.csv");
-    let output = rnode_linux(&[
+    let output = rnode_nomu(&[
         "--config".as_ref(),
         config.as_os_str(),
         "--spilog".as_ref(),

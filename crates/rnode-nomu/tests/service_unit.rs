@@ -76,7 +76,7 @@ fn timeout_stop_sec(unit: &str) -> f32 {
             value = Some(setting.trim());
         }
     }
-    let value = value.expect("contrib/rnode-linux.service does not set TimeoutStopSec=");
+    let value = value.expect("contrib/rnode-nomu.service does not set TimeoutStopSec=");
     let number = value.trim_end_matches(|c: char| c.is_ascii_alphabetic());
     let seconds: f32 = number
         .parse()
@@ -90,7 +90,7 @@ fn timeout_stop_sec(unit: &str) -> f32 {
 
 #[test]
 fn service_waits_for_the_slowest_packet_before_killing_the_daemon() {
-    let unit = fs::read_to_string(repo_path("contrib/rnode-linux.service")).unwrap();
+    let unit = fs::read_to_string(repo_path("contrib/rnode-nomu.service")).unwrap();
     let timeout_s = timeout_stop_sec(&unit);
     let needed_s = slowest_stop_ms() / 1000.0;
     assert!(

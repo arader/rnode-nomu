@@ -14,9 +14,9 @@ use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{self, ErrorType, InputPin, OutputPin};
 use embedded_hal::spi::{self, Operation, SpiDevice};
 use rnode_core::{MemoryStorage, Node, NodeConfig, RadioSettings};
-use rnode_linux::event_loop::{EventLoopError, IrqSource, NoIrq, run};
-use rnode_linux::power::PowerGuard;
-use rnode_linux::pty::PtyPair;
+use rnode_nomu::event_loop::{EventLoopError, IrqSource, NoIrq, run};
+use rnode_nomu::power::PowerGuard;
+use rnode_nomu::pty::PtyPair;
 use rnode_sx126x::Sx126x;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -15,7 +15,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::stat::Mode;
 use nix::sys::termios::{ControlFlags, FlushArg, InputFlags, LocalFlags, OutputFlags, tcflush, tcgetattr};
 use nix::unistd::{getegid, mkfifo};
-use rnode_linux::pty::{PendingHostOutput, PtyError, PtyPair, PtyPermissions};
+use rnode_nomu::pty::{PendingHostOutput, PtyError, PtyPair, PtyPermissions};
 use serial_test::serial;
 
 use common::test_dir;

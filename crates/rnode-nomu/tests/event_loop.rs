@@ -17,10 +17,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use rnode_core::phy::{Modulation, PhyParams, airtime_ms, low_data_rate};
 use rnode_core::{MemoryStorage, Node, NodeConfig, Radio, RadioSettings, RxFrame, Storage, TxOutcome};
-use rnode_linux::config::Config;
-use rnode_linux::event_loop::{FdIrqSource, NoIrq, POLL_TIMEOUT_CAP_MS, cap_timeout_ms, compute_timeout_ms, run};
-use rnode_linux::pty::PtyPair;
-use rnode_linux::storage::TomlStorage;
+use rnode_nomu::config::Config;
+use rnode_nomu::event_loop::{FdIrqSource, NoIrq, POLL_TIMEOUT_CAP_MS, cap_timeout_ms, compute_timeout_ms, run};
+use rnode_nomu::pty::PtyPair;
+use rnode_nomu::storage::TomlStorage;
 use rnode_sim::{SimConfig, SimRadio};
 use serial_test::serial;
 
@@ -375,7 +375,7 @@ struct PipeIrq {
 }
 
 #[cfg(target_os = "linux")]
-impl rnode_linux::event_loop::IrqSource for PipeIrq {
+impl rnode_nomu::event_loop::IrqSource for PipeIrq {
     fn fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
         Some(self.read_fd.as_fd())
     }

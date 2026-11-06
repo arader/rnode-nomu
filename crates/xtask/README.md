@@ -1,6 +1,6 @@
 # RNS end-to-end harness
 
-`cargo xtask rns-e2e` checks rnode-linux against Reticulum itself. CI runs it: pull requests run
+`cargo xtask rns-e2e` checks rnode-nomu against Reticulum itself. CI runs it: pull requests run
 the SF7 scenario and main runs every scenario (see [In CI](#in-ci)). Run what a pull request runs
 with:
 
@@ -8,7 +8,7 @@ with:
 cargo xtask rns-e2e --fetch-reticulum --scenario sf7
 ```
 
-Without `--scenario` it runs every scenario, as CI does on main. The harness builds `rnode-linux`,
+Without `--scenario` it runs every scenario, as CI does on main. The harness builds `rnode-nomu`,
 creates an isolated run directory under `target/rns-e2e`, starts two daemon instances with
 `radio.driver = "sim"` on a shared simulated air directory and distinct PTYs, and runs two separate
 Reticulum Python processes using `RNodeInterface`, or, in the `rnodeconf` scenario, Reticulum's
@@ -102,7 +102,7 @@ Both workflows run on GitHub's `ubuntu-24.04` runners, with Python 3.13 from
 install `uv` with the same "Install uv" step: a pinned release, checked against its sha256 before
 use. They set `UV_PYTHON_DOWNLOADS=never`, so the harness uses that Python and downloads nothing
 that is not pinned. `cargo test` also runs the harness's Rust-only counterpart,
-`crates/rnode-linux/tests/sim_daemon_smoke.rs`: two daemons on the simulated radio carry 1, 254,
+`crates/rnode-nomu/tests/sim_daemon_smoke.rs`: two daemons on the simulated radio carry 1, 254,
 255 and 508-byte KISS data frames in both directions and silently drop a 509-byte frame.
 
 ## Pins

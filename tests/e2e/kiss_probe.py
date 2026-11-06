@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Probe an rnode-linux daemon PTY with the RNode KISS host protocol.
+"""Probe an rnode-nomu daemon PTY with the RNode KISS host protocol.
 
 Requires pyserial. Example:
   python3 tests/e2e/kiss_probe.py --port /dev/rnode0 --frequency 914875000 \
@@ -221,7 +221,7 @@ def parse_sizes(text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", required=True, help="PTY/serial device exposed by rnode-linux")
+    parser.add_argument("--port", required=True, help="PTY/serial device exposed by rnode-nomu")
     parser.add_argument("--frequency", type=int, required=True)
     parser.add_argument("--bandwidth", type=int, default=125000)
     parser.add_argument("--txpower", type=int, default=2)

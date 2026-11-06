@@ -10,17 +10,17 @@ User=rnode
 Group=rnode
 # To let a host running as another user (e.g. rnsd) open the PTY, hand the slave to a group
 # both users share: add this account to it (usermod -aG dialout rnode), or set the line below
-# in a drop-in (systemctl edit rnode-linux), which survives reinstalling this file. Then set
-# [pty] group = "dialout" and mode = "0660" in /etc/rnode-linux.toml, and add the host's user
+# in a drop-in (systemctl edit rnode-nomu), which survives reinstalling this file. Then set
+# [pty] group = "dialout" and mode = "0660" in /etc/rnode-nomu.toml, and add the host's user
 # to dialout.
 # SupplementaryGroups=dialout
-ExecStart=/usr/local/bin/rnode-linux --config /etc/rnode-linux.toml
+ExecStart=/usr/local/bin/rnode-nomu --config /etc/rnode-nomu.toml
 # A stop finishes the packet on the air, both frames of a split packet, then puts the radio to
 # sleep and exits. The slowest packet, 508 bytes as two 255-byte LoRa frames at SF12, 7.8 kHz and
 # CR 4/8, is on the air for about 7 min 40 s. After systemd's default 90 s, SIGKILL would end the
 # daemon in the middle of it: the SX1262 still finishes the frame it is sending, but a split packet
 # can lose its second frame, and the radio sleep and power_off_on_exit are skipped. 8 min covers
-# the slowest packet with margin; crates/rnode-linux/tests/service_unit.rs checks it against
+# the slowest packet with margin; crates/rnode-nomu/tests/service_unit.rs checks it against
 # rnode-core's airtime. At common settings the daemon stops within a few seconds.
 TimeoutStopSec=8min
 Restart=on-failure
@@ -33,7 +33,7 @@ ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=no
 DevicePolicy=closed
-# Adjust to match /etc/rnode-linux.toml. These cover the generic and uConsole examples.
+# Adjust to match /etc/rnode-nomu.toml. These cover the generic and uConsole examples.
 DeviceAllow=/dev/spidev0.0 rw
 DeviceAllow=/dev/spidev1.0 rw
 DeviceAllow=/dev/gpiochip0 rw

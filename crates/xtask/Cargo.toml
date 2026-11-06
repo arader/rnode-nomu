@@ -16,4 +16,4 @@ rnode-core = { path = "../rnode-core" }
 
 [dev-dependencies]
 # Checks the daemon configs the harness writes with the daemon's own parser.
-rnode-linux = { path = "../rnode-linux" }
+rnode-nomu = { path = "../rnode-nomu" }

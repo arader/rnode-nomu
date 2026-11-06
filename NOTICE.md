@@ -1,10 +1,10 @@
 # Notices
 
-rnode-linux is free software: you can redistribute it and/or modify it under the terms of the GNU
+rnode-nomu is free software: you can redistribute it and/or modify it under the terms of the GNU
 General Public License as published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version. [LICENSE](LICENSE) has the full text.
 
-Parts of rnode-linux are translations into Rust of
+Parts of rnode-nomu are translations into Rust of
 [RNode_Firmware](https://github.com/markqvist/RNode_Firmware) v1.86 (commit `56775c5`). They keep
 the notices of the files they were translated from, below.
 
@@ -35,7 +35,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ## RNode_Firmware's SX126x driver
 
 `crates/rnode-sx126x` translates the firmware's SX126x modem driver, `sx126x.cpp`, which is under
-the MIT license. The crate is distributed as part of rnode-linux under GPL-3.0-or-later, so its
+the MIT license. The crate is distributed as part of rnode-nomu under GPL-3.0-or-later, so its
 `license` field is `GPL-3.0-or-later AND MIT`.
 
 ```text
@@ -62,7 +62,7 @@ SOFTWARE.
 
 ## Referenced, not included
 
-The daemon (`crates/rnode-linux`), the simulated radio (`crates/rnode-sim`), the end-to-end
+The daemon (`crates/rnode-nomu`), the simulated radio (`crates/rnode-sim`), the end-to-end
 harness (`crates/xtask`, `tests/e2e`) and the hardware test tools (`tools/hwtest`) cite
 RNode_Firmware and Reticulum for the behaviour they match, but are not translations of them.
 

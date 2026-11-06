@@ -11,8 +11,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rnode_linux::config::{Config, ConfigError};
-use rnode_linux::eeprom::{MACHINE_ID_PATHS, derive_serial_number, machine_id_from};
+use rnode_nomu::config::{Config, ConfigError};
+use rnode_nomu::eeprom::{MACHINE_ID_PATHS, derive_serial_number, machine_id_from};
 
 use common::test_dir;
 
@@ -134,7 +134,7 @@ fn the_daemon_warns_about_an_eeprom_file_it_cannot_use_and_runs_on() {
     )
     .unwrap();
     let log = dir.join("daemon.log");
-    let mut daemon = Command::new(env!("CARGO_BIN_EXE_rnode-linux"))
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_rnode-nomu"))
         .arg("--config")
         .arg(&config)
         .current_dir(&dir)
@@ -144,7 +144,7 @@ fn the_daemon_warns_about_an_eeprom_file_it_cannot_use_and_runs_on() {
         .spawn()
         .unwrap();
     let expected = format!(
-        "WARN  rnode_linux::storage] ignoring EEPROM file {}: it is 17 bytes long, not 156; the EEPROM reads as \
+        "WARN  rnode_nomu::storage] ignoring EEPROM file {}: it is 17 bytes long, not 156; the EEPROM reads as \
          unprovisioned",
         eeprom.display()
     );

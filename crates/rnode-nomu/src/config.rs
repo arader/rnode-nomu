@@ -488,7 +488,7 @@ fn default_air_dir() -> PathBuf {
     PathBuf::from("target/rnode-air")
 }
 fn default_node_name() -> String {
-    "rnode-linux".to_owned()
+    "rnode-nomu".to_owned()
 }
 fn default_rssi_dbm() -> i16 {
     -70

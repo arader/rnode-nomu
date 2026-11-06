@@ -6,7 +6,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rnode_linux::config::{Config, RadioDriver};
+use rnode_nomu::config::{Config, RadioDriver};
 
 use super::{
     CLIENT_PY, Check, Children, KISS_BOUNDARY_PY, Options, RETICULUM_COMMIT, RETICULUM_REPO, SCENARIOS, SERVER_PY,
@@ -663,9 +663,9 @@ fn a_failed_scenario_prints_the_tail_of_each_log() {
 }
 
 /// The daemon rejects unknown keys (`deny_unknown_fields`), so the config the harness writes
-/// must stay loadable by the rnode-linux it drives.
+/// must stay loadable by the rnode-nomu it drives.
 #[test]
-fn daemon_config_loads_with_the_rnode_linux_parser() {
+fn daemon_config_loads_with_the_rnode_nomu_parser() {
     let air = Path::new("target/rns-e2e/runs/r1-2/sf7/air");
     let pty = Path::new("target/rns-e2e/runs/r1-2/sf7/b/pty");
     let settings = Path::new("target/rns-e2e/runs/r1-2/sf7/b/radio-settings.toml");
