@@ -2157,12 +2157,12 @@ layers can be swapped out. Different drivers, SPI libraries, and more, are all m
 replaceable for maximum compatibility.
 
 The project started on a private Forgejo instance, under the name rnode-linux, and moved here as
-rnode-nomu in November 2026. Before the move,
-its history was rewritten to replace private hostnames, and to give every commit one author and
-committer: Andrew Rader, with GitHub's no-reply address. Commit dates, co-author trailers and code
-are otherwise unchanged, and so are commit messages, apart from the IDs of the commits they cite.
-References such as `#3` or `(#94)` in older commit messages, code comments and documentation point
-to issues and pull requests on that instance, not to this repository.
+rnode-nomu in November 2026. Before the move, its history was rewritten to replace private
+hostnames, and to give every commit one author and committer: Andrew Rader, with GitHub's no-reply
+address. Commit dates, co-author trailers and code are otherwise unchanged, and so are commit
+messages, apart from the IDs of the commits they cite. References such as `#3` or `(#94)` in older
+commit messages, code comments and documentation point to issues and pull requests on that
+instance, not to this repository.
 
 ## Contributing
 
