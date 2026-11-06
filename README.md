@@ -2149,8 +2149,12 @@ merged. The first commits carry `Co-authored-by: Copilot` trailers; the later on
 squash-merged pull requests whose messages are the agents' own descriptions of the change and how
 it was tested.
 
-> **TODO (Andrew):** your part, in your own words: what you decided, what you reviewed, and what
-> you tested yourself.
+Throughout development I have tested rnode-nomu on a ClockworkPi uConsole running a Raspberry Pi
+CM5 with the HackerGadgets AIO V2 add-on. With this hardware I've been communicating with a 2nd
+Raspberry Pi connected to a Heltec v3. Each set of changes was reviewed with an agent's assistance.
+Decisions were made to promote sane layering of concerns through Rust crates, such that different
+layers can be swapped out. Different drivers, SPI libraries, and more, are all meant to be
+replaceable for maximum compatibility.
 
 The project started on a private Forgejo instance, under the name rnode-linux, and moved here as
 rnode-nomu in November 2026. Before the move,
