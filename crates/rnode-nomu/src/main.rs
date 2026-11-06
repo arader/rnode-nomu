@@ -11,7 +11,7 @@ use rnode_nomu::cli::ErrorChain;
 use rnode_nomu::config::{Config, RadioDriver};
 
 #[derive(Parser, Debug)]
-#[command(name = "rnode-nomu", about = "RNode Linux daemon", version = version())]
+#[command(name = "rnode-nomu", about = "Linux userspace RNode daemon", version = version())]
 struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = "config.toml")]

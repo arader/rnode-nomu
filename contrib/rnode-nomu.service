@@ -1,5 +1,5 @@
 [Unit]
-Description=RNode Linux daemon
+Description=Linux userspace RNode daemon
 After=network.target
 
 [Service]

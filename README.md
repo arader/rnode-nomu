@@ -1,8 +1,8 @@
 # rnode-noµ
 
-rnode-noµ (written `rnode-nomu`, pronounced "no mew") is an RNode with no µC: it turns a Linux
-computer with a LoRa modem on its SPI bus into an [RNode](https://unsigned.io/rnode/), with no
-microcontroller in between. The daemon drives the modem directly and exposes a pseudo-terminal
+rnode-noµ (written `rnode-nomu`, pronounced "R-node no-mew") is an RNode with no µC: it turns a
+Linux computer with a LoRa modem on its SPI bus into an [RNode](https://unsigned.io/rnode/), with
+no microcontroller in between. The daemon drives the modem directly and exposes a pseudo-terminal
 (PTY) that speaks the RNode KISS host protocol. Reticulum's `RNodeInterface`, or any other RNode
 host, uses that PTY exactly like the serial port of a USB-attached RNode running RNode_Firmware. On
 the air, rnode-nomu interoperates with real RNodes.
@@ -393,7 +393,7 @@ reference uConsole builds the daemon natively.
 
 ```text
 $ rnode-nomu --help
-RNode Linux daemon
+Linux userspace RNode daemon
 
 Usage: rnode-nomu [OPTIONS]
 
