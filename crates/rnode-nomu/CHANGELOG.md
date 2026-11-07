@@ -13,7 +13,7 @@ The first release. Until November 2026 the project was developed as rnode-linux 
 
 ### Added
 
-- Releases, with the daemon built for arm64 and x86-64 Linux and a Debian package for arm64.
+- Releases, with the daemon built for arm64 and x86-64 Linux and a Debian package for arm64 ([#6](https://github.com/arader/rnode-nomu/pull/6)).
 - A config and setup notes for the HackerGadgets AIO V1 ([#4](https://github.com/arader/rnode-nomu/pull/4)).
 
 ### Changed
