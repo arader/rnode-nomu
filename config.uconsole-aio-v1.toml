@@ -1,0 +1,35 @@
+# Clockwork uConsole with HackerGadgets AIO V1 SX1262: the AIO V2's radio wiring, without the
+# V2's LoRa power rail. Not yet tested on an AIO V1.
+
+[spi]
+device = "/dev/spidev1.0"
+speed_hz = 8_000_000
+
+[gpio]
+chip = "pinctrl-rp1" # CM5; on a CM4: "pinctrl-bcm2711"
+reset = 25
+busy = 24
+dio1 = 26
+
+[radio]
+driver = "sx1262"
+avoid_interference = false
+# Cap the TX power hosts may set (0 to 22 dBm, default 22), e.g. for bench tests:
+# max_tx_power_dbm = 10
+
+[radio.sx1262]
+tcxo_voltage = "1.8V"
+dio2_as_rf_switch = true
+ocp = 0x28
+
+[pty]
+symlink = "/run/rnode/rnode0"
+# For an rnsd running as another user, add both accounts to dialout and uncomment these:
+# group = "dialout"
+# mode = "0660"
+
+[storage]
+radio_settings = "/var/lib/rnode/radio_settings.toml"
+
+[logging]
+log_level = "info"

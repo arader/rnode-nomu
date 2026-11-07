@@ -88,3 +88,7 @@ The reference board is the uConsole (CM5) with the HackerGadgets AIO V2: SX1262 
 `/dev/spidev1.0`, GPIO character device `gpiochip15` (pinctrl-rp1) lines 25 = NRESET,
 24 = BUSY, 26 = DIO1 (IRQ); 1.8 V TCXO driven by DIO3; DIO2 controls the RF switch; line 16
 enables the LoRa power rail, which the reference unit's `config.txt` turns off at boot.
+
+The AIO V1 has the same radio without the power rail (`config.uconsole-aio-v1.toml`). It has not
+been tested on hardware, so keep it in step with the V2 config; `tests/config.rs` checks that the
+two differ only in the GPIO chip's name and the power rail.

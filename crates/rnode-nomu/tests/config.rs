@@ -43,6 +43,30 @@ fn parses_example_configs() {
     assert_eq!(tcxo.parse::<TcxoVoltage>(), Ok(TcxoVoltage::V1_8));
 }
 
+/// HackerGadgets' setup guide gives the AIO V1 and V2 the same SX1262 wiring: SPI1 CE0, RESET 25,
+/// BUSY 24, DIO1 26, the RF switch on DIO2 and a TCXO on DIO3. Only the V2 switches the radio's
+/// power, on GPIO 16, so the V1 file is the V2 file without that rail. It names the GPIO chip by
+/// label, as a V1 may sit on a CM4 or a CM5.
+#[test]
+fn aio_v1_config_is_the_v2_config_without_the_power_rail() {
+    let load = |name: &str| Config::from_toml(&fs::read_to_string(repo_path(name)).unwrap()).unwrap();
+    let v1 = load("config.uconsole-aio-v1.toml");
+    let v2 = load("config.uconsole-aio-v2.toml");
+    assert_eq!(v1.warnings(), Vec::<String>::new());
+    let v1_gpio = v1.gpio.as_ref().unwrap();
+    assert_eq!(v1_gpio.chip, "pinctrl-rp1");
+    assert_eq!(v1_gpio.power, None);
+
+    let mut expected = v2.clone();
+    let gpio = expected.gpio.as_mut().unwrap();
+    gpio.chip = v1_gpio.chip.clone();
+    gpio.power = None;
+    // The rail's delay and exit settings do nothing without a rail.
+    gpio.power_on_delay_ms = v1_gpio.power_on_delay_ms;
+    gpio.power_off_on_exit = v1_gpio.power_off_on_exit;
+    assert_eq!(v1, expected);
+}
+
 #[test]
 fn avoid_interference_sets_the_node_config() {
     let omitted = Config::from_toml("[radio]\ndriver = \"sim\"\n").unwrap();
@@ -62,7 +86,11 @@ fn avoid_interference_sets_the_node_config() {
         );
     }
 
-    for example in ["config.example.toml", "config.uconsole-aio-v2.toml"] {
+    for example in [
+        "config.example.toml",
+        "config.uconsole-aio-v1.toml",
+        "config.uconsole-aio-v2.toml",
+    ] {
         let cfg = Config::from_toml(&fs::read_to_string(repo_path(example)).unwrap()).unwrap();
         assert!(!cfg.node_config().avoid_interference, "{example}");
     }
@@ -90,7 +118,11 @@ fn max_tx_power_dbm_sets_the_node_config_ceiling() {
     let omitted = Config::from_toml("[radio]\ndriver = \"sim\"\n").unwrap();
     assert_eq!(omitted.radio.max_tx_power_dbm, None);
     assert_eq!(omitted.node_config(), NodeConfig::default());
-    for example in ["config.example.toml", "config.uconsole-aio-v2.toml"] {
+    for example in [
+        "config.example.toml",
+        "config.uconsole-aio-v1.toml",
+        "config.uconsole-aio-v2.toml",
+    ] {
         let cfg = Config::from_toml(&fs::read_to_string(repo_path(example)).unwrap()).unwrap();
         assert_eq!(cfg.radio.max_tx_power_dbm, None, "{example}");
         assert_eq!(cfg.node_config().max_tx_power, 22, "{example}");
