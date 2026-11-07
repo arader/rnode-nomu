@@ -23,6 +23,8 @@ Reticulum's `rnsd` and rnode-nomu run as systemd services under their own accoun
 rnode-nomu starts first, and Nomad Network runs under your own account.
 [Running as a systemd service](#running-as-a-systemd-service) explains each step, and its
 subsection [Using rnsd from your own account](#using-rnsd-from-your-own-account) explains step 5.
+On an AIO V1, install [`config.uconsole-aio-v1.toml`](config.uconsole-aio-v1.toml) in step 2
+instead of the V2 file (see [the AIO V1 notes](#uconsole-with-the-hackergadgets-aio-v1)).
 For another board, adapt the config as in
 [Setting up the LoRa hardware](#setting-up-the-lora-hardware); without hardware, see
 [Quick start without hardware](#quick-start-without-hardware).
@@ -289,7 +291,7 @@ is off, the loop waits for at most 50 ms between checks.
 | [`crates/xtask`](crates/xtask) | Repository automation: `cargo xtask rns-e2e` runs two simulated daemons under two Reticulum instances. |
 | [`tests/e2e/kiss_probe.py`](tests/e2e/kiss_probe.py) | Standalone KISS probe for a daemon PTY. |
 | [`tools/hwtest`](tools/hwtest) | Hardware bring-up for the uConsole AIO V2, RTL-SDR capture, LoRa burst analysis and an over-the-air LXMF echo test against a real RNode. Outside the Cargo workspace. |
-| [`config.example.toml`](config.example.toml), [`config.uconsole-aio-v2.toml`](config.uconsole-aio-v2.toml) | Example daemon configurations. |
+| [`config.example.toml`](config.example.toml), [`config.uconsole-aio-v2.toml`](config.uconsole-aio-v2.toml), [`config.uconsole-aio-v1.toml`](config.uconsole-aio-v1.toml) | Example daemon configurations. |
 | [`contrib/rnode-nomu.service`](contrib/rnode-nomu.service) | Hardened systemd unit. |
 | [`DRIVERS.md`](DRIVERS.md) | How radio drivers work and how to add one. |
 | [`AGENTS.md`](AGENTS.md) | Rules for changing this repository. |
@@ -578,7 +580,13 @@ has no RXEN line. The board switches its peripherals on and off with GPIOs on th
    dtoverlay=spi1-1cs
    ```
 
-   Reboot and check that `/dev/spidev1.0` exists.
+   Reboot and check that `/dev/spidev1.0` exists. If your image runs `devterm-printer.service`, as
+   Rex's Bookworm image does, stop and disable it: the DevTerm printer driver uses SPI1's pins too
+   (HackerGadgets' [setup guide](https://hackergadgets.com/pages/hackergadgets-uconsole-rtl-sdr-lora-gps-rtc-usb-hub-all-in-one-extension-board-setup-guide)).
+
+   ```sh
+   sudo systemctl disable --now devterm-printer.service
+   ```
 
 2. **Find the GPIO chip.** The modem's control lines are on the RP1 GPIO controller, whose chip
    label is `pinctrl-rp1`. On the reference image that is `/dev/gpiochip15`; `gpiodetect` from the
@@ -677,6 +685,28 @@ was answered, and opportunistic and direct messages and a 2 KB resource transfer
 both directions, with two-frame split packets each way; one link packet was lost once and LXMF
 resent it. Every packet showed up in the daemon's debug log.
 [`tools/hwtest/README.md`](tools/hwtest/README.md) has the results.
+
+### uConsole with the HackerGadgets AIO V1
+
+The AIO V1 carries the same radio as the V2: an SX1262 on SPI1, chip select 0, with RESET = 25,
+BUSY = 24 and DIO1 = 26, an RF switch driven by DIO2 and a 1.8 V TCXO powered from DIO3. It has no
+power rails, though: its LoRa module is powered whenever the uConsole is. HackerGadgets'
+[setup guide for both boards](https://hackergadgets.com/pages/hackergadgets-uconsole-rtl-sdr-lora-gps-rtc-usb-hub-all-in-one-extension-board-setup-guide)
+gives them the same radio configuration; only the V2 adds power GPIOs. Set up a V1 as the V2
+above, with these differences:
+
+- **No power rail.** Skip step 3, and install
+  [`config.uconsole-aio-v1.toml`](config.uconsole-aio-v1.toml) in step 4: it is the V2 file
+  without `power`, `power_on_delay_ms` and `power_off_on_exit`. The quick start's
+  `pinctrl get 16` check does not apply.
+- **GPIO chip by label.** The file names the chip `pinctrl-rp1`, the label of a CM5's GPIO
+  controller, so the daemon finds it whatever its number. On a CM4, set
+  `chip = "pinctrl-bcm2711"`, and enable SPI1 with `dtparam=spi=on` as well as
+  `dtoverlay=spi1-1cs`. Both apply to an AIO V2 on a CM4 too.
+- **Beta-test boards.** The guide HackerGadgets wrote for the V1's beta-test boards never enables
+  a TCXO. If the modem on such a board does not start, try without `tcxo_voltage`.
+
+This configuration has not been tested on an AIO V1 yet.
 
 ### Mapping your own board
 
@@ -1368,8 +1398,10 @@ SUBSYSTEM=="spidev", KERNEL=="spidev1.0", GROUP="rnode", MODE="0660"
 SUBSYSTEM=="gpio", KERNEL=="gpiochip15", GROUP="rnode", MODE="0660"
 ```
 
-Also check the unit's `DeviceAllow=` lines. They list the devices of the two example configs, and
-with `DevicePolicy=closed` the daemon cannot open any other spidev or GPIO chip.
+Also check the unit's `DeviceAllow=` lines. They cover the example configs: `/dev/spidev0.0` and
+`/dev/gpiochip0` for the generic one, and `/dev/spidev1.0` with `/dev/gpiochip15` for the uConsole
+ones on the reference image, or with `/dev/gpiochip0`, where a CM4's `pinctrl-bcm2711` usually is.
+With `DevicePolicy=closed` the daemon cannot open any other spidev or GPIO chip.
 
 GPIO permissions apply to a whole chip, not to single lines: the account can drive every line of
 a chip it can open, not only the lines in its config. On the uConsole, `/dev/gpiochip15` carries
