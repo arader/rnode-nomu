@@ -1,0 +1,47 @@
+[Unit]
+Description=Linux userspace RNode daemon
+After=network.target
+
+[Service]
+Type=simple
+# The package creates this account (rnode-nomu.sysusers) and, on its first install, adds it to the
+# spi, gpio and dialout groups where they exist. Where those groups give no access to the spidev
+# and gpiochip nodes in /etc/rnode-nomu.toml, grant it, for example with udev rules for your board.
+User=rnode
+Group=rnode
+# To let a host running as another user (e.g. rnsd) open the PTY, hand the slave to a group both
+# users share: set [pty] group = "dialout" and mode = "0660" in /etc/rnode-nomu.toml, and add the
+# host's user to dialout. If this account is not in dialout, set the line below in a drop-in
+# (systemctl edit rnode-nomu).
+# SupplementaryGroups=dialout
+# The package's copy of contrib/rnode-nomu.service, which starts /usr/local/bin/rnode-nomu.
+# tests/packaging.rs checks that the two differ only in that path and in their comments.
+ExecStart=/usr/bin/rnode-nomu --config /etc/rnode-nomu.toml
+# A stop finishes the packet on the air, both frames of a split packet, then puts the radio to
+# sleep and exits. The slowest packet, 508 bytes as two 255-byte LoRa frames at SF12, 7.8 kHz and
+# CR 4/8, is on the air for about 7 min 40 s. After systemd's default 90 s, SIGKILL would end the
+# daemon in the middle of it: the SX1262 still finishes the frame it is sending, but a split packet
+# can lose its second frame, and the radio sleep and power_off_on_exit are skipped. 8 min covers
+# the slowest packet with margin; crates/rnode-nomu/tests/service_unit.rs checks it against
+# rnode-core's airtime. At common settings the daemon stops within a few seconds.
+TimeoutStopSec=8min
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=rnode
+StateDirectory=rnode
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DevicePolicy=closed
+# Adjust to match /etc/rnode-nomu.toml, in a drop-in (systemctl edit rnode-nomu). These cover the
+# generic and uConsole examples.
+DeviceAllow=/dev/spidev0.0 rw
+DeviceAllow=/dev/spidev1.0 rw
+DeviceAllow=/dev/gpiochip0 rw
+DeviceAllow=/dev/gpiochip15 rw
+ReadWritePaths=/run/rnode /var/lib/rnode
+
+[Install]
+WantedBy=multi-user.target

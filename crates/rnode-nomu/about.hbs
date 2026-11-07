@@ -1,0 +1,24 @@
+# Third-party licenses
+
+The rnode-nomu binary is built from the crates of the rnode-nomu repository, under
+GPL-3.0-or-later (LICENSE and NOTICE.md), and from the third-party Rust crates below. Each section
+below gives a license, the crates under it, and its text.
+
+{{#each overview}}
+- {{name}}: {{count}} {{#if (eq count 1)}}crate{{else}}crates{{/if}}
+{{/each}}
+
+{{#each licenses}}
+## {{name}}
+
+Used by:
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

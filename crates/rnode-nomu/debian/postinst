@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# cargo-deb puts the generated fragments here: systemd-sysusers creates the rnode account, and an
+# upgrade restarts the service if it is running.
+#DEBHELPER#
+
+# On the first install, give the account the groups the quick start gives it (README.md) where they
+# exist: spi and gpio for the devices on Raspberry Pi OS, dialout for sharing the PTY with rnsd.
+# Upgrades leave its groups alone.
+if [ "$1" = configure ] && [ -z "$2" ]; then
+	for group in spi gpio dialout; do
+		if getent group "$group" >/dev/null; then
+			usermod -a -G "$group" rnode
+		fi
+	done
+fi
+
+exit 0

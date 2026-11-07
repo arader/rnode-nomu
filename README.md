@@ -25,6 +25,8 @@ rnode-nomu starts first, and Nomad Network runs under your own account.
 subsection [Using rnsd from your own account](#using-rnsd-from-your-own-account) explains step 5.
 On an AIO V1, install [`config.uconsole-aio-v1.toml`](config.uconsole-aio-v1.toml) in step 2
 instead of the V2 file (see [the AIO V1 notes](#uconsole-with-the-hackergadgets-aio-v1)).
+Step 2 builds rnode-nomu from source; to install the Debian package of a release instead, see
+[Installing a release](#installing-a-release).
 For another board, adapt the config as in
 [Setting up the LoRa hardware](#setting-up-the-lora-hardware); without hardware, see
 [Quick start without hardware](#quick-start-without-hardware).
@@ -168,6 +170,7 @@ accounts access.
 - [Safety and radio regulations](#safety-and-radio-regulations)
 - [Quick start without hardware](#quick-start-without-hardware)
 - [Building](#building)
+- [Installing a release](#installing-a-release)
 - [Setting up the LoRa hardware](#setting-up-the-lora-hardware)
 - [Configuration reference](#configuration-reference)
 - [Running with Reticulum](#running-with-reticulum)
@@ -181,6 +184,7 @@ accounts access.
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [How this was made](#how-this-was-made)
+- [Releases and versions](#releases-and-versions)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -287,12 +291,13 @@ is off, the loop waits for at most 50 ms between checks.
 | [`crates/rnode-core`](crates/rnode-core) | Hardware-independent RNode logic: KISS host protocol, TX queue, split framing, PHY timing, CSMA/CA, the `Node<R, S>` state machine, and the `Radio` and `Storage` traits. No I/O; time and randomness are passed in, so tests are deterministic. |
 | [`crates/rnode-sx126x`](crates/rnode-sx126x) | SX1262 driver over `embedded-hal` 1.0 that mirrors RNode_Firmware `sx126x.cpp`. |
 | [`crates/rnode-sim`](crates/rnode-sim) | Simulated LoRa radio. Daemons on one host share an "air" directory of Unix datagram sockets. |
-| [`crates/rnode-nomu`](crates/rnode-nomu) | The daemon: config, GPIO character device, spidev, PTY, saved settings and event loop. |
+| [`crates/rnode-nomu`](crates/rnode-nomu) | The daemon: config, GPIO character device, spidev, PTY, saved settings and event loop. Its [`debian`](crates/rnode-nomu/debian) directory holds the Debian package's unit, account and maintainer script. |
 | [`crates/xtask`](crates/xtask) | Repository automation: `cargo xtask rns-e2e` runs two simulated daemons under two Reticulum instances. |
 | [`tests/e2e/kiss_probe.py`](tests/e2e/kiss_probe.py) | Standalone KISS probe for a daemon PTY. |
 | [`tools/hwtest`](tools/hwtest) | Hardware bring-up for the uConsole AIO V2, RTL-SDR capture, LoRa burst analysis and an over-the-air LXMF echo test against a real RNode. Outside the Cargo workspace. |
 | [`config.example.toml`](config.example.toml), [`config.uconsole-aio-v2.toml`](config.uconsole-aio-v2.toml), [`config.uconsole-aio-v1.toml`](config.uconsole-aio-v1.toml) | Example daemon configurations. |
 | [`contrib/rnode-nomu.service`](contrib/rnode-nomu.service) | Hardened systemd unit. |
+| [`release-plz.toml`](release-plz.toml), [`.github/workflows/release.yml`](.github/workflows/release.yml), `crates/*/CHANGELOG.md` | Versions, changelogs and releases: see [Releases and versions](#releases-and-versions). |
 | [`DRIVERS.md`](DRIVERS.md) | How radio drivers work and how to add one. |
 | [`AGENTS.md`](AGENTS.md) | Rules for changing this repository. |
 
@@ -382,7 +387,8 @@ and send test packets; see [Simulation and tests](#simulation-and-tests). Stop t
 
 ## Building
 
-You need Rust 1.85 or newer (the workspace uses edition 2024).
+You need Rust 1.85 or newer (the workspace uses edition 2024). Releases also come prebuilt: see
+[Installing a release](#installing-a-release).
 
 ```sh
 cargo build --release --locked -p rnode-nomu
@@ -406,14 +412,15 @@ Options:
   -V, --version          Print version
 
 $ rnode-nomu --version
-rnode-nomu 0.2.0 (reports RNode firmware 1.86 to hosts)
+rnode-nomu 0.3.0 (reports RNode firmware 1.86 to hosts)
 ```
 
 - `--config` defaults to `config.toml` in the working directory.
 - `--spilog` records every SPI transaction of the `sx1262` driver; see
   [Recording SPI traffic](#recording-spi-traffic). With `radio.driver = "sim"` the daemon refuses
   to start, because the simulator has no SPI bus.
-- `--version` prints the daemon's version and the RNode firmware version it reports to hosts.
+- `--version` prints the daemon's version ([Releases and versions](#releases-and-versions)) and
+  the RNode firmware version it reports to hosts.
 
 On a fatal error, such as an invalid config or a device that cannot be opened, the daemon prints
 one `fatal:` line to stderr, naming each cause once, and exits with status 1:
@@ -507,6 +514,76 @@ the same lone first half, so aborting would only trade a slow stop for a lost pa
 need a change to the `Radio` trait for every driver. RNode_Firmware has no abort either: an RNode
 that loses power simply stops. The cost is a stop that can take minutes at the slowest settings,
 which the stop timeout has to allow for.
+
+## Installing a release
+
+[Releases](https://github.com/arader/rnode-nomu/releases) carry the daemon built for 64-bit Linux:
+
+| File | Contents |
+| --- | --- |
+| `rnode-nomu_arm64.deb` | Debian package for arm64: 64-bit Raspberry Pi OS, as on the uConsole CM5, or Debian 12 or newer. |
+| `rnode-nomu-aarch64-unknown-linux-gnu.tar.gz` | The daemon for arm64 Linux, with the service unit, the example configs, this README and the licenses. |
+| `rnode-nomu-x86_64-unknown-linux-gnu.tar.gz` | The same for x86-64 Linux. |
+
+The binaries need glibc 2.35 or newer, as in Debian 12 and Ubuntu 22.04. The links below fetch the
+latest release; [Releases and versions](#releases-and-versions) explains the version numbers.
+
+### Debian package
+
+```sh
+curl -fLO https://github.com/arader/rnode-nomu/releases/latest/download/rnode-nomu_arm64.deb
+sudo apt install ./rnode-nomu_arm64.deb
+```
+
+The package installs:
+
+- the daemon, as `/usr/bin/rnode-nomu`;
+- its service, `/usr/lib/systemd/system/rnode-nomu.service`, which is
+  [`contrib/rnode-nomu.service`](contrib/rnode-nomu.service) starting `/usr/bin/rnode-nomu`. The
+  package neither enables nor starts it, because the daemon needs `/etc/rnode-nomu.toml` first;
+- the example configs, in `/usr/share/doc/rnode-nomu/examples/`;
+- the `rnode` account, with `systemd-sysusers`. On its first install, the package adds the account
+  to the groups `spi`, `gpio` and `dialout`, where they exist.
+
+In the [Quick start](#quick-start), the package takes the place of step 2 and of the first two
+commands of step 3. Install the config from its examples instead, then continue with the third
+command of step 3, which creates the `rnsd` account:
+
+```sh
+sudo install -m 0644 /usr/share/doc/rnode-nomu/examples/config.uconsole-aio-v2.toml /etc/rnode-nomu.toml
+```
+
+To update, install the newer package the same way. If the daemon is running, the package restarts
+it, and the restart first finishes the packet on the air
+([How long a stop takes](#how-long-a-stop-takes)). Drop-ins in
+`/etc/systemd/system/rnode-nomu.service.d/` stay, as in
+[Keeping local changes across updates](#keeping-local-changes-across-updates).
+`sudo apt remove rnode-nomu` stops the daemon and removes the package; `/etc/rnode-nomu.toml`, the
+saved settings in `/var/lib/rnode` and the `rnode` account stay, even with `apt purge`.
+
+A binary and unit installed from source, as in the quick start, take precedence over the package's:
+the unit in `/etc/systemd/system` overrides the package's, and `/usr/local/bin` comes first in
+`PATH`. To switch to the package, remove them first:
+
+```sh
+sudo systemctl disable --now rnode-nomu
+sudo rm /usr/local/bin/rnode-nomu /etc/systemd/system/rnode-nomu.service
+sudo apt install ./rnode-nomu_arm64.deb
+sudo systemctl enable --now rnode-nomu
+```
+
+### Tarballs
+
+```sh
+curl -fLO https://github.com/arader/rnode-nomu/releases/latest/download/rnode-nomu-aarch64-unknown-linux-gnu.tar.gz
+tar -xzf rnode-nomu-aarch64-unknown-linux-gnu.tar.gz
+cd rnode-nomu-aarch64-unknown-linux-gnu
+sudo install -m 0755 rnode-nomu /usr/local/bin/rnode-nomu
+```
+
+The directory holds the config examples and `contrib/rnode-nomu.service` at the same paths as the
+repository, so the other commands of the quick start's step 2 work in it unchanged.
+`THIRD-PARTY-LICENSES.md` lists the licenses of the Rust crates compiled into the binary.
 
 ## Setting up the LoRa hardware
 
@@ -1365,7 +1442,8 @@ systemd creates `/run/rnode` (`RuntimeDirectory=`) for the PTY symlink, and remo
 daemon stops, and `/var/lib/rnode` (`StateDirectory=`) for the saved settings. Install the binary
 as in [Building](#building) and the config at `/etc/rnode-nomu.toml`, as in the
 [uConsole steps](#uconsole-cm5-with-the-hackergadgets-aio-v2). The [Quick start](#quick-start) does
-all of this, and runs `rnsd` as a service too.
+all of this, and runs `rnsd` as a service too. The [Debian package](#debian-package) installs the
+binary and the unit, and creates the account.
 
 ### Service account and device access
 
@@ -1375,7 +1453,8 @@ and over the air, and it drives a transmitter and a power rail, so a fault in it
 the rest of the system. On top of that, the unit sets `NoNewPrivileges=`, `ProtectSystem=strict`,
 `ProtectHome=` and `PrivateTmp=`, and allows only the devices in its `DeviceAllow=` lines.
 
-Create the account the unit runs as:
+Create the account the unit runs as (the Debian package creates it, and gives it the groups below
+where they exist):
 
 ```sh
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin rnode
@@ -1430,6 +1509,9 @@ the PTY's owner can always open it. But the daemon then has everything that acco
 program running under that account can use the SPI and GPIO devices.
 
 ### Installing the unit
+
+The Debian package installs the unit as `/usr/lib/systemd/system/rnode-nomu.service`; with it,
+skip the `install` command below. Otherwise:
 
 ```sh
 sudo install -m 0644 contrib/rnode-nomu.service /etc/systemd/system/
@@ -1568,10 +1650,13 @@ packets, which are encrypted to their addresses.
 ### Keeping local changes across updates
 
 Installing `contrib/rnode-nomu.service` from a newer version replaces the file in
-`/etc/systemd/system`, and every change made in it. Drop-ins, in
+`/etc/systemd/system`, and every change made in it, as an update of the Debian package replaces
+its unit in `/usr/lib/systemd/system`. Drop-ins, in
 `/etc/systemd/system/rnode-nomu.service.d/`, and the links that `systemctl enable` and
 `systemctl add-wants` make are separate files and stay. So keep local changes, such as
-`SupplementaryGroups=` or a lower `TimeoutStopSec=`, in a drop-in. To update rnode-nomu:
+`SupplementaryGroups=` or a lower `TimeoutStopSec=`, in a drop-in. To update a Debian package
+installation, install the newer package ([Debian package](#debian-package)). To update an
+installation from source:
 
 ```sh
 cd rnode-nomu
@@ -2196,12 +2281,45 @@ messages, apart from the IDs of the commits they cite. References such as `#3` o
 commit messages, code comments and documentation point to issues and pull requests on that
 instance, not to this repository.
 
+## Releases and versions
+
+rnode-nomu and its libraries each have their own version and changelog. The version that matters
+for running rnode-nomu is the daemon's, which `rnode-nomu --version` prints: [GitHub releases](https://github.com/arader/rnode-nomu/releases)
+are releases of the daemon, tagged `rnode-nomu-v<version>`, with the notes of
+[its changelog](crates/rnode-nomu/CHANGELOG.md) and the files of
+[Installing a release](#installing-a-release). The libraries, `rnode-core`, `rnode-sx126x` and
+`rnode-sim`, get tags of their own, `<crate>-v<version>`, and a changelog in their directories,
+but no GitHub release.
+
+Versions follow [semantic versioning](https://semver.org) the way Cargo applies it before 1.0: a
+breaking change raises the minor version, from 0.3.1 to 0.4.0, and any other change the patch
+version, from 0.3.0 to 0.3.1. A change to the daemon is breaking when a setup that worked needs
+changing after the update: a config key, a command line flag or a default that changes meaning or
+goes away, saved settings or an EEPROM file that the new version reads differently, or a path or
+unit setting that moves. A change to a library is breaking when it can break code that uses it.
+
+The crates are not on crates.io. To use a library in another project, depend on its tag:
+
+```toml ignore
+[dependencies]
+rnode-core = { git = "https://github.com/arader/rnode-nomu", tag = "rnode-core-v0.2.0" }
+```
+
+[release-plz](https://release-plz.dev) makes the releases ([`release-plz.toml`](release-plz.toml)).
+When a merge to `main` changes a crate, it opens or updates a pull request with the next versions
+and changelog entries, and merging that pull request tags the crates and publishes the daemon's
+release, with binaries and the Debian package built by [`release.yml`](.github/workflows/release.yml).
+Changes outside the crates, such as to the example configs, ship with the daemon's next release.
+[AGENTS.md](AGENTS.md) has the rules for pull requests.
+
 ## Contributing
 
 Changes go through pull requests on GitHub, and CI runs the six [test steps](#tests) on each, the
 last of them the SF7 Reticulum end-to-end test; `main` gets every scenario after the merge.
 [AGENTS.md](AGENTS.md) has the rules: test layout, firmware references, and tests for every
-behaviour change. New radio drivers start with [DRIVERS.md](DRIVERS.md).
+behaviour change. A pull request's title becomes its changelog entry
+([Releases and versions](#releases-and-versions)). New radio drivers start with
+[DRIVERS.md](DRIVERS.md).
 
 ## License
 

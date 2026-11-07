@@ -2,12 +2,21 @@
 resolver = "3"
 members = ["crates/*"]
 
+# Each crate but xtask has its own version, which release-plz bumps (release-plz.toml); see
+# "Releases and versions" in README.md.
 [workspace.package]
-version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/arader/rnode-nomu"
+
+# The crates that other crates of the workspace depend on. The version requirement must match the
+# crate's own version: release-plz updates both, and a pull request that bumps one by hand updates
+# the other.
+[workspace.dependencies]
+rnode-core = { path = "crates/rnode-core", version = "0.2.0" }
+rnode-sim = { path = "crates/rnode-sim", version = "0.2.0" }
+rnode-sx126x = { path = "crates/rnode-sx126x", version = "0.2.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

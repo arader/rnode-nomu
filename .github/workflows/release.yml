@@ -1,0 +1,287 @@
+name: Release
+
+# Releases with release-plz (release-plz.toml); README.md, "Releases and versions", and AGENTS.md
+# describe the process. On each push to main:
+# - `release` tags each crate whose version has no tag yet, if the push merged a release pull
+#   request (from a branch starting with release-plz-), and creates rnode-nomu's GitHub release as
+#   a draft;
+# - `binaries` builds the daemon for arm64 and x86-64 Linux at that tag, with the Debian package
+#   for arm64, and `publish` attaches them to the draft and publishes it. A failed build leaves the
+#   draft unpublished. `binaries` runs the repository's code with a read-only token; `publish`,
+#   which runs none of it, writes the release;
+# - `release-pr` opens or updates the release pull request with the next versions and changelogs.
+#   It uses the RELEASE_PLZ_TOKEN secret, a fine-grained personal access token for this repository
+#   with read and write access to contents and pull requests, because pull requests opened with
+#   GITHUB_TOKEN start no workflows, so `PR / test` would never run on them. Without the secret,
+#   the job is skipped with a warning.
+# On pull requests that change the packaging, and on release pull requests, `binaries` builds the
+# packages and keeps them as workflow artifacts, without releasing anything.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    # The packaging, and the daemon's changelog, which every release pull request changes, even
+    # when the version was raised by hand.
+    paths:
+      - .github/workflows/release.yml
+      - Cargo.lock
+      - config.*.toml
+      - contrib/**
+      - crates/rnode-nomu/CHANGELOG.md
+      - crates/rnode-nomu/Cargo.toml
+      - crates/rnode-nomu/about.*
+      - crates/rnode-nomu/debian/**
+
+permissions: {}
+
+concurrency:
+  # Each push to main gets its own group: in a shared one, a newer push would cancel a pending run,
+  # and with it the release of a release pull request merged just before. A pull request's run
+  # gives way to a newer push to it.
+  group: release-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      tag: ${{ steps.daemon.outputs.tag }}
+      release-pr: ${{ steps.token.outputs.release-pr }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # release-plz reads the versions from the tags and the changelog from the history.
+          fetch-depth: 0
+          persist-credentials: false
+      # The Rust that pull requests are tested with (pr.yml; crates/xtask/src/tests.rs checks that
+      # the steps match).
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.0
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: Release
+        id: release-plz
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
+        with:
+          command: release
+          version: 0.4.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Daemon release
+        id: daemon
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          set -euo pipefail
+          echo "release-plz released: ${RELEASES:-[]}"
+          tag=$(jq -r '.[] | select(.package_name == "rnode-nomu") | .tag' <<< "${RELEASES:-[]}")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Release PR token
+        id: token
+        env:
+          RELEASE_PLZ_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: |
+          if [ -n "$RELEASE_PLZ_TOKEN" ]; then
+            echo "release-pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=No release pull request::The RELEASE_PLZ_TOKEN secret is not set, so release-plz cannot open the release pull request (.github/workflows/release.yml says how to create it)."
+          fi
+
+  release-pr:
+    needs: release
+    if: needs.release.outputs.release-pr == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # release-plz opens the pull request with RELEASE_PLZ_TOKEN, not with GITHUB_TOKEN.
+    permissions:
+      contents: read
+    # One at a time. A newer pending job replaces an older one, which is fine, as each starts from
+    # the newest main.
+    concurrency:
+      group: release-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The newest main rather than the pushed commit: runs for successive pushes overlap, and
+          # the last to get here must not take the release pull request back to an older main.
+          # Each run gets here only after its own release has tagged the crates.
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.0
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: Release PR
+        id: release-plz
+        uses: release-plz/action@66b324fd6c72d05d2a08568492ecdd62bfb8a62b # v0.5.148
+        with:
+          command: release-pr
+          version: 0.4.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      # The bring-up tool, outside the workspace, has a lock file of its own that records the
+      # versions of rnode-core and rnode-sx126x, and `PR / test` builds it with --locked. release-plz
+      # updates only the workspace's lock file, so this commits the tool's to the release PR. The
+      # commit's author is GitHub Actions' bot, so that release-plz still updates the pull request
+      # in place rather than closing it to keep a maintainer's commit.
+      - name: Bring-up tool's lock file
+        if: steps.release-plz.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          BRANCH: ${{ fromJSON(steps.release-plz.outputs.pr).head_branch }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin "$BRANCH"
+          git switch --quiet --force-create "$BRANCH" FETCH_HEAD
+          manifest=tools/hwtest/sx126x-bringup/Cargo.toml
+          cargo update --manifest-path "$manifest" -p rnode-core -p rnode-sx126x
+          if git diff --quiet; then
+            echo "The bring-up tool's lock file is up to date."
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet --all --message "Update the bring-up tool's lock file"
+          git push --quiet "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/$BRANCH"
+
+  binaries:
+    name: binaries (${{ matrix.target }})
+    needs: release
+    # After a release of rnode-nomu, and on pull requests, where `release` is skipped.
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.release.outputs.tag != '') }}
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04's glibc 2.35, so that the binaries also run on Debian 12 (2.36).
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            deb: rnode-nomu_arm64.deb
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    # It builds and runs the repository's code, that of pull requests too, so it cannot write.
+    permissions:
+      contents: read
+    env:
+      TARGET: ${{ matrix.target }}
+      DEB: ${{ matrix.deb }}
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The released commit; on pull requests, the default (the pull request merged into main).
+          ref: ${{ needs.release.outputs.tag }}
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.0
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+      - name: Build
+        run: |
+          cargo build --release --locked -p rnode-nomu
+          target/release/rnode-nomu --version
+      # cargo-about lists the licenses of the crates compiled into the daemon, which the tarball and
+      # the Debian package carry. The release is pinned and verified against its sha256.
+      - name: Install cargo-about
+        run: |
+          set -euo pipefail
+          version=0.9.3
+          case "$(uname -m)" in
+            x86_64)
+              target=x86_64-unknown-linux-musl
+              sha256=3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4 ;;
+            aarch64)
+              target=aarch64-unknown-linux-musl
+              sha256=eb4d9ff6ebd2518152a8308729431a04b3836e71d2bd5ead7aea69f91a71162e ;;
+            *)
+              echo "no pinned cargo-about for $(uname -m)" >&2
+              exit 1 ;;
+          esac
+          dir=$(mktemp -d "$RUNNER_TEMP/cargo-about.XXXXXX")
+          curl --fail --silent --show-error --location --retry 3 --output "$dir/cargo-about.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/$version/cargo-about-$version-$target.tar.gz"
+          echo "$sha256  $dir/cargo-about.tar.gz" | sha256sum --check --strict
+          tar -xzf "$dir/cargo-about.tar.gz" -C "$dir" --strip-components=1 --no-same-owner
+          rm "$dir/cargo-about.tar.gz"
+          "$dir/cargo-about" --version
+          echo "$dir" >> "$GITHUB_PATH"
+      - name: Third-party licenses
+        run: |
+          cargo about generate --locked --fail --config crates/rnode-nomu/about.toml \
+            --manifest-path crates/rnode-nomu/Cargo.toml \
+            --output-file target/release/THIRD-PARTY-LICENSES.md crates/rnode-nomu/about.hbs
+      # The binary with what a manual install needs, laid out as in the repository: README.md,
+      # "Installing a release".
+      - name: Tarball
+        run: |
+          set -euo pipefail
+          dir="rnode-nomu-$TARGET"
+          mkdir -p "dist/$dir/contrib"
+          cp target/release/rnode-nomu target/release/THIRD-PARTY-LICENSES.md README.md LICENSE \
+            NOTICE.md config.*.toml "dist/$dir/"
+          cp contrib/rnode-nomu.service "dist/$dir/contrib/"
+          tar -czf "dist/$dir.tar.gz" -C dist --owner=0 --group=0 "$dir"
+          tar -tvzf "dist/$dir.tar.gz"
+      - name: Debian package
+        if: matrix.deb
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-deb --version 3.8.0
+          cargo deb --no-build -p rnode-nomu --output "dist/$DEB"
+          dpkg-deb --info "dist/$DEB"
+          dpkg-deb --contents "dist/$DEB"
+      # For `publish` to attach to the release, and on pull requests, to try them out.
+      - name: Keep the packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: rnode-nomu-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+          if-no-files-found: error
+          # A re-run of the job replaces the packages of the attempt before.
+          overwrite: true
+
+  publish:
+    needs: [release, binaries]
+    if: needs.release.outputs.tag != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rnode-nomu-*
+          path: dist
+          merge-multiple: true
+      - name: Attach the packages
+        run: |
+          ls -l dist
+          gh release upload "$TAG" dist/* --clobber
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false

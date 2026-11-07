@@ -98,7 +98,8 @@ Prerequisites:
   cancel each other.
 
 Both workflows run on GitHub's `ubuntu-24.04` runners, with Python 3.13 from
-`actions/setup-python` and Rust pinned in their "Toolchain" step (bump both together). They
+`actions/setup-python` and Rust pinned in their "Toolchain" step (bump both together, and
+`.github/workflows/release.yml`, whose jobs have the same step). They
 install `uv` with the same "Install uv" step: a pinned release, checked against its sha256 before
 use. They set `UV_PYTHON_DOWNLOADS=never`, so the harness uses that Python and downloads nothing
 that is not pinned. `cargo test` also runs the harness's Rust-only counterpart,

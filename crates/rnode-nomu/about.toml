@@ -1,0 +1,12 @@
+# cargo-about's settings for THIRD-PARTY-LICENSES.md, the licenses of the crates compiled into
+# rnode-nomu, which release builds ship with the binary (.github/workflows/release.yml):
+#   cargo about generate --config crates/rnode-nomu/about.toml \
+#     --manifest-path crates/rnode-nomu/Cargo.toml crates/rnode-nomu/about.hbs
+# For a crate that offers a choice, the first of these licenses it offers is used.
+accepted = ["MIT", "Apache-2.0", "Unicode-3.0", "Unlicense"]
+# The targets of the release builds.
+targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# The workspace's own crates (publish = false): LICENSE and NOTICE.md cover them.
+private = { ignore = true }

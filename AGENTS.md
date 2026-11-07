@@ -82,6 +82,45 @@ we deliberately differ, say so in a doc comment.
 - Reference issues in PRs (`Fixes #n`); open an issue for every bug you find that is out of
   scope for your change.
 
+## Versions and releases
+
+- rnode-nomu and its libraries each have their own version in their `Cargo.toml` (xtask has none,
+  and release-plz skips it); the root `Cargo.toml`'s `[workspace.dependencies]` holds the
+  requirements of the crates that others depend on. No crate is on crates.io (`publish = false`).
+  README.md, "Releases and versions", is the user's view.
+- release-plz (`release-plz.toml`, `.github/workflows/release.yml`) keeps a release PR open with the
+  next versions and changelog entries. Merging it tags each released crate `<crate>-v<version>` and
+  publishes rnode-nomu's GitHub release with the binaries and the Debian package. Merging any PR
+  from a branch whose name starts with `release-plz-` releases, so use that prefix for nothing else.
+- The squash-merged title of a PR is its changelog entry: write it for the people who run the
+  daemon, in the imperative. Its first word picks the section: Add, Support or Implement for
+  Added, Deprecate for Deprecated, Remove or Drop for Removed, Fix for Fixed, any other for Changed.
+- release-plz raises the patch version of every crate changed since its tag. A PR with a breaking
+  change (as README.md defines it) raises the minor version itself, of every crate it breaks, and
+  the requirement in `[workspace.dependencies]` and `Cargo.lock` with it. A breaking change to
+  rnode-core's API also breaks rnode-sx126x and rnode-sim, which implement its `Radio` trait.
+  release-plz keeps a version that is already ahead of the crate's tag. A new version of
+  rnode-core or rnode-sx126x also goes into the bring-up tool's lock file:
+  `cargo update --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml -p rnode-core -p rnode-sx126x`
+  (the release workflow does this in the release PR).
+- release-plz counts a commit for a crate when it changes a file of the crate's package
+  (`cargo package --list -p <crate>`; for rnode-nomu also README.md), and for rnode-nomu every
+  commit of the libraries it is built from. Changes outside `crates/`, such as the example configs
+  and `contrib/`, release nothing by themselves but ship with rnode-nomu's next release; to release
+  one sooner, raise rnode-nomu's patch version in the same PR. `crates/rnode-nomu/debian` has the
+  Debian package's copy of `contrib/rnode-nomu.service`; `crates/rnode-nomu/tests/packaging.rs`
+  keeps the two in step.
+- Changelog entries become GitHub release notes, where line breaks show: when you edit a
+  changelog, keep each paragraph or list item on one line.
+- The release PR is opened with the `RELEASE_PLZ_TOKEN` secret, so that `PR / test` runs on it.
+  `Release / binaries` builds the tarballs and the Debian package on PRs that change the packaging
+  or rnode-nomu's changelog, as every release PR does (the `paths` in release.yml); it is not part
+  of the CI gate, but a release needs it to pass.
+- If a release fails halfway, re-run the failed jobs of its `Release` run; the GitHub release stays
+  a draft until `publish` succeeds. If the `release` job failed after tagging rnode-nomu, a re-run
+  skips that version: delete the tag (`git push origin --delete rnode-nomu-v<version>`) and its
+  draft release, if any, first.
+
 ## Hardware
 
 The reference board is the uConsole (CM5) with the HackerGadgets AIO V2: SX1262 on
