@@ -28,9 +28,11 @@ commit_parsers = [
     { message = "^(?i)fix", group = "<!-- 4 -->Fixed" },
     { message = ".*", group = "<!-- 1 -->Changed" },
 ]
-# Link the pull request that GitHub appends to a squash-merged title.
+# Link the pull request that GitHub appends to a squash-merged title. release-plz keeps only the
+# first line of most commit messages, but all of a conventional one (`fix: …`), so `$` has to
+# match at the end of a line (?m), not only at the end of the message.
 commit_preprocessors = [
-    { pattern = "\\(#(\\d+)\\)$", replace = "([#${1}](https://github.com/arader/rnode-nomu/pull/${1}))" },
+    { pattern = "(?m)\\(#(\\d+)\\)$", replace = "([#${1}](https://github.com/arader/rnode-nomu/pull/${1}))" },
 ]
 # release-plz's default body with the sections above, and only the first line of each commit
 # message: the rest is the pull request's description.
