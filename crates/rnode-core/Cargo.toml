@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Not on crates.io (docs/releases.md).
+# Not on crates.io (README.md, "Releases and versions").
 publish = false
 description = "Hardware-independent RNode logic: KISS host protocol, framing, PHY/CSMA and the node state machine"
 
