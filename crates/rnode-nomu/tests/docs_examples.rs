@@ -1,6 +1,7 @@
-//! Keeps README.md and DRIVERS.md in step with the code. Every daemon config they show must load
-//! with the real config loader, every relative link must point at a file or heading that exists,
-//! and the README's Reticulum example must use the option names Reticulum reads.
+//! Keeps the documentation in step with the code: README.md and the guides in docs/. Every daemon
+//! config they show must load with the real config loader, every relative link must point at a
+//! file or heading that exists, every Reticulum example must use the option names Reticulum reads,
+//! and README.md must link every guide.
 //!
 //! A ```` ```toml ```` block is a daemon config, either complete or a fragment such as a single
 //! section. Fragments are checked merged over minimal `[spi]` and `[gpio]` sections. TOML that is not
@@ -14,7 +15,26 @@ use std::path::{Path, PathBuf};
 use nix::unistd::{Gid, Group};
 use rnode_nomu::config::Config;
 
-const DOCS: &[&str] = &["README.md", "DRIVERS.md"];
+/// The checked documents, as paths from the repository root: README.md and every Markdown file in
+/// docs/.
+fn docs() -> Vec<String> {
+    let mut guides: Vec<String> = fs::read_dir(repo_root().join("docs"))
+        .expect("read docs/")
+        .map(|entry| {
+            entry
+                .expect("docs/ entry")
+                .file_name()
+                .into_string()
+                .expect("UTF-8 name")
+        })
+        .filter(|name| name.ends_with(".md"))
+        .map(|name| format!("docs/{name}"))
+        .collect();
+    guides.sort();
+    let mut docs = vec!["README.md".to_owned()];
+    docs.extend(guides);
+    docs
+}
 
 /// The options Reticulum (e40191b3) reads for an `RNodeInterface`: `RNS/Reticulum.py` for `type`
 /// and `enabled`/`interface_enabled`, `RNS/Interfaces/RNodeInterface.py` for the rest. Reticulum
@@ -274,98 +294,142 @@ fn link_targets(doc: &str, text: &str) -> Vec<(usize, String)> {
     targets
 }
 
-#[test]
-fn readme_and_drivers_daemon_configs_load() {
-    let readme = read_doc("README.md");
-    assert!(
-        check_toml_blocks("README.md", &readme) >= 2,
-        "README.md should show the sim quick start and the uConsole config"
-    );
-    check_toml_blocks("DRIVERS.md", &read_doc("DRIVERS.md"));
+fn is_external(target: &str) -> bool {
+    target.starts_with("http://") || target.starts_with("https://") || target.starts_with("mailto:")
+}
+
+/// A link's path, which is relative to the directory of `doc`, as a path from the repository root;
+/// `None` if it leaves the repository.
+fn resolve(doc: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = doc.split('/').collect();
+    parts.pop();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 #[test]
-fn readme_quotes_the_uconsole_config_verbatim() {
-    let config = fs::read_to_string(repo_root().join("config.uconsole-aio-v2.toml")).unwrap();
-    let readme = read_doc("README.md");
+fn docs_daemon_configs_load() {
+    let configs: HashMap<String, usize> = docs()
+        .into_iter()
+        .map(|doc| {
+            let count = check_toml_blocks(&doc, &read_doc(&doc));
+            (doc, count)
+        })
+        .collect();
     assert!(
-        code_blocks("README.md", &readme)
+        configs["docs/development.md"] >= 1,
+        "docs/development.md should show the config of the quick start without hardware"
+    );
+    assert!(
+        configs["docs/hardware.md"] >= 1,
+        "docs/hardware.md should show the uConsole config"
+    );
+}
+
+#[test]
+fn hardware_guide_quotes_the_uconsole_config_verbatim() {
+    let config = fs::read_to_string(repo_root().join("config.uconsole-aio-v2.toml")).unwrap();
+    let guide = read_doc("docs/hardware.md");
+    assert!(
+        code_blocks("docs/hardware.md", &guide)
             .iter()
             .any(|block| block.info == "toml" && block.body == config),
-        "README.md must quote config.uconsole-aio-v2.toml verbatim"
+        "docs/hardware.md must quote config.uconsole-aio-v2.toml verbatim"
     );
 }
 
 /// The hardware validation found an older README using `spreading_factor`/`coding_rate` without
 /// `enabled = yes`, which makes `rnsd` skip the interface or exit.
 #[test]
-fn readme_reticulum_example_uses_rnodeinterface_keys() {
-    let readme = read_doc("README.md");
-    let blocks: Vec<CodeBlock> = code_blocks("README.md", &readme)
-        .into_iter()
-        .filter(|block| block.body.contains("type = RNodeInterface"))
-        .collect();
-    assert!(!blocks.is_empty(), "README.md should show an RNodeInterface example");
-    for block in blocks {
-        let keys: Vec<&str> = block
-            .body
-            .lines()
-            .filter_map(|line| line.split_once('=').map(|(key, _)| key.trim()))
+fn reticulum_examples_use_rnodeinterface_keys() {
+    let mut examples: HashMap<String, usize> = HashMap::new();
+    for doc in docs() {
+        let blocks: Vec<CodeBlock> = code_blocks(&doc, &read_doc(&doc))
+            .into_iter()
+            .filter(|block| block.body.contains("type = RNodeInterface"))
             .collect();
-        for key in &keys {
+        examples.insert(doc.clone(), blocks.len());
+        for block in blocks {
+            let keys: Vec<&str> = block
+                .body
+                .lines()
+                .filter_map(|line| line.split_once('=').map(|(key, _)| key.trim()))
+                .collect();
+            for key in &keys {
+                assert!(
+                    RNODE_INTERFACE_KEYS.contains(key),
+                    "{doc}:{}: Reticulum does not read `{key}` for an RNodeInterface",
+                    block.line
+                );
+            }
+            let required = [
+                "type",
+                "port",
+                "frequency",
+                "bandwidth",
+                "txpower",
+                "spreadingfactor",
+                "codingrate",
+            ];
+            for key in required {
+                assert!(keys.contains(&key), "{doc}:{}: the example lacks `{key}`", block.line);
+            }
             assert!(
-                RNODE_INTERFACE_KEYS.contains(key),
-                "README.md:{}: Reticulum does not read `{key}` for an RNodeInterface",
+                keys.contains(&"enabled") || keys.contains(&"interface_enabled"),
+                "{doc}:{}: without `enabled = yes` Reticulum skips the interface",
                 block.line
             );
         }
-        let required = [
-            "type",
-            "port",
-            "frequency",
-            "bandwidth",
-            "txpower",
-            "spreadingfactor",
-            "codingrate",
-        ];
-        for key in required {
-            assert!(
-                keys.contains(&key),
-                "README.md:{}: the example lacks `{key}`",
-                block.line
-            );
-        }
-        assert!(
-            keys.contains(&"enabled") || keys.contains(&"interface_enabled"),
-            "README.md:{}: without `enabled = yes` Reticulum skips the interface",
-            block.line
-        );
+    }
+    for doc in ["README.md", "docs/reticulum.md"] {
+        assert!(examples[doc] >= 1, "{doc} should show an RNodeInterface example");
     }
 }
 
 #[test]
-fn readme_and_drivers_relative_links_resolve() {
+fn docs_relative_links_resolve() {
     let root = repo_root();
-    let texts: HashMap<&str, String> = DOCS.iter().map(|&doc| (doc, read_doc(doc))).collect();
-    let doc_anchors: HashMap<&str, HashSet<String>> =
-        texts.iter().map(|(&doc, text)| (doc, anchors(doc, text))).collect();
+    let texts: HashMap<String, String> = docs()
+        .into_iter()
+        .map(|doc| {
+            let text = read_doc(&doc);
+            (doc, text)
+        })
+        .collect();
+    let doc_anchors: HashMap<&str, HashSet<String>> = texts
+        .iter()
+        .map(|(doc, text)| (doc.as_str(), anchors(doc, text)))
+        .collect();
     let mut checked = 0;
-    for (&doc, text) in &texts {
+    for (doc, text) in &texts {
         for (line, target) in link_targets(doc, text) {
-            if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("mailto:") {
+            if is_external(&target) {
                 continue;
             }
             let (path, anchor) = target.split_once('#').unwrap_or((target.as_str(), ""));
             let anchor_doc = if path.is_empty() {
-                doc
+                doc.clone()
             } else {
-                assert!(root.join(path).exists(), "{doc}:{line}: link to missing {path}");
-                path
+                let resolved =
+                    resolve(doc, path).unwrap_or_else(|| panic!("{doc}:{line}: link leaves the repository: {target}"));
+                assert!(
+                    root.join(&resolved).exists(),
+                    "{doc}:{line}: link to missing {resolved}"
+                );
+                resolved
             };
             if !anchor.is_empty() {
-                let known = doc_anchors
-                    .get(anchor_doc)
-                    .unwrap_or_else(|| panic!("{doc}:{line}: anchors are only checked in {DOCS:?}: {target}"));
+                let known = doc_anchors.get(anchor_doc.as_str()).unwrap_or_else(|| {
+                    panic!("{doc}:{line}: anchors are only checked in README.md and docs/: {target}")
+                });
                 assert!(
                     known.contains(anchor),
                     "{doc}:{line}: no heading for #{anchor} in {anchor_doc}"
@@ -375,6 +439,22 @@ fn readme_and_drivers_relative_links_resolve() {
         }
     }
     assert!(checked > 20, "only {checked} links found; is the link parser broken?");
+}
+
+/// README.md stays short, so every guide must be reachable from it.
+#[test]
+fn readme_links_every_guide() {
+    let linked: HashSet<String> = link_targets("README.md", &read_doc("README.md"))
+        .into_iter()
+        .filter(|(_, target)| !is_external(target))
+        .filter_map(|(_, target)| {
+            let path = target.split('#').next().unwrap_or_default();
+            resolve("README.md", path)
+        })
+        .collect();
+    for guide in docs().into_iter().filter(|doc| doc != "README.md") {
+        assert!(linked.contains(&guide), "README.md does not link {guide}");
+    }
 }
 
 #[test]

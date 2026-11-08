@@ -5,8 +5,9 @@ set -e
 # upgrade restarts the service if it is running.
 #DEBHELPER#
 
-# On the first install, give the account the groups the quick start gives it (README.md) where they
-# exist: spi and gpio for the devices on Raspberry Pi OS, dialout for sharing the PTY with rnsd.
+# On the first install, give the account the groups that an install from source gives it
+# (docs/installing.md) where they exist: spi and gpio for the devices on Raspberry Pi OS, dialout
+# for sharing the PTY with rnsd.
 # Upgrades leave its groups alone.
 if [ "$1" = configure ] && [ -z "$2" ]; then
 	for group in spi gpio dialout; do

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 # Each crate but xtask has its own version, which release-plz bumps (release-plz.toml); see
-# "Releases and versions" in README.md.
+# docs/releases.md.
 [workspace.package]
 edition = "2024"
 rust-version = "1.85"

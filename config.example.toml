@@ -42,9 +42,9 @@ ocp = 0x28
 # busy_timeout_ms = 100 # default from rnode-sx126x / firmware sx126x::waitOnBusy()
 # tx_timeout_ms = 20000 # default from rnode-sx126x / firmware LORA_MODEM_TIMEOUT_MS
 
-# Power amplifier after the SX1262: untested on PA hardware, see README.md "[radio.pa]". The host's
-# TX power is then the power after the PA. Without this section the daemon drives a PA as if it were
-# the antenna, and the board puts out up to the PA's gain more than hosts ask for.
+# Power amplifier after the SX1262: untested on PA hardware, see docs/configuration.md, "[radio.pa]".
+# The host's TX power is then the power after the PA. Without this section the daemon drives a PA as
+# if it were the antenna, and the board puts out up to the PA's gain more than hosts ask for.
 # [radio.pa]
 # "gc1109" or "kct8103l", the Heltec V4's front ends with the firmware's tables, or "custom".
 # model = "gc1109"

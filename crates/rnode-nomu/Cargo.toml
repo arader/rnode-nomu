@@ -5,17 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Not on crates.io (README.md, "Releases and versions").
+# Not on crates.io (docs/releases.md).
 publish = false
 description = "Linux userspace RNode daemon built on rnode-core"
-# Also makes release-plz count README changes as changes to the daemon.
+# Also makes release-plz count README changes as changes to the daemon; changes to docs/ ship with
+# its next release.
 readme = "../../README.md"
 
 [lints]
 workspace = true
 
 # The Debian package of the daemon that release builds attach to GitHub releases (cargo-deb;
-# README.md, "Installing a release"). Source paths are relative to this directory, except
+# docs/installing.md). Source paths are relative to this directory, except
 # target/release/, which cargo-deb resolves to the target directory; the release workflow generates
 # THIRD-PARTY-LICENSES.md there before packaging. tests/packaging.rs checks the rest exist.
 [package.metadata.deb]
@@ -33,6 +34,7 @@ depends = "$auto, systemd | systemd-standalone-sysusers | systemd-sysusers"
 assets = [
     ["target/release/rnode-nomu", "usr/bin/", "755"],
     ["../../README.md", "usr/share/doc/rnode-nomu/", "644"],
+    ["../../docs/*.md", "usr/share/doc/rnode-nomu/docs/", "644"],
     ["../../NOTICE.md", "usr/share/doc/rnode-nomu/", "644"],
     ["target/release/THIRD-PARTY-LICENSES.md", "usr/share/doc/rnode-nomu/", "644"],
     ["../../config.*.toml", "usr/share/doc/rnode-nomu/examples/", "644"],

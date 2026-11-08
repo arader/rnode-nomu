@@ -1,7 +1,7 @@
 name: Release
 
-# Releases with release-plz (release-plz.toml); README.md, "Releases and versions", and AGENTS.md
-# describe the process. On each push to main:
+# Releases with release-plz (release-plz.toml); docs/releases.md and AGENTS.md describe the
+# process. On each push to main:
 # - `release` tags each crate whose version has no tag yet, if the push merged a release pull
 #   request (from a branch starting with release-plz-), and creates rnode-nomu's GitHub release as
 #   a draft;
@@ -230,8 +230,8 @@ jobs:
           cargo about generate --locked --fail --config crates/rnode-nomu/about.toml \
             --manifest-path crates/rnode-nomu/Cargo.toml \
             --output-file target/release/THIRD-PARTY-LICENSES.md crates/rnode-nomu/about.hbs
-      # The binary with what a manual install needs, laid out as in the repository: README.md,
-      # "Installing a release".
+      # The binary with what a manual install needs, laid out as in the repository:
+      # docs/installing.md, "Tarballs".
       - name: Tarball
         run: |
           set -euo pipefail
@@ -240,6 +240,7 @@ jobs:
           cp target/release/rnode-nomu target/release/THIRD-PARTY-LICENSES.md README.md LICENSE \
             NOTICE.md config.*.toml "dist/$dir/"
           cp contrib/rnode-nomu.service "dist/$dir/contrib/"
+          cp -R docs "dist/$dir/"
           tar -czf "dist/$dir.tar.gz" -C dist --owner=0 --group=0 "$dir"
           tar -tvzf "dist/$dir.tar.gz"
       - name: Debian package
