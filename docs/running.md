@@ -223,8 +223,18 @@ stop or a reboot. If your hosts never use such slow settings, you can lower it i
 modulation they do use.
 
 The unit's file system is read-only apart from `/run/rnode` and `/var/lib/rnode`, so keep the
-symlink, the settings file, the EEPROM file and any `--spilog` file in those directories, for example
-`ExecStart=/usr/local/bin/rnode-nomu --config /etc/rnode-nomu.toml --spilog /var/lib/rnode/spi.csv`.
+symlink, the settings file, the EEPROM file and any `--spilog` file in those directories. To record
+SPI traffic under the service, for example, replace the unit's command in a drop-in
+(`sudo systemctl edit rnode-nomu`). The empty `ExecStart=` clears the unit's own command, because a
+service of this type takes only one:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/rnode-nomu --config /etc/rnode-nomu.toml --spilog /var/lib/rnode/spi.csv
+```
+
+A binary installed from source is `/usr/local/bin/rnode-nomu` instead.
 
 ### Running rnsd as a service
 
