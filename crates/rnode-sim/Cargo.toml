@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Not on crates.io (README.md, "Releases and versions").
+# Not on crates.io (docs/releases.md).
 publish = false
 description = "Multi-process simulated LoRa radio for rnode-nomu tests"
 

@@ -17,13 +17,16 @@ with real RNodes.
 - `crates/rnode-nomu` — the daemon on top of `rnode-core` (config, GPIO, SPI, PTY, saved
   settings, event loop).
 - Modem drivers implement `rnode_core::Radio` in their own crates: `crates/rnode-sx126x` for the
-  SX1262, `crates/rnode-sim` for the simulated radio. DRIVERS.md explains the contract.
+  SX1262, `crates/rnode-sim` for the simulated radio. `docs/drivers.md` explains the contract.
 - `crates/xtask` — repository tasks: `cargo xtask rns-e2e` runs Reticulum against two simulated
   daemons, and Reticulum's `rnodeconf` against simulated daemons, with the Reticulum commit, uv
   release and Python packages pinned (crates/xtask/README.md says where);
   `tests/e2e/kiss_probe.py` is its KISS probe.
 - `tools/hwtest` — hardware bring-up, SDR analysis and an over-the-air LXMF echo test against a
   real RNode (`lxmf_echo_ota.py`) for the reference board, outside the workspace.
+- `README.md` — the summary and the quick start; `docs/` — the guides it links, for users
+  (installing, hardware, configuration, running, Reticulum, logging, troubleshooting) and for
+  developers (how it works, development, drivers, releases).
 
 Every crate's tests follow the Test layout section below.
 
@@ -56,9 +59,11 @@ we deliberately differ, say so in a doc comment.
   round-trip tests against our own code (a self-consistent but incompatible implementation is how
   the split-framing bug, #3, went unnoticed).
 - New code is `unsafe`-free (workspace lint `unsafe_code = "forbid"`).
-- Update README.md and DRIVERS.md with behaviour they describe (config keys, CLI flags, log
-  formats, the `Radio` contract). `crates/rnode-nomu/tests/docs_examples.rs` loads their config
-  examples with the real parser and checks their links.
+- Update the documentation with the behaviour it describes: config keys, CLI flags, log formats,
+  the `Radio` contract (`docs/drivers.md`). README.md holds only the summary and the quick start;
+  details go into a guide in `docs/`, and README.md links every guide.
+  `crates/rnode-nomu/tests/docs_examples.rs` loads their config examples with the real parser and
+  checks their links.
 - Code translated from RNode_Firmware keeps its attribution: when you port from a file
   [NOTICE.md](NOTICE.md) does not list yet, add it there with its copyright and license.
 - Never commit secrets: tokens, keys, private hostnames or addresses.
@@ -87,7 +92,7 @@ we deliberately differ, say so in a doc comment.
 - rnode-nomu and its libraries each have their own version in their `Cargo.toml` (xtask has none,
   and release-plz skips it); the root `Cargo.toml`'s `[workspace.dependencies]` holds the
   requirements of the crates that others depend on. No crate is on crates.io (`publish = false`).
-  README.md, "Releases and versions", is the user's view.
+  `docs/releases.md` is the user's view.
 - release-plz (`release-plz.toml`, `.github/workflows/release.yml`) keeps a release PR open with the
   next versions and changelog entries. Merging it tags each released crate `<crate>-v<version>` and
   publishes rnode-nomu's GitHub release with the binaries and the Debian package. Merging any PR
@@ -96,20 +101,20 @@ we deliberately differ, say so in a doc comment.
   daemon, in the imperative. Its first word picks the section: Add, Support or Implement for
   Added, Deprecate for Deprecated, Remove or Drop for Removed, Fix for Fixed, any other for Changed.
 - release-plz raises the patch version of every crate changed since its tag. A PR with a breaking
-  change (as README.md defines it) raises the minor version itself, of every crate it breaks, and
-  the requirement in `[workspace.dependencies]` and `Cargo.lock` with it. A breaking change to
-  rnode-core's API also breaks rnode-sx126x and rnode-sim, which implement its `Radio` trait.
-  release-plz keeps a version that is already ahead of the crate's tag. A new version of
+  change (as `docs/releases.md` defines it) raises the minor version itself, of every crate it
+  breaks, and the requirement in `[workspace.dependencies]` and `Cargo.lock` with it. A breaking
+  change to rnode-core's API also breaks rnode-sx126x and rnode-sim, which implement its `Radio`
+  trait. release-plz keeps a version that is already ahead of the crate's tag. A new version of
   rnode-core or rnode-sx126x also goes into the bring-up tool's lock file:
   `cargo update --manifest-path tools/hwtest/sx126x-bringup/Cargo.toml -p rnode-core -p rnode-sx126x`
   (the release workflow does this in the release PR).
 - release-plz counts a commit for a crate when it changes a file of the crate's package
   (`cargo package --list -p <crate>`; for rnode-nomu also README.md), and for rnode-nomu every
-  commit of the libraries it is built from. Changes outside `crates/`, such as the example configs
-  and `contrib/`, release nothing by themselves but ship with rnode-nomu's next release; to release
-  one sooner, raise rnode-nomu's patch version in the same PR. `crates/rnode-nomu/debian` has the
-  Debian package's copy of `contrib/rnode-nomu.service`; `crates/rnode-nomu/tests/packaging.rs`
-  keeps the two in step.
+  commit of the libraries it is built from. Changes outside `crates/`, such as the example configs,
+  `contrib/` and `docs/`, release nothing by themselves but ship with rnode-nomu's next release; to
+  release one sooner, raise rnode-nomu's patch version in the same PR. `crates/rnode-nomu/debian`
+  has the Debian package's copy of `contrib/rnode-nomu.service`;
+  `crates/rnode-nomu/tests/packaging.rs` keeps the two in step.
 - Changelog entries become GitHub release notes, where line breaks show: when you edit a
   changelog, keep each paragraph or list item on one line.
 - The release PR is opened with the `RELEASE_PLZ_TOKEN` secret, so that `PR / test` runs on it.

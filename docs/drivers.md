@@ -4,9 +4,9 @@ This guide explains why rnode-nomu separates radio drivers from the rest of the 
 `rnode_core::Radio` trait expects from a driver, and how to add support for a new modem. The two
 drivers in the workspace serve as worked examples:
 
-- [`crates/rnode-sx126x`](crates/rnode-sx126x): the real SX1262 driver, over `embedded-hal` SPI
+- [`crates/rnode-sx126x`](../crates/rnode-sx126x): the real SX1262 driver, over `embedded-hal` SPI
   and GPIO;
-- [`crates/rnode-sim`](crates/rnode-sim): a simulated radio that talks to other simulated radios
+- [`crates/rnode-sim`](../crates/rnode-sim): a simulated radio that talks to other simulated radios
   through Unix sockets.
 
 ## Contents
@@ -163,7 +163,7 @@ daemon, and out of `rnode-core`.
 ## The Radio trait
 
 The trait is defined in
-[`crates/rnode-core/src/radio.rs`](crates/rnode-core/src/radio.rs):
+[`crates/rnode-core/src/radio.rs`](../crates/rnode-core/src/radio.rs):
 
 ```rust
 pub trait Radio {
@@ -377,9 +377,10 @@ Guidelines for driver authors:
 
 ## Interrupts and the event loop
 
-The daemon's event loop, [`crates/rnode-nomu/src/event_loop.rs`](crates/rnode-nomu/src/event_loop.rs),
-waits for three things with one `poll()`: bytes from the host on the PTY, the modem's interrupt,
-and the node's next wake-up time.
+The daemon's event loop,
+[`crates/rnode-nomu/src/event_loop.rs`](../crates/rnode-nomu/src/event_loop.rs), waits for three
+things with one `poll()`: bytes from the host on the PTY, the modem's interrupt, and the node's next
+wake-up time.
 
 ```mermaid
 flowchart TD
@@ -499,12 +500,12 @@ For a driver this means:
   does on the Heltec V4, belong to the platform or to the driver's configuration; the daemon
   ports neither.
 
-The daemon fills all of this from [`[radio.pa]`](README.md#radiopa), which also lists what is not
-ported, and the TX enable from [`[gpio] txen`](README.md#gpio).
+The daemon fills all of this from [`[radio.pa]`](configuration.md#radiopa), which also lists what is
+not ported, and the TX enable from [`[gpio] txen`](configuration.md#gpio).
 
 ## Worked example: rnode-sx126x
 
-[`crates/rnode-sx126x/src/lib.rs`](crates/rnode-sx126x/src/lib.rs) is the template for hardware
+[`crates/rnode-sx126x/src/lib.rs`](../crates/rnode-sx126x/src/lib.rs) is the template for hardware
 drivers. It mirrors RNode_Firmware v1.86 `sx126x.cpp` and cites the firmware function above each
 method.
 
@@ -587,15 +588,15 @@ sequenceDiagram
   never drives RXEN low, which the driver keeps when TXEN is absent; the firmware's SX1280 driver
   raises TXEN before it lowers RXEN.
 
-**Tests.** [`crates/rnode-sx126x/src/tests.rs`](crates/rnode-sx126x/src/tests.rs) checks the
+**Tests.** [`crates/rnode-sx126x/src/tests.rs`](../crates/rnode-sx126x/src/tests.rs) checks the
 exact bytes of every command against the firmware with a mocked bus; see
 [Testing a driver](#testing-a-driver).
-[`crates/rnode-sx126x/tests/rf_switch.rs`](crates/rnode-sx126x/tests/rf_switch.rs) logs the SPI
+[`crates/rnode-sx126x/tests/rf_switch.rs`](../crates/rnode-sx126x/tests/rf_switch.rs) logs the SPI
 commands and the levels of RXEN and TXEN in one sequence, to pin where the lines switch.
 
 ## Worked example: rnode-sim
 
-[`crates/rnode-sim/src/lib.rs`](crates/rnode-sim/src/lib.rs) implements the same trait with no
+[`crates/rnode-sim/src/lib.rs`](../crates/rnode-sim/src/lib.rs) implements the same trait with no
 hardware at all, which shows how little of the trait is about SPI:
 
 - `SimRadio::new(SimConfig)` binds the Unix datagram socket `<air_dir>/<node_name>.sock` and starts
@@ -618,12 +619,11 @@ hardware at all, which shows how little of the trait is about SPI:
 frames: `inject_begin_failures()`, `inject_next_tx_error()`, `inject_next_timeout()`,
 `inject_dcd_errors()`, `inject_rssi_errors()`, `inject_rx_errors()`, `inject_setter_errors()`,
 `inject_preamble_length_errors()`, `inject_rx()` and `inject_rx_crc_error()`, and it can clamp the
-TX power like a modem with `set_tx_power_range()`. Each injected failure
-is the worst case for `Node`: a setter failure from `inject_setter_errors()` applies the value
-before it fails, so `Node` has to put the old one back, while a preamble-length failure leaves the
-old length, so `Node` has to try again. Use it to test how `Node` reacts to driver behaviour
-without writing a mock radio, as the tests in [`crates/rnode-core/tests`](crates/rnode-core/tests)
-do.
+TX power like a modem with `set_tx_power_range()`. Each injected failure is the worst case for
+`Node`: a setter failure from `inject_setter_errors()` applies the value before it fails, so `Node`
+has to put the old one back, while a preamble-length failure leaves the old length, so `Node` has to
+try again. Use it to test how `Node` reacts to driver behaviour without writing a mock radio, as the
+tests in [`crates/rnode-core/tests`](../crates/rnode-core/tests) do.
 
 ## Testing a driver
 
@@ -721,7 +721,7 @@ programs the wrong register.
 - carrier detect, including stale-preamble expiry if your chip latches it.
 
 Unit tests that need private access go in `src/tests.rs` next to `lib.rs`, as
-[AGENTS.md](AGENTS.md) describes; tests through the public API go in `tests/<topic>.rs`.
+[AGENTS.md](../AGENTS.md) describes; tests through the public API go in `tests/<topic>.rs`.
 
 ## Adding a new radio: an SX127x driver
 
@@ -1141,7 +1141,7 @@ fn frequency_is_programmed_like_the_firmware() {
 
 Then run the driver through `Node` with `rnode_core::MemoryStorage`, feeding KISS bytes into
 `handle_host_input()` as the event-loop tests in
-[`crates/rnode-nomu/tests/event_loop.rs`](crates/rnode-nomu/tests/event_loop.rs) do with a test
+[`crates/rnode-nomu/tests/event_loop.rs`](../crates/rnode-nomu/tests/event_loop.rs) do with a test
 radio, to check that startup and retuning reach your driver in the expected order.
 
 ## Wiring a driver into the daemon
@@ -1150,9 +1150,9 @@ A driver crate does nothing until the daemon can select it. Wiring an SX127x in 
 places:
 
 1. **Dependency.** Add `rnode-sx127x = { path = "../rnode-sx127x" }` to
-   [`crates/rnode-nomu/Cargo.toml`](crates/rnode-nomu/Cargo.toml).
+   [`crates/rnode-nomu/Cargo.toml`](../crates/rnode-nomu/Cargo.toml).
 
-2. **The driver name.** In [`crates/rnode-nomu/src/config.rs`](crates/rnode-nomu/src/config.rs),
+2. **The driver name.** In [`crates/rnode-nomu/src/config.rs`](../crates/rnode-nomu/src/config.rs),
    add a variant to `RadioDriver`, its spelling to the hand-written `Deserialize` implementation
    and its error message, and to `Display`:
 
@@ -1210,7 +1210,7 @@ places:
    `[gpio]`, and check the driver's own values. Hardware errors that config parsing cannot see
    belong in the driver.
 
-6. **Construction.** In [`crates/rnode-nomu/src/main.rs`](crates/rnode-nomu/src/main.rs), add
+6. **Construction.** In [`crates/rnode-nomu/src/main.rs`](../crates/rnode-nomu/src/main.rs), add
    an arm to both `run_daemon()` functions (the non-Linux one returns an error, as for the SX1262)
    and a constructor next to `run_sx1262()`:
 
@@ -1236,23 +1236,23 @@ places:
    serial number of the EEPROM image that `rnodeconf` reads.
 
 7. **Examples and tests.** Add a commented `[radio.sx127x]` section to
-   [`config.example.toml`](config.example.toml), and maybe a board file like
-   [`config.uconsole-aio-v2.toml`](config.uconsole-aio-v2.toml). Extend
-   [`crates/rnode-nomu/tests/config.rs`](crates/rnode-nomu/tests/config.rs)
+   [`config.example.toml`](../config.example.toml), and maybe a board file like
+   [`config.uconsole-aio-v2.toml`](../config.uconsole-aio-v2.toml). Extend
+   [`crates/rnode-nomu/tests/config.rs`](../crates/rnode-nomu/tests/config.rs)
    with the new defaults and validation errors.
 
-8. **Documentation.** Add the keys to the [configuration reference](README.md#configuration-reference),
-   the wiring to [Setting up the LoRa hardware](README.md#setting-up-the-lora-hardware), and any
-   deliberate firmware differences to
-   [Differences from RNode_Firmware](README.md#differences-from-rnode_firmware). The
-   `docs_examples` test parses every daemon config in README.md and DRIVERS.md with the real
-   loader; mark other TOML, such as the hypothetical config in step 3, with ```` ```toml ignore ````.
+8. **Documentation.** Add the keys to the [configuration reference](configuration.md), the wiring to
+   [Setting up the LoRa hardware](hardware.md), and any deliberate firmware differences to
+   [Differences from RNode_Firmware](how-it-works.md#differences-from-rnode_firmware). The
+   `docs_examples` test parses every daemon config in the README and the guides in `docs/` with the
+   real loader; mark other TOML, such as the hypothetical config in step 3, with
+   ```` ```toml ignore ````.
 
 ## Validating on hardware
 
 Use a legal frequency, low power and an antenna or dummy load. For the uConsole AIO V2, the
-[hardware test tools](README.md#hardware-test-tools) in [`tools/hwtest`](tools/hwtest) do most of
-this for the SX1262; a new driver deserves a similar bring-up tool. Check:
+[hardware test tools](development.md#hardware-test-tools) in [`tools/hwtest`](../tools/hwtest) do
+most of this for the SX1262; a new driver deserves a similar bring-up tool. Check:
 
 1. detection and reset recovery, including `end()` followed by `begin()`;
 2. idle RSSI near the noise floor and `dcd()` false on a quiet channel;

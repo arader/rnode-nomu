@@ -1,7 +1,7 @@
 # release-plz keeps a release pull request open with the next version and changelog of every crate
 # changed since its last release, and releases the crates when that pull request is merged
-# (.github/workflows/release.yml). README.md ("Releases and versions") and AGENTS.md ("Versions
-# and releases") describe the process.
+# (.github/workflows/release.yml). docs/releases.md and AGENTS.md ("Versions and releases")
+# describe the process.
 
 [workspace]
 # Versions come from git tags, not from crates.io: nothing is published there.
@@ -68,7 +68,7 @@ git_release_body = """
 - `rnode-nomu_arm64.deb`: the Debian package for arm64, such as 64-bit Raspberry Pi OS on the uConsole CM5.
 - `rnode-nomu-aarch64-unknown-linux-gnu.tar.gz` and `rnode-nomu-x86_64-unknown-linux-gnu.tar.gz`: the daemon for arm64 and x86-64 Linux, with its systemd unit, the example configs and the licenses.
 
-[Installing a release](https://github.com/arader/rnode-nomu#installing-a-release) explains both.
+[Installing a release](https://github.com/arader/rnode-nomu/blob/rnode-nomu-v{{ version }}/docs/installing.md#installing-a-release) explains both.
 """
 
 [[package]]

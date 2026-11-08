@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license = "GPL-3.0-or-later AND MIT"
 repository.workspace = true
-# Not on crates.io (README.md, "Releases and versions").
+# Not on crates.io (docs/releases.md).
 publish = false
 description = "Portable embedded-hal SX1262 driver for RNode"
 
