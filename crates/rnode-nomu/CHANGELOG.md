@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/arader/rnode-nomu/compare/rnode-nomu-v0.3.0...rnode-nomu-v0.3.1) - 2026-11-08
+
+### Changed
+
+- Split the README into guides in docs/; the quick start installs the release ([#7](https://github.com/arader/rnode-nomu/pull/7))
+
 ## [0.3.0](https://github.com/arader/rnode-nomu/releases/tag/rnode-nomu-v0.3.0)
 
 The first release. Until November 2026 the project was developed as rnode-linux 0.2.0 on a private Forgejo instance; this version is that code, renamed and moved to GitHub.
