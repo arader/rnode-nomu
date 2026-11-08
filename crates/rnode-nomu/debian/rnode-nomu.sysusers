@@ -1,0 +1,3 @@
+# The account rnode-nomu.service runs as, with a group of the same name. systemd-sysusers creates
+# it when the package is installed, unless it exists already.
+u rnode - "rnode-nomu daemon" /var/lib/rnode

@@ -1,6 +1,5 @@
 [package]
 name = "xtask"
-version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,7 +11,7 @@ workspace = true
 
 [dependencies]
 # The airtime of the longest packet, to size the wait for the daemons to exit.
-rnode-core = { path = "../rnode-core" }
+rnode-core.workspace = true
 
 [dev-dependencies]
 # Checks the daemon configs the harness writes with the daemon's own parser.

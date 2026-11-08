@@ -1,0 +1,76 @@
+# release-plz keeps a release pull request open with the next version and changelog of every crate
+# changed since its last release, and releases the crates when that pull request is merged
+# (.github/workflows/release.yml). README.md ("Releases and versions") and AGENTS.md ("Versions
+# and releases") describe the process.
+
+[workspace]
+# Versions come from git tags, not from crates.io: nothing is published there.
+git_only = true
+git_tag_name = "{{ package }}-v{{ version }}"
+# Release only when a release pull request, from a branch starting with release-plz-, is merged.
+# Other pull requests may bump a version by hand (AGENTS.md) without releasing it.
+release_always = false
+# Libraries get a tag and a changelog entry, no GitHub release; rnode-nomu enables it below.
+git_release_enable = false
+# cargo-semver-checks compares with the version on crates.io, where these crates are not.
+semver_check = false
+
+[changelog]
+# Pull requests are squash-merged, so each commit on main is one pull request, titled with a
+# sentence in the imperative ("Add …", "Fix …"). The first word picks the section, and the comments
+# in the group names put the sections in Keep a Changelog's order.
+commit_parsers = [
+    # release-plz's own release pull requests.
+    { message = "^chore(\\(.+\\))?: release", skip = true },
+    { message = "^(?i)(add|support|implement)\\b", group = "<!-- 0 -->Added" },
+    { message = "^(?i)deprecate", group = "<!-- 2 -->Deprecated" },
+    { message = "^(?i)(remove|drop)\\b", group = "<!-- 3 -->Removed" },
+    { message = "^(?i)fix", group = "<!-- 4 -->Fixed" },
+    { message = ".*", group = "<!-- 1 -->Changed" },
+]
+# Link the pull request that GitHub appends to a squash-merged title. release-plz keeps only the
+# first line of most commit messages, but all of a conventional one (`fix: …`), so `$` has to
+# match at the end of a line (?m), not only at the end of the message.
+commit_preprocessors = [
+    { pattern = "(?m)\\(#(\\d+)\\)$", replace = "([#${1}](https://github.com/arader/rnode-nomu/pull/${1}))" },
+]
+# release-plz's default body with the sections above, and only the first line of each commit
+# message: the rest is the pull request's description.
+body = """
+
+## [{{ version }}]\
+    {%- if release_link -%}\
+        ({{ release_link }})\
+    {% endif %} \
+    - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+
+{% for commit in commits -%}
+- {{ commit.message | split(pat="\n") | first | trim }}
+{% endfor -%}
+{% endfor %}
+"""
+
+[[package]]
+name = "rnode-nomu"
+# The daemon's changelog also lists the changes of the libraries compiled into it.
+changelog_include = ["rnode-core", "rnode-sx126x", "rnode-sim"]
+git_release_enable = true
+# The release workflow attaches the binaries and the Debian package, then publishes the release.
+git_release_draft = true
+git_release_name = "rnode-nomu {{ version }}"
+git_release_body = """
+{{ changelog }}
+
+### Downloads
+
+- `rnode-nomu_arm64.deb`: the Debian package for arm64, such as 64-bit Raspberry Pi OS on the uConsole CM5.
+- `rnode-nomu-aarch64-unknown-linux-gnu.tar.gz` and `rnode-nomu-x86_64-unknown-linux-gnu.tar.gz`: the daemon for arm64 and x86-64 Linux, with its systemd unit, the example configs and the licenses.
+
+[Installing a release](https://github.com/arader/rnode-nomu#installing-a-release) explains both.
+"""
+
+[[package]]
+name = "xtask"
+release = false

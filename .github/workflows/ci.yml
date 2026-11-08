@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: "3.13"
       # A pinned Rust, so that a new release's lints cannot fail CI by themselves. pr.yml has the
-      # same step: bump both together.
+      # same step, and release.yml builds releases with it: bump all three together.
       - name: Toolchain
         run: |
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy

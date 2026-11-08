@@ -1,10 +1,12 @@
 [package]
 name = "rnode-sim"
-version.workspace = true
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# Not on crates.io (README.md, "Releases and versions").
+publish = false
 description = "Multi-process simulated LoRa radio for rnode-nomu tests"
 
 [lints]
@@ -12,4 +14,4 @@ workspace = true
 
 [dependencies]
 log = "0.4"
-rnode-core = { path = "../rnode-core" }
+rnode-core.workspace = true

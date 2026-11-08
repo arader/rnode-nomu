@@ -355,17 +355,37 @@ fn the_venv_marker_changes_with_the_requirements() {
 
 const PR_WORKFLOW: &str = include_str!("../../../.github/workflows/pr.yml");
 const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+const RELEASE_WORKFLOW: &str = include_str!("../../../.github/workflows/release.yml");
 
-/// The lines of the step called `name` in `workflow`, from its `- name:` line to the next step,
+/// The lines of each step called `name` in `workflow`, from its `- name:` line to the next step,
 /// the comment above that, or the next job.
-fn workflow_step<'a>(workflow: &'a str, name: &str) -> Vec<&'a str> {
+fn workflow_steps<'a>(workflow: &'a str, name: &str) -> Vec<Vec<&'a str>> {
     let header = format!("- name: {name}");
-    let mut lines = workflow.lines().skip_while(|line| line.trim() != header);
-    let first = lines.next().unwrap_or_else(|| panic!("no step {name:?}"));
+    let lines: Vec<&str> = workflow.lines().collect();
     let indent = |line: &str| line.len() - line.trim_start().len();
-    std::iter::once(first)
-        .chain(lines.take_while(|line| line.trim().is_empty() || indent(line) > indent(first)))
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.trim() == header)
+        .map(|(i, &first)| {
+            std::iter::once(first)
+                .chain(
+                    lines[i + 1..]
+                        .iter()
+                        .copied()
+                        .take_while(|line| line.trim().is_empty() || indent(line) > indent(first)),
+                )
+                .collect()
+        })
         .collect()
+}
+
+/// The lines of the first step called `name` in `workflow`.
+fn workflow_step<'a>(workflow: &'a str, name: &str) -> Vec<&'a str> {
+    workflow_steps(workflow, name)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no step {name:?}"))
 }
 
 /// The names of the steps of the `test` job in `workflow`.
@@ -400,6 +420,18 @@ fn main_runs_every_check_pull_requests_run() {
         );
     }
     assert!(ci_steps.contains(&"RNS end-to-end (all scenarios)"), "{ci_steps:?}");
+}
+
+/// Releases are built with the Rust that pull requests are tested with: the release, release-pr
+/// and binaries jobs of release.yml install it with pr.yml's step.
+#[test]
+fn release_workflow_installs_the_tested_rust() {
+    let toolchain = workflow_step(PR_WORKFLOW, "Toolchain");
+    let steps = workflow_steps(RELEASE_WORKFLOW, "Toolchain");
+    assert_eq!(steps.len(), 3, "release.yml has three jobs that run cargo");
+    for step in steps {
+        assert_eq!(step, toolchain);
+    }
 }
 
 /// pr.yml and ci.yml install uv with the same step, so that the pinned release and its hashes
