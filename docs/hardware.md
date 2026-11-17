@@ -1,5 +1,8 @@
 # Setting up the LoRa hardware
 
+The [hardware list](hardware-list.md) shows which boards and modules work and how far each has
+been tested. This guide sets one up.
+
 ## What the daemon needs from the board
 
 The `sx1262` driver talks to the modem through one spidev device and up to six GPIO lines on one

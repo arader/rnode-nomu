@@ -10,7 +10,9 @@ the air, rnode-nomu interoperates with real RNodes.
 The supported modem is the Semtech SX1262, optionally with a power amplifier after it (not yet
 tested on such hardware). The reference platform is the Clockwork uConsole (CM5) with the
 HackerGadgets AIO V2 extension board. A simulated radio lets you run everything, including
-Reticulum end-to-end tests, on any Linux or macOS machine without radio hardware.
+Reticulum end-to-end tests, on any Linux or macOS machine without radio hardware. The
+[hardware list](docs/hardware-list.md) shows which hardware works, with or without rnode-nomu, and
+how far each has been tested.
 
 Behaviour follows [RNode_Firmware](https://github.com/markqvist/RNode_Firmware) v1.86 (commit
 `56775c5`) wherever a host or another radio can observe it. The deliberate differences are listed in
@@ -166,6 +168,8 @@ for giving other accounts access.
 
 - [Installing](docs/installing.md): the release files, the Debian package, updates, and building
   from source.
+- [Hardware list](docs/hardware-list.md): which LoRa hardware works with or without rnode-nomu, and
+  how far each has been tested.
 - [Setting up the LoRa hardware](docs/hardware.md): what the daemon needs from a board, the uConsole
   with the AIO V2 or V1, and mapping your own board.
 - [Configuration reference](docs/configuration.md): every key of the config file, the checks at
