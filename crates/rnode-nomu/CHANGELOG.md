@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/arader/rnode-nomu/compare/rnode-nomu-v0.3.1...rnode-nomu-v0.3.2) - 2026-11-20
+
+### Changed
+
+- add a hardware list ([#11](https://github.com/arader/rnode-nomu/pull/11))
+
 ## [0.3.1](https://github.com/arader/rnode-nomu/compare/rnode-nomu-v0.3.0...rnode-nomu-v0.3.1) - 2026-11-08
 
 ### Changed
