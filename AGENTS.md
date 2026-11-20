@@ -25,8 +25,8 @@ with real RNodes.
 - `tools/hwtest` — hardware bring-up, SDR analysis and an over-the-air LXMF echo test against a
   real RNode (`lxmf_echo_ota.py`) for the reference board, outside the workspace.
 - `README.md` — the summary and the quick start; `docs/` — the guides it links, for users
-  (installing, hardware, configuration, running, Reticulum, logging, troubleshooting) and for
-  developers (how it works, development, drivers, releases).
+  (installing, the hardware list, hardware setup, configuration, running, Reticulum, logging,
+  troubleshooting) and for developers (how it works, development, drivers, releases).
 
 Every crate's tests follow the Test layout section below.
 
@@ -136,3 +136,7 @@ enables the LoRa power rail, which the reference unit's `config.txt` turns off a
 The AIO V1 has the same radio without the power rail (`config.uconsole-aio-v1.toml`). It has not
 been tested on hardware, so keep it in step with the V2 config; `tests/config.rs` checks that the
 two differ only in the GPIO chip's name and the power rail.
+
+`docs/hardware-list.md` lists the hardware that works with or without rnode-nomu and how far each
+has been tested. Update it with every change to what the daemon supports (a driver, a board
+config) and with every hardware test result.
